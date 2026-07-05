@@ -1,0 +1,10 @@
+# Build output
+bin/
+obj/
+
+# Game-derived interop assemblies (proprietary — regenerate with setup-libs.bat)
+lib/
+
+# Local tooling
+.claude/
+*.user

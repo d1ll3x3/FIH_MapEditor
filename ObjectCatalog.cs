@@ -1,0 +1,561 @@
+using System;
+using System.Collections.Generic;
+using System.Text;
+using Il2CppInterop.Runtime;
+using UnityEngine;
+using UnityEngine.SceneManagement;
+
+namespace FIHMapEditor
+{
+    public class CatalogEntry
+    {
+        public string DisplayName;
+        public string SourcePath;     // stable hierarchy path (see BuildPath)
+        public string Category;
+        public Vector3 BoundsSize;
+        public GameObject Source;     // live reference; re-resolved by path when destroyed
+        public int InstanceCount;     // how many identical objects the scan found
+    }
+
+    // A collider-less scene object: physics raycasts can't hit it, so clicking it is
+    // resolved against this cached AABB instead. Originals never move → bounds cached.
+    public class DecorPickable
+    {
+        public GameObject Root;
+        public Bounds Bounds;
+    }
+
+    // Scans the loaded level scene plus the prefab assets Unity has loaded from the
+    // game files, and builds the catalog of clonable objects.
+    public class ObjectCatalog
+    {
+        public const string CLONE_MARKER = "[FIH]";
+
+        // SourcePath prefix for entries that come from prefab assets (game files)
+        // instead of the scene hierarchy.
+        public const string ASSET_PREFIX = "asset://";
+        public const string ASSET_CATEGORY = "GameFiles";
+
+        public List<CatalogEntry> Entries { get; } = new List<CatalogEntry>();
+        public List<string> Categories { get; } = new List<string>();
+        public List<DecorPickable> ColliderlessRoots { get; } = new List<DecorPickable>();
+        public bool HasScanned { get; private set; }
+
+        private readonly GameObjectFinder _finder;
+
+        // Anything bigger than this on any axis is level-chunk scale, listed under "Large".
+        private const float LARGE_BOUNDS = 60f;
+
+        public ObjectCatalog(GameObjectFinder finder)
+        {
+            _finder = finder;
+        }
+
+        public void Clear()
+        {
+            Entries.Clear();
+            Categories.Clear();
+            ColliderlessRoots.Clear();
+            HasScanned = false;
+        }
+
+        public void Scan()
+        {
+            Entries.Clear();
+            Categories.Clear();
+            ColliderlessRoots.Clear();
+
+            try
+            {
+                var playerRoot = _finder.FindPlayer()?.transform?.root;
+                var seen = new Dictionary<string, CatalogEntry>(); // dedupe key → entry
+                var visitedRoots = new HashSet<int>();
+                var wrapperCache = new Dictionary<int, int>();     // transform id → renderable child count
+
+                var colliders = UnityEngine.Object.FindObjectsOfType<Collider>();
+                foreach (var col in colliders)
+                {
+                    if (col == null) continue;
+                    var t = col.transform;
+                    if (t == null) continue;
+
+                    var root = FindCandidateRoot(t, wrapperCache);
+                    if (root == null) continue;
+                    if (!visitedRoots.Add(root.GetInstanceID())) continue;
+                    if (!IsValidCandidate(root, playerRoot)) continue;
+
+                    var bounds = ComputeBounds(root.gameObject);
+                    if (bounds.size == Vector3.zero) continue; // no renderers → invisible, skip
+
+                    string display = CleanName(root.name);
+                    string meshName = FirstMeshName(root.gameObject);
+                    string key = display + "|" + meshName;
+
+                    if (seen.TryGetValue(key, out var existing))
+                    {
+                        existing.InstanceCount++;
+                        continue;
+                    }
+
+                    var entry = new CatalogEntry
+                    {
+                        DisplayName = display,
+                        SourcePath = BuildPath(root),
+                        Source = root.gameObject,
+                        BoundsSize = bounds.size,
+                        InstanceCount = 1,
+                        Category = Categorize(display, bounds.size),
+                    };
+                    seen[key] = entry;
+                    Entries.Add(entry);
+                }
+
+                // Renderer-only pass: pure decoration (no collider anywhere) never shows
+                // up in the collider sweep and physics raycasts can't select it. Catalog
+                // it here and remember each instance's AABB for bounds-based picking.
+                var renderers = UnityEngine.Object.FindObjectsOfType<Renderer>();
+                foreach (var r in renderers)
+                {
+                    if (r == null) continue;
+                    var t = r.transform;
+                    if (t == null) continue;
+
+                    var root = FindCandidateRoot(t, wrapperCache);
+                    if (root == null) continue;
+                    if (!visitedRoots.Add(root.GetInstanceID())) continue;
+                    if (!IsValidCandidate(root, playerRoot)) continue;
+
+                    var bounds = ComputeBounds(root.gameObject);
+                    if (bounds.size == Vector3.zero) continue;
+
+                    bool hasCollider = root.GetComponentInChildren<Collider>(true) != null;
+                    if (!hasCollider)
+                        ColliderlessRoots.Add(new DecorPickable { Root = root.gameObject, Bounds = bounds });
+
+                    string display = CleanName(root.name);
+                    string key = display + "|" + FirstMeshName(root.gameObject);
+                    if (seen.TryGetValue(key, out var existing))
+                    {
+                        existing.InstanceCount++;
+                        continue;
+                    }
+
+                    seen[key] = new CatalogEntry
+                    {
+                        DisplayName = display,
+                        SourcePath = BuildPath(root),
+                        Source = root.gameObject,
+                        BoundsSize = bounds.size,
+                        InstanceCount = 1,
+                        Category = hasCollider ? Categorize(display, bounds.size) : "Decor",
+                    };
+                    Entries.Add(seen[key]);
+                }
+
+                ScanPrefabAssets(seen);
+
+                Entries.Sort((a, b) => string.CompareOrdinal(a.DisplayName, b.DisplayName));
+
+                foreach (var e in Entries)
+                    if (!Categories.Contains(e.Category)) Categories.Add(e.Category);
+                Categories.Sort();
+
+                HasScanned = true;
+                MapEditorPlugin.Logger.LogInfo($"[CATALOG] Scan found {Entries.Count} unique objects ({colliders.Length} colliders examined).");
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogError($"[CATALOG] Scan error: {ex}");
+            }
+        }
+
+        // Second scan source: prefab assets loaded from the game files. These are not in
+        // any scene — the level references them, Unity keeps them in memory, and
+        // Resources.FindObjectsOfTypeAll sees them. Only prefabs Unity has actually
+        // loaded appear here; unreferenced bundles on disk do not.
+        private void ScanPrefabAssets(Dictionary<string, CatalogEntry> seen)
+        {
+            try
+            {
+                var all = Resources.FindObjectsOfTypeAll(Il2CppType.Of<GameObject>());
+                int added = 0;
+                foreach (var obj in all)
+                {
+                    var go = obj?.TryCast<GameObject>();
+                    if (go == null) continue;
+                    if (go.scene.IsValid()) continue;                // scene objects: already scanned
+                    if (go.transform.parent != null) continue;       // prefab roots only
+                    if ((go.hideFlags & HideFlags.HideAndDontSave) != 0) continue;
+                    if (go.name.Contains(CLONE_MARKER)) continue;
+                    if (!IsValidPrefabCandidate(go)) continue;
+
+                    var bounds = ComputeAssetBounds(go);
+                    if (bounds.size == Vector3.zero) continue;
+
+                    string display = CleanName(go.name);
+                    string key = display + "|" + FirstMeshName(go);
+                    if (seen.ContainsKey(key)) continue;             // same object exists in the scene
+
+                    var entry = new CatalogEntry
+                    {
+                        DisplayName = display,
+                        SourcePath = ASSET_PREFIX + go.name,
+                        Source = go,
+                        BoundsSize = bounds.size,
+                        InstanceCount = 1,
+                        Category = ASSET_CATEGORY,
+                    };
+                    seen[key] = entry;
+                    Entries.Add(entry);
+                    added++;
+                }
+                MapEditorPlugin.Logger.LogInfo($"[CATALOG] Prefab-asset scan added {added} entries from game files.");
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[CATALOG] Prefab-asset scan failed: {ex.Message}");
+            }
+        }
+
+        private bool IsValidPrefabCandidate(GameObject go)
+        {
+            if (go.GetComponentInChildren<Renderer>(true) == null) return false;
+            if (go.GetComponentInChildren<Camera>(true) != null) return false;
+            if (go.GetComponentInChildren<AudioListener>(true) != null) return false;
+            if (go.GetComponentInChildren<Canvas>(true) != null) return false;
+            try
+            {
+                foreach (var mb in go.GetComponentsInChildren<MonoBehaviour>(true))
+                {
+                    if (mb == null) continue;
+                    var typeName = mb.GetIl2CppType()?.Name;
+                    if (typeName == "PlayerNetworked" || typeName == "NetworkManager") return false;
+                }
+            }
+            catch { }
+            return true;
+        }
+
+        // Renderer.bounds is unreliable on inactive prefab assets; approximate from the
+        // shared meshes instead (rotation ignored — good enough for catalog sizing).
+        private static Bounds ComputeAssetBounds(GameObject go)
+        {
+            bool has = false;
+            Bounds bounds = new Bounds(Vector3.zero, Vector3.zero);
+            try
+            {
+                foreach (var mf in go.GetComponentsInChildren<MeshFilter>(true))
+                {
+                    if (mf == null || mf.sharedMesh == null) continue;
+                    var b = mf.sharedMesh.bounds;
+                    Vector3 center = mf.transform.TransformPoint(b.center);
+                    Vector3 scale = mf.transform.lossyScale;
+                    Vector3 size = new Vector3(Mathf.Abs(b.size.x * scale.x),
+                                               Mathf.Abs(b.size.y * scale.y),
+                                               Mathf.Abs(b.size.z * scale.z));
+                    var wb = new Bounds(center, size);
+                    if (!has) { bounds = wb; has = true; }
+                    else bounds.Encapsulate(wb);
+                }
+            }
+            catch { }
+            return has ? bounds : new Bounds(Vector3.zero, Vector3.zero);
+        }
+
+        // Re-find a prefab asset by name (used when a stored map references an asset
+        // entry, or when Unity unloaded and re-loaded assets between sessions).
+        private static GameObject FindPrefabAssetByName(string name)
+        {
+            try
+            {
+                var all = Resources.FindObjectsOfTypeAll(Il2CppType.Of<GameObject>());
+                foreach (var obj in all)
+                {
+                    var go = obj?.TryCast<GameObject>();
+                    if (go == null) continue;
+                    if (go.scene.IsValid()) continue;
+                    if (go.transform.parent != null) continue;
+                    if (go.name == name) return go;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        // Climb from a collider to the object's logical root: keep climbing while the parent
+        // is a pure wrapper (no renderer/collider of its own, exactly one renderable branch).
+        // Containers with many renderable children stop the climb.
+        private Transform FindCandidateRoot(Transform t, Dictionary<int, int> wrapperCache)
+        {
+            var root = t;
+            while (root.parent != null)
+            {
+                var p = root.parent;
+                if (p.GetComponent<Renderer>() != null || p.GetComponent<Collider>() != null)
+                {
+                    root = p;
+                    continue;
+                }
+                if (CountRenderableChildren(p, wrapperCache) == 1)
+                {
+                    root = p;
+                    continue;
+                }
+                break;
+            }
+            return root;
+        }
+
+        private int CountRenderableChildren(Transform p, Dictionary<int, int> cache)
+        {
+            int id = p.GetInstanceID();
+            if (cache.TryGetValue(id, out int cached)) return cached;
+
+            int count = 0;
+            for (int i = 0; i < p.childCount; i++)
+            {
+                var child = p.GetChild(i);
+                if (child.GetComponentInChildren<Renderer>(true) != null ||
+                    child.GetComponentInChildren<Collider>(true) != null)
+                    count++;
+                if (count > 1) break;
+            }
+            cache[id] = count;
+            return count;
+        }
+
+        private bool IsValidCandidate(Transform root, Transform playerRoot)
+        {
+            if (root == null) return false;
+            var go = root.gameObject;
+            if (!go.activeInHierarchy) return false;
+            if (go.name.Contains(CLONE_MARKER)) return false;
+            if (go.name == "FIH_MapObjectsRoot" || go.name == "FIH_SpawnRoot") return false;
+            if (playerRoot != null && root.root == playerRoot) return false;
+
+            // Skip anything that is (or carries) gameplay-critical machinery.
+            if (go.GetComponentInChildren<Camera>(true) != null) return false;
+            if (go.GetComponentInChildren<AudioListener>(true) != null) return false;
+            if (go.GetComponentInChildren<Canvas>(true) != null) return false;
+
+            // Skip other players / networked characters
+            try
+            {
+                foreach (var mb in go.GetComponentsInChildren<MonoBehaviour>(true))
+                {
+                    if (mb == null) continue;
+                    var typeName = mb.GetIl2CppType()?.Name;
+                    if (typeName == "PlayerNetworked" || typeName == "NetworkManager") return false;
+                }
+            }
+            catch { }
+
+            return true;
+        }
+
+        public static Bounds ComputeBounds(GameObject go)
+        {
+            var renderers = go.GetComponentsInChildren<Renderer>(false);
+            bool has = false;
+            Bounds bounds = new Bounds(go.transform.position, Vector3.zero);
+            foreach (var r in renderers)
+            {
+                if (r == null || !r.enabled) continue;
+                if (!has) { bounds = r.bounds; has = true; }
+                else bounds.Encapsulate(r.bounds);
+            }
+            return has ? bounds : new Bounds(go.transform.position, Vector3.zero);
+        }
+
+        private static string FirstMeshName(GameObject go)
+        {
+            try
+            {
+                var mf = go.GetComponentInChildren<MeshFilter>(true);
+                if (mf != null && mf.sharedMesh != null) return mf.sharedMesh.name;
+            }
+            catch { }
+            return "";
+        }
+
+        // Strip "(1)" style clone suffixes so identical objects dedupe together.
+        public static string CleanName(string name)
+        {
+            name = name.Trim();
+            int paren = name.LastIndexOf(" (", StringComparison.Ordinal);
+            if (paren > 0 && name.EndsWith(")"))
+            {
+                string inner = name.Substring(paren + 2, name.Length - paren - 3);
+                bool digits = inner.Length > 0;
+                foreach (char c in inner) if (!char.IsDigit(c)) { digits = false; break; }
+                if (digits) name = name.Substring(0, paren);
+            }
+            return name;
+        }
+
+        private static string Categorize(string name, Vector3 size)
+        {
+            if (size.x > LARGE_BOUNDS || size.y > LARGE_BOUNDS || size.z > LARGE_BOUNDS)
+                return "Large";
+            string n = name.ToLowerInvariant();
+            if (n.Contains("ramp") || n.Contains("slope")) return "Ramps";
+            if (n.Contains("platform") || n.Contains("floor") || n.Contains("ground")) return "Platforms";
+            if (n.Contains("wall") || n.Contains("fence") || n.Contains("barrier")) return "Walls";
+            return "Props";
+        }
+
+        // ── Stable hierarchy paths ──────────────────────────────────────────
+
+        // "Environment/Chunk_03/Ramp_Wood_L#2" — #n disambiguates same-named siblings.
+        public static string BuildPath(Transform t)
+        {
+            var sb = new StringBuilder();
+            BuildPathRecursive(t, sb);
+            return sb.ToString();
+        }
+
+        private static void BuildPathRecursive(Transform t, StringBuilder sb)
+        {
+            if (t.parent != null)
+            {
+                BuildPathRecursive(t.parent, sb);
+                sb.Append('/');
+            }
+            sb.Append(t.name);
+            int index = SiblingIndexAmongSameName(t);
+            if (index > 0) sb.Append('#').Append(index);
+        }
+
+        private static int SiblingIndexAmongSameName(Transform t)
+        {
+            var parent = t.parent;
+            int index = 0;
+            if (parent == null)
+            {
+                var scene = t.gameObject.scene;
+                var roots = scene.GetRootGameObjects();
+                foreach (var r in roots)
+                {
+                    if (r.transform == t) return index;
+                    if (r.name == t.name) index++;
+                }
+                return 0;
+            }
+            for (int i = 0; i < parent.childCount; i++)
+            {
+                var child = parent.GetChild(i);
+                if (child == t) return index;
+                if (child.name == t.name) index++;
+            }
+            return 0;
+        }
+
+        // Resolve a stored path back to a scene object. Fallback chain:
+        // exact path → path ignoring #indices → catalog entry by leaf name.
+        public GameObject ResolveSource(string path, string sourceName)
+        {
+            if (!string.IsNullOrEmpty(path) && path.StartsWith(ASSET_PREFIX))
+            {
+                var asset = FindPrefabAssetByName(path.Substring(ASSET_PREFIX.Length));
+                if (asset != null) return asset;
+                path = null; // fall through to the name-based catalog lookup
+            }
+
+            if (!string.IsNullOrEmpty(path))
+            {
+                var exact = ResolvePath(path, exactIndices: true);
+                if (exact != null) return exact;
+
+                var loose = ResolvePath(path, exactIndices: false);
+                if (loose != null) return loose;
+            }
+
+            if (!string.IsNullOrEmpty(sourceName))
+            {
+                foreach (var e in Entries)
+                {
+                    if (e.DisplayName == CleanName(sourceName))
+                    {
+                        var src = GetLiveSource(e);
+                        if (src != null) return src;
+                    }
+                }
+            }
+            return null;
+        }
+
+        public GameObject GetLiveSource(CatalogEntry entry)
+        {
+            if (entry.Source != null) return entry.Source;
+            if (entry.SourcePath != null && entry.SourcePath.StartsWith(ASSET_PREFIX))
+                entry.Source = FindPrefabAssetByName(entry.SourcePath.Substring(ASSET_PREFIX.Length));
+            else
+                entry.Source = ResolvePath(entry.SourcePath, exactIndices: true)
+                            ?? ResolvePath(entry.SourcePath, exactIndices: false);
+            return entry.Source;
+        }
+
+        private static GameObject ResolvePath(string path, bool exactIndices)
+        {
+            try
+            {
+                var segments = path.Split('/');
+                var scene = SceneManager.GetActiveScene();
+                var roots = scene.GetRootGameObjects();
+
+                Transform current = null;
+                foreach (var segRaw in segments)
+                {
+                    ParseSegment(segRaw, out string name, out int index);
+                    if (!exactIndices) index = -1; // first match by name
+
+                    Transform next = null;
+                    if (current == null)
+                    {
+                        int seen = 0;
+                        foreach (var r in roots)
+                        {
+                            if (r.name != name) continue;
+                            if (index < 0 || seen == index) { next = r.transform; break; }
+                            seen++;
+                        }
+                    }
+                    else
+                    {
+                        int seen = 0;
+                        for (int i = 0; i < current.childCount; i++)
+                        {
+                            var child = current.GetChild(i);
+                            if (child.name != name) continue;
+                            if (index < 0 || seen == index) { next = child; break; }
+                            seen++;
+                        }
+                    }
+
+                    if (next == null) return null;
+                    current = next;
+                }
+                return current?.gameObject;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private static void ParseSegment(string seg, out string name, out int index)
+        {
+            index = 0;
+            int hash = seg.LastIndexOf('#');
+            if (hash >= 0 && hash < seg.Length - 1 && int.TryParse(seg.Substring(hash + 1), out int parsed))
+            {
+                name = seg.Substring(0, hash);
+                index = parsed;
+            }
+            else
+            {
+                name = seg;
+            }
+        }
+    }
+}
