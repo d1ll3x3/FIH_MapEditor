@@ -93,6 +93,19 @@ namespace FIHMapEditor
             NewBest = false;
         }
 
+        // R key: retry from the last collected coin, keeping the run timer going.
+        // Falls back to a full restart when no coin was collected yet (or the run
+        // is over). Shift+R always forces the full restart.
+        public void QuickRestart()
+        {
+            if (Timer == TimerState.Running && ActiveCheckpoint >= 0)
+            {
+                RespawnAtCheckpoint();
+                return;
+            }
+            RestartRun();
+        }
+
         public void Update()
         {
             if (Timer == TimerState.Idle) return;

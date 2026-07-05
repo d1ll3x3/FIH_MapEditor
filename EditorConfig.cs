@@ -35,6 +35,9 @@ namespace FIHMapEditor
 
         // Best run time per map name, in seconds (kept out of the shared map files).
         public Dictionary<string, double> BestTimes { get; set; } = new Dictionary<string, double>();
+
+        // Starred catalog entries (by display name) — survive rescans and sessions.
+        public List<string> FavoriteObjects { get; set; } = new List<string>();
     }
 
     public static class EditorConfig
@@ -55,12 +58,14 @@ namespace FIHMapEditor
 
                     if (Settings.Version < EditorSettings.CURRENT_VERSION)
                     {
-                        // Regenerate keybinds/settings but never lose the recorded best times.
+                        // Regenerate keybinds/settings but never lose best times or favorites.
                         var bestTimes = Settings.BestTimes;
+                        var favorites = Settings.FavoriteObjects;
                         Settings = new EditorSettings
                         {
                             Version = EditorSettings.CURRENT_VERSION,
                             BestTimes = bestTimes ?? new Dictionary<string, double>(),
+                            FavoriteObjects = favorites ?? new List<string>(),
                         };
                         Save();
                         MapEditorPlugin.Logger.LogInfo($"Config migrated to v{EditorSettings.CURRENT_VERSION}.");
@@ -82,10 +87,12 @@ namespace FIHMapEditor
         public static void ResetToDefaults()
         {
             var bestTimes = Settings.BestTimes;
+            var favorites = Settings.FavoriteObjects;
             Settings = new EditorSettings
             {
                 Version = EditorSettings.CURRENT_VERSION,
                 BestTimes = bestTimes ?? new Dictionary<string, double>(),
+                FavoriteObjects = favorites ?? new List<string>(),
             };
             Save();
         }

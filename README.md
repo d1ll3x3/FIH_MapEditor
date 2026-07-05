@@ -22,7 +22,8 @@ All main keys are rebindable from the **KEYS** tab of the menu.
 | `C` | Toggle between fly camera and free cursor (menu / selection) |
 | `F7` | Maps Hub (load / delete / new map) |
 | `P` | Toggle Editor ↔ Play mode |
-| `R` (in Play) | Restart the run |
+| `R` (in Play) | Retry from your last collected coin (timer keeps running) |
+| `Shift+R` (in Play) | Full restart: back to spawn, timer and coins reset |
 | `WASD` + `Space`/`Ctrl` (+`Shift` boost) | Fly |
 | Left click (free cursor) | Select object / place with Stamp / drag a gizmo axis |
 | `1` `2` `3` (free cursor) | Gizmo mode: Move / Rotate / Scale |
@@ -59,6 +60,10 @@ again to move the camera).
   to change the starting view. `Del` removes the selected marker.
 - **Play**: if the map has a spawn you appear there; the timer starts on your first
   movement and stops when you enter the goal zone. Best time per map is saved locally.
+
+In the CATALOG tab, click the **★** on any row to star it as a favorite: starred
+objects always sort to the top, the **★ Favs** filter shows only them, and they are
+remembered across sessions.
 
 ## Catalog sources
 

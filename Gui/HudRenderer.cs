@@ -103,7 +103,8 @@ namespace FIHMapEditor
             var pm = _c.PlayMode;
 
             DrawTopBanner(
-                $"PLAY — \"{_c.MapName}\"  |  [{EditorConfig.Settings.RestartRunKey}] restart  [{EditorConfig.Settings.TogglePlayKey}] editor");
+                $"PLAY — \"{_c.MapName}\"  |  [{EditorConfig.Settings.RestartRunKey}] retry (last coin)  " +
+                $"[Shift+{EditorConfig.Settings.RestartRunKey}] full restart  [{EditorConfig.Settings.TogglePlayKey}] editor");
 
             if (pm.Timer != TimerState.Idle)
             {

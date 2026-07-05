@@ -172,7 +172,10 @@ namespace FIHMapEditor
                     case EditorMode.Play:
                         PlayMode.Update();
                         if (acceptInput && Input.WasKeyPressed("restart", EditorConfig.Settings.RestartRunKey))
-                            PlayMode.RestartRun();
+                        {
+                            if (Input.IsShiftHeld()) PlayMode.RestartRun();   // full restart
+                            else PlayMode.QuickRestart();                     // last coin
+                        }
                         break;
                 }
 
@@ -840,7 +843,7 @@ namespace FIHMapEditor
                     RefreshSnapshot();
                     PlayMode.Enter(Spawn, Goal, BaseMode == MapBaseMode.Blank, MapName,
                         Checkpoints, ResetZones);
-                    ShowToast($"PLAY — {EditorConfig.Settings.RestartRunKey}: restart run, {EditorConfig.Settings.TogglePlayKey}: back to editor");
+                    ShowToast($"PLAY — {EditorConfig.Settings.RestartRunKey}: retry (last coin), Shift+{EditorConfig.Settings.RestartRunKey}: full restart, {EditorConfig.Settings.TogglePlayKey}: editor");
                 }
 
                 MapEditorPlugin.Logger.LogInfo($"[MODE] {old} → {newMode}");

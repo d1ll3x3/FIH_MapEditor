@@ -26,6 +26,7 @@ namespace FIHMapEditor
         private string _filter = "";
         private string _category = "";        // empty = all
         private bool _solidOnly = false;      // hide collider-less decoration (SM meshes...)
+        private bool _favsOnly = false;       // show starred entries only
         private int _catalogTop = 0;
         private const int CATALOG_ROWS = 15;
 
@@ -200,8 +201,11 @@ namespace FIHMapEditor
 
             // Category filter — wraps onto extra rows so no category is ever dropped.
             float cx = 15;
-            if (_win.ToggleButton(new Rect(cx, y, 60, 22), "All", _category == ""))
-                { _category = ""; _catalogTop = 0; }
+            if (_win.ToggleButton(new Rect(cx, y, 70, 22), "★ Favs", _favsOnly))
+                { _favsOnly = !_favsOnly; _catalogTop = 0; }
+            cx += 74;
+            if (_win.ToggleButton(new Rect(cx, y, 60, 22), "All", _category == "" && !_favsOnly))
+                { _category = ""; _favsOnly = false; _catalogTop = 0; }
             cx += 64;
             foreach (var cat in _c.Catalog.Categories)
             {
@@ -238,8 +242,14 @@ namespace FIHMapEditor
             for (int i = _catalogTop; i < entries.Count && i < _catalogTop + CATALOG_ROWS; i++)
             {
                 var e = entries[i];
+                bool fav = IsFavorite(e.DisplayName);
+                GUI.color = fav ? new Color(1f, 0.85f, 0.2f) : new Color(1f, 1f, 1f, 0.35f);
+                if (_win.Button(new Rect(16, ry + 1, 26, 22), "★"))
+                    ToggleFavorite(e.DisplayName);
+                GUI.color = Color.white;
+
                 string size = $"{e.BoundsSize.x:0.#}×{e.BoundsSize.y:0.#}×{e.BoundsSize.z:0.#}";
-                GUI.Label(new Rect(20, ry, 450, 24), $"{Truncate(e.DisplayName, 32)}  ({size})", _styleRow);
+                GUI.Label(new Rect(48, ry, 422, 24), $"{Truncate(e.DisplayName, 30)}  ({size})", _styleRow);
                 if (_win.Button(new Rect(480, ry + 1, 85, 22), "PLACE"))
                     _c.PlaceEntry(e);
                 bool isStamp = _c.StampEntry == e;
@@ -260,16 +270,31 @@ namespace FIHMapEditor
 
         private List<CatalogEntry> FilteredEntries()
         {
-            var result = new List<CatalogEntry>();
+            // Favorites always float to the top; alphabetical order within each group.
+            var favs = new List<CatalogEntry>();
+            var rest = new List<CatalogEntry>();
             string f = _filter.Trim().ToLowerInvariant();
             foreach (var e in _c.Catalog.Entries)
             {
+                bool fav = IsFavorite(e.DisplayName);
+                if (_favsOnly && !fav) continue;
                 if (_category != "" && e.Category != _category) continue;
                 if (_solidOnly && !e.HasCollider) continue;
                 if (f != "" && !e.DisplayName.ToLowerInvariant().Contains(f)) continue;
-                result.Add(e);
+                (fav ? favs : rest).Add(e);
             }
-            return result;
+            favs.AddRange(rest);
+            return favs;
+        }
+
+        private static bool IsFavorite(string name)
+            => EditorConfig.Settings.FavoriteObjects.Contains(name);
+
+        private static void ToggleFavorite(string name)
+        {
+            var favs = EditorConfig.Settings.FavoriteObjects;
+            if (!favs.Remove(name)) favs.Add(name);
+            EditorConfig.Save();
         }
 
         // ─────────────────────────────────────────────────────────── SELECT ──
@@ -492,7 +517,7 @@ namespace FIHMapEditor
 
             GUI.Label(new Rect(15, y, W - 30, 96),
                 "Play mode: if a spawn is set you appear there; the timer starts when you\n" +
-                "move and stops at the goal. R restarts the run (clears checkpoints).\n" +
+                "move and stops at the goal. R = retry from your last coin; Shift+R = full restart.\n" +
                 "Touching a checkpoint ring makes it your respawn; entering a reset\n" +
                 "trigger (invisible in play) sends you back to it without resetting the timer.\n" +
                 "Wipe Level: hides every game asset for a truly clean space (revertible).",
