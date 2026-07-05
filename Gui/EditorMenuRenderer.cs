@@ -297,7 +297,15 @@ namespace FIHMapEditor
                 if (_win.ToggleButton(new Rect(75 + i * 104, y, 100, 22), gizmoModes[i].Item1, _c.Gizmo.Mode == gizmoModes[i].Item2))
                     _c.Gizmo.Mode = gizmoModes[i].Item2;
             }
-            GUI.Label(new Rect(395, y + 3, 270, 20), "drag the colored axes on the object", _styleSmall);
+            // X-ray: wireframes on trigger zones / invisible walls (magenta = trigger,
+            // white = solid). Pairs naturally with "Pick invisible".
+            if (_win.ToggleButton(new Rect(500, y, 165, 22), $"Show invisible: {(_c.Xray.Enabled ? "ON" : "OFF")}", _c.Xray.Enabled))
+            {
+                _c.Xray.SetEnabled(!_c.Xray.Enabled);
+                if (_c.Xray.Enabled)
+                    _c.ShowToast($"X-ray: {_c.Xray.Count} invisible objects (magenta = trigger, white = solid). " +
+                                 (_c.PickInvisible ? "" : "Turn 'Pick invisible' ON to click them."));
+            }
             y += 28;
 
             // Move speed
@@ -401,7 +409,7 @@ namespace FIHMapEditor
 
             GUI.Label(new Rect(15, y, W - 30, 60),
                 "Keys (free cursor): arrows = move  |  PgUp/PgDn = up/down  |  1/2/3 = gizmo mode\n" +
-                "[ ] = rotate Y by the ° box  |  +/- = scale by the box  |  Ctrl+D = duplicate  |  Del = delete",
+                "[ ] = rotate Y by the ° box  |  +/- = scale by the box  |  Ctrl+D = duplicate  |  Del = delete  |  Ctrl+Z = undo",
                 _styleSmall);
         }
 
@@ -428,14 +436,28 @@ namespace FIHMapEditor
                 if (_win.Button(new Rect(445, y, 60, 26), "Size -")) _c.AdjustGoalSize(-1f);
                 if (_win.Button(new Rect(510, y, 60, 26), "Size +")) _c.AdjustGoalSize(1f);
             }
-            y += 40;
+            y += 34;
+
+            GUI.Label(new Rect(15, y, 400, 22), "Checkpoints & reset triggers:", _styleTitle);
+            y += 26;
+            if (_win.Button(new Rect(15, y, 190, 26), "Add Checkpoint Here")) _c.AddCheckpointHere();
+            GUI.Label(new Rect(212, y + 5, 130, 20), $"{_c.Checkpoints.Count} placed", _styleSmall);
+            if (_win.Button(new Rect(340, y, 190, 26), "Add Reset Trigger Here")) _c.AddResetZoneHere();
+            GUI.Label(new Rect(537, y + 5, 130, 20), $"{_c.ResetZones.Count} placed", _styleSmall);
+            y += 30;
+            GUI.Label(new Rect(15, y, W - 30, 20),
+                "Click a ring/red box to select it; edit with the gizmo; Del removes it.", _styleSmall);
+            y += 26;
 
             GUI.Label(new Rect(15, y, 300, 22), "Map base:", _styleTitle);
             y += 26;
-            if (_win.ToggleButton(new Rect(15, y, 200, 26), "Overlay (original level)", _c.BaseMode == MapBaseMode.Overlay))
+            if (_win.ToggleButton(new Rect(15, y, 200, 26), "Original level (Overlay)", _c.BaseMode == MapBaseMode.Overlay))
                 _c.SetBaseMode(MapBaseMode.Overlay);
-            if (_win.ToggleButton(new Rect(220, y, 200, 26), "Blank (empty canvas)", _c.BaseMode == MapBaseMode.Blank))
-                _c.SetBaseMode(MapBaseMode.Blank);
+            GUI.backgroundColor = _c.BaseMode == MapBaseMode.Blank ? Color.red : new Color(0.8f, 0.4f, 0.3f);
+            if (_win.Button(new Rect(220, y, 200, 26),
+                _c.BaseMode == MapBaseMode.Blank ? "Level wiped ✓" : "Wipe Level (clean space)"))
+                _c.WipeLevelGeometry();
+            GUI.backgroundColor = Color.white;
             y += 40;
 
             GUI.Label(new Rect(15, y, 300, 22), "Actions:", _styleTitle);
@@ -468,11 +490,12 @@ namespace FIHMapEditor
             }
             y += 44;
 
-            GUI.Label(new Rect(15, y, W - 30, 80),
+            GUI.Label(new Rect(15, y, W - 30, 96),
                 "Play mode: if a spawn is set you appear there; the timer starts when you\n" +
-                "move and stops at the goal. R restarts the run. No goal = free play.\n" +
-                "Blank: hides the original level (geometry only, nothing critical) and\n" +
-                "creates a starting platform if the map is empty.",
+                "move and stops at the goal. R restarts the run (clears checkpoints).\n" +
+                "Touching a checkpoint ring makes it your respawn; entering a reset\n" +
+                "trigger (invisible in play) sends you back to it without resetting the timer.\n" +
+                "Wipe Level: hides every game asset for a truly clean space (revertible).",
                 _styleSmall);
         }
 
@@ -631,7 +654,12 @@ namespace FIHMapEditor
             ("hub",     "Maps Hub"),
             ("play",    "Editor ↔ Play mode"),
             ("restart", "Restart run (in Play)"),
+            ("undo",    "Undo (Ctrl + key)"),
+            ("save",    "Save map (Ctrl + key)"),
         };
+
+        // Ctrl-combo binds can share letters with plain binds without conflicting.
+        private static bool IsCtrlBind(string id) => id == "undo" || id == "save";
 
         private static KeyCode GetBind(string id) => id switch
         {
@@ -640,6 +668,8 @@ namespace FIHMapEditor
             "hub" => EditorConfig.Settings.MapsHubKey,
             "play" => EditorConfig.Settings.TogglePlayKey,
             "restart" => EditorConfig.Settings.RestartRunKey,
+            "undo" => EditorConfig.Settings.UndoKey,
+            "save" => EditorConfig.Settings.SaveKey,
             _ => KeyCode.None,
         };
 
@@ -653,6 +683,8 @@ namespace FIHMapEditor
                 case "hub": s.MapsHubKey = key; break;
                 case "play": s.TogglePlayKey = key; break;
                 case "restart": s.RestartRunKey = key; break;
+                case "undo": s.UndoKey = key; break;
+                case "save": s.SaveKey = key; break;
             }
             EditorConfig.Save();
         }
@@ -672,7 +704,9 @@ namespace FIHMapEditor
 
                 bool listening = _listeningBind == bindId;
                 if (listening) GUI.backgroundColor = new Color(0.3f, 0.8f, 0.4f);
-                string text = listening ? "[ press a key — Esc cancels ]" : $"[ {GetBind(bindId)} ]";
+                string text = listening ? "[ press a key — Esc cancels ]"
+                    : IsCtrlBind(bindId) ? $"[ Ctrl + {GetBind(bindId)} ]"
+                    : $"[ {GetBind(bindId)} ]";
                 if (_win.Button(new Rect(260, y, 280, 26), text))
                     _listeningBind = listening ? null : bindId;
                 GUI.backgroundColor = Color.white;
@@ -709,10 +743,20 @@ namespace FIHMapEditor
                 return;
             }
 
-            // Refuse keys already used by another action — silent conflicts are worse.
+            // Ctrl+D is the fixed duplicate shortcut: keep it off-limits for Ctrl-combos.
+            if (IsCtrlBind(_listeningBind) && e.keyCode == KeyCode.D)
+            {
+                _c.ShowToast("Ctrl+D is reserved for Duplicate");
+                e.Use();
+                return;
+            }
+
+            // Refuse keys already used by another action of the same kind — a Ctrl-combo
+            // and a plain key can share the same letter without conflict.
             foreach (var (otherId, otherLabel) in BindRows)
             {
-                if (otherId != _listeningBind && GetBind(otherId) == e.keyCode)
+                if (otherId != _listeningBind && GetBind(otherId) == e.keyCode
+                    && IsCtrlBind(otherId) == IsCtrlBind(_listeningBind))
                 {
                     _c.ShowToast($"'{e.keyCode}' is already bound to: {otherLabel}");
                     e.Use();

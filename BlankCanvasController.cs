@@ -32,27 +32,24 @@ namespace FIHMapEditor
                 _disabledColliders.Clear();
 
                 var playerRoot = _finder.FindPlayer()?.transform?.root;
-                var scene = SceneManager.GetActiveScene();
-                var roots = scene.GetRootGameObjects();
 
-                foreach (var root in roots)
+                // Component-level sweep instead of per-root gating: the old approach
+                // skipped ENTIRE roots that contained a camera or canvas anywhere, which
+                // left chunks of the level visible. Now every renderer/collider in the
+                // scene goes dark unless it belongs to the player, the mod, or UI.
+                foreach (var r in UnityEngine.Object.FindObjectsOfType<Renderer>())
                 {
-                    if (root == null) continue;
-                    if (!IsGeometryRoot(root, playerRoot)) continue;
-
-                    foreach (var r in root.GetComponentsInChildren<Renderer>(false))
-                    {
-                        if (r == null || !r.enabled) continue;
-                        if (r.transform.name.StartsWith("FIH_Line")) continue;
-                        r.enabled = false;
-                        _disabledRenderers.Add(r);
-                    }
-                    foreach (var c in root.GetComponentsInChildren<Collider>(false))
-                    {
-                        if (c == null || !c.enabled) continue;
-                        c.enabled = false;
-                        _disabledColliders.Add(c);
-                    }
+                    if (r == null || !r.enabled) continue;
+                    if (!IsWipeable(r.transform, playerRoot)) continue;
+                    r.enabled = false;
+                    _disabledRenderers.Add(r);
+                }
+                foreach (var c in UnityEngine.Object.FindObjectsOfType<Collider>())
+                {
+                    if (c == null || !c.enabled) continue;
+                    if (!IsWipeable(c.transform, playerRoot)) continue;
+                    c.enabled = false;
+                    _disabledColliders.Add(c);
                 }
 
                 IsActive = true;
@@ -63,6 +60,18 @@ namespace FIHMapEditor
             {
                 MapEditorPlugin.Logger.LogError($"[BLANK] Error applying blank canvas: {ex}");
             }
+        }
+
+        // Everything is wipeable except: the player rig, anything the mod created
+        // (clones under FIH_MapObjectsRoot, FIH_Line/FIH_Gizmo helpers) and UI.
+        private static bool IsWipeable(Transform t, Transform playerRoot)
+        {
+            var root = t.root;
+            if (playerRoot != null && root == playerRoot) return false;
+            if (root.name.StartsWith("FIH")) return false;
+            if (t.name.StartsWith("FIH_")) return false;
+            if (t.GetComponentInParent<Canvas>() != null) return false;
+            return true;
         }
 
         public void Restore()
@@ -98,40 +107,5 @@ namespace FIHMapEditor
             IsActive = false;
         }
 
-        // A root is hideable geometry when it carries no gameplay-critical machinery.
-        private bool IsGeometryRoot(GameObject root, Transform playerRoot)
-        {
-            if (playerRoot != null && root.transform == playerRoot) return false;
-            if (root.name == "FIH_MapObjectsRoot" || root.name == "FIHMapEditor") return false;
-            if (root.name.Contains(ObjectCatalog.CLONE_MARKER)) return false;
-
-            if (root.GetComponentInChildren<Camera>(true) != null) return false;
-            if (root.GetComponentInChildren<AudioListener>(true) != null) return false;
-            if (root.GetComponentInChildren<Canvas>(true) != null) return false;
-
-            try
-            {
-                foreach (var mb in root.GetComponentsInChildren<MonoBehaviour>(true))
-                {
-                    if (mb == null) continue;
-                    var type = mb.GetIl2CppType();
-                    if (type == null) continue;
-                    string name = type.Name;
-                    string ns = type.Namespace ?? "";
-
-                    if (name == "PlayerNetworked" || name == "NetworkManager" || name == "GameManager"
-                        || name == "EventSystem")
-                        return false;
-                    if (ns.StartsWith("FishNet.Managing"))
-                        return false;
-                }
-            }
-            catch { }
-
-            // Roots that contain lights but no renderers stay on (global lighting rigs).
-            bool hasRenderer = root.GetComponentInChildren<Renderer>(true) != null;
-            bool hasCollider = root.GetComponentInChildren<Collider>(true) != null;
-            return hasRenderer || hasCollider;
-        }
     }
 }

@@ -22,6 +22,10 @@ namespace FIHMapEditor
         public KeyCode MapsHubKey { get; set; } = KeyCode.F7;
         public KeyCode TogglePlayKey { get; set; } = KeyCode.P;
         public KeyCode RestartRunKey { get; set; } = KeyCode.R;
+        // These two always combine with Ctrl (Ctrl+Z / Ctrl+S by default), so they can
+        // share letters with plain single-key binds without conflicting.
+        public KeyCode UndoKey { get; set; } = KeyCode.Z;
+        public KeyCode SaveKey { get; set; } = KeyCode.S;
 
         public float FlySpeed { get; set; } = 18.0f;
         public float FlySpeedBoost { get; set; } = 3.0f;

@@ -20,6 +20,7 @@ namespace FIHMapEditor
     {
         public const string EXTENSION = ".fihmap.json";
         public const string AUTOSAVE_NAME = "_autosave";
+        public const string AUTOSAVE_PREV_NAME = "_autosave_prev";
 
         public static string MapsDir => Path.Combine(Paths.PluginPath, "FIHMapEditor", "Maps");
 
@@ -47,6 +48,20 @@ namespace FIHMapEditor
             File.WriteAllText(PathFor(fileName), json);
         }
 
+        // Two-slot autosave: the previous autosave is kept as *_prev so a fresh session
+        // with one stray edit can never wipe out yesterday's work in a single write.
+        public static void SaveAutosave(MapFile map)
+        {
+            Directory.CreateDirectory(MapsDir);
+            try
+            {
+                if (File.Exists(PathFor(AUTOSAVE_NAME)))
+                    File.Copy(PathFor(AUTOSAVE_NAME), PathFor(AUTOSAVE_PREV_NAME), overwrite: true);
+            }
+            catch { }
+            Save(map, AUTOSAVE_NAME);
+        }
+
         public static MapFile Load(string fileName)
         {
             string json = File.ReadAllText(PathFor(fileName));
@@ -57,6 +72,8 @@ namespace FIHMapEditor
                     $"Map '{fileName}' has format v{map.FormatVersion} (newer than v{MapFile.CURRENT_FORMAT_VERSION}); loading anyway.");
             map.Objects ??= new List<MapObjectData>();
             map.LevelEdits ??= new List<LevelEditData>();
+            map.Checkpoints ??= new List<CheckpointData>();
+            map.ResetZones ??= new List<ResetZoneData>();
             return map;
         }
 
@@ -81,7 +98,7 @@ namespace FIHMapEditor
                         FileName = Path.GetFileName(file).Replace(EXTENSION, ""),
                         LastWrite = File.GetLastWriteTime(file),
                     };
-                    info.IsAutosave = info.FileName == AUTOSAVE_NAME;
+                    info.IsAutosave = info.FileName.StartsWith(AUTOSAVE_NAME);
                     try
                     {
                         var map = JsonSerializer.Deserialize<MapFile>(File.ReadAllText(file), Options);

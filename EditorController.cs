@@ -22,6 +22,8 @@ namespace FIHMapEditor
         public MapBaseMode BaseMode { get; private set; } = MapBaseMode.Overlay;
         public SpawnPointData Spawn;
         public GoalZoneData Goal;
+        public List<CheckpointData> Checkpoints = new List<CheckpointData>();
+        public List<ResetZoneData> ResetZones = new List<ResetZoneData>();
         public bool Dirty { get; private set; }
         public float LastAutosaveTime { get; private set; } = -1f;
         public string LoadReport = "";
@@ -44,9 +46,20 @@ namespace FIHMapEditor
         public SelectionSystem SelectionSys { get; private set; }
         public HighlightRenderer Highlight { get; private set; }
         public GizmoController Gizmo { get; private set; }
+        public InvisibleVisualizer Xray { get; private set; }
         public PlayModeController PlayMode { get; private set; }
         public BlankCanvasController BlankCanvas { get; private set; }
         public LevelEditManager LevelEdits { get; private set; }
+        public UndoSystem Undo { get; private set; }
+
+        // In-flight undo capture: filled when a transform edit / marker drag begins,
+        // pushed onto the stack when it ends (only if something actually changed).
+        private GameObject _pendingUndoGo;
+        private bool _pendingUndoRaw;
+        private Vector3 _pendingUndoPos;
+        private Quaternion _pendingUndoRot;
+        private Vector3 _pendingUndoScale;
+        private Action _pendingMarkerUndo;
 
         // GUI
         private EditorMenuRenderer _menu;
@@ -56,10 +69,16 @@ namespace FIHMapEditor
         private readonly LineBox _goalBox = new LineBox("FIH_Line_Goal");
         private readonly LineBox _spawnBox = new LineBox("FIH_Line_Spawn");
 
-        // Empty proxy transforms the gizmo grabs when a marker (goal/spawn) is selected;
-        // data flows proxy→marker while dragging and marker→proxy otherwise.
+        // Empty proxy transforms the gizmo grabs when a marker (goal/spawn/checkpoint/
+        // reset) is selected; data flows proxy→marker while dragging, marker→proxy otherwise.
         private GameObject _goalProxy;
         private GameObject _spawnProxy;
+        private GameObject _checkpointProxy;
+        private GameObject _resetProxy;
+
+        // Editor-mode visuals for the marker lists (rings + red boxes), pooled.
+        private readonly List<LineBox> _checkpointBoxes = new List<LineBox>();
+        private readonly List<LineBox> _resetBoxes = new List<LineBox>();
 
         // Scene / lifecycle tracking
         private string _lastSceneName = "";
@@ -93,9 +112,11 @@ namespace FIHMapEditor
             SelectionSys = new SelectionSystem(Finder, PlacedManager, Catalog);
             Highlight = new HighlightRenderer();
             Gizmo = new GizmoController();
+            Xray = new InvisibleVisualizer();
             PlayMode = new PlayModeController(Finder);
             BlankCanvas = new BlankCanvasController(Finder);
             LevelEdits = new LevelEditManager();
+            Undo = new UndoSystem();
 
             _menu = new EditorMenuRenderer(this);
             _mapsHub = new MapsHubRenderer(this);
@@ -153,6 +174,16 @@ namespace FIHMapEditor
                         if (acceptInput && Input.WasKeyPressed("restart", EditorConfig.Settings.RestartRunKey))
                             PlayMode.RestartRun();
                         break;
+                }
+
+                // Keep level edits pinned against game systems that keep resetting them
+                // (network sync, pooled visibility). Never fight the user's own drag.
+                if (Mode != EditorMode.Off)
+                {
+                    Transform dragging = Gizmo.IsDragging && SelectionSys.Current.IsRaw
+                        ? SelectionSys.Current.Raw.transform
+                        : null;
+                    LevelEdits.EnforceEdits(dragging);
                 }
 
                 UpdateAutosave();
@@ -222,11 +253,13 @@ namespace FIHMapEditor
             PlacedManager.OnSceneChanged();
             BlankCanvas.OnSceneChanged();
             LevelEdits.OnSceneChanged();
+            Xray.OnSceneChanged();
+            Undo.Clear();
+            ClearPendingUndo();
             Catalog.Clear();
             SelectionSys.Deselect();
             Highlight.Hide();
-            _goalBox.Hide();
-            _spawnBox.Hide();
+            HideMarkerVisuals();
         }
 
         private bool HasWorkingContent()
@@ -234,7 +267,9 @@ namespace FIHMapEditor
             return _workingSnapshot != null &&
                    (_workingSnapshot.Objects.Count > 0 || _workingSnapshot.Spawn != null
                     || _workingSnapshot.Goal != null || _workingSnapshot.BaseMode == MapBaseMode.Blank
-                    || (_workingSnapshot.LevelEdits?.Count ?? 0) > 0);
+                    || (_workingSnapshot.LevelEdits?.Count ?? 0) > 0
+                    || (_workingSnapshot.Checkpoints?.Count ?? 0) > 0
+                    || (_workingSnapshot.ResetZones?.Count ?? 0) > 0);
         }
 
         private void HandlePendingReapply()
@@ -274,6 +309,13 @@ namespace FIHMapEditor
 
             if (Mode == EditorMode.Editor && Input.WasKeyPressed("mapsHub", s.MapsHubKey))
                 ToggleMapsHub();
+
+            // Ctrl-combos: work in editor mode whether the cursor is free or locked.
+            if (Mode == EditorMode.Editor && !AnyTextFieldFocused() && Input.IsCtrlHeld())
+            {
+                if (Input.WasKeyPressed("undo", s.UndoKey)) UndoLast();
+                if (Input.WasKeyPressed("save", s.SaveKey)) QuickSave();
+            }
         }
 
         private void UpdateEditorMode(bool acceptInput)
@@ -300,11 +342,13 @@ namespace FIHMapEditor
             else if (Gizmo.IsDragging)
             {
                 Gizmo.CancelDrag();
+                ClearPendingUndo();
             }
 
             Highlight.UpdateHighlight(SelectionSys.Current);
             UpdateMarkerProxies();
             Gizmo.UpdateVisual(GizmoTarget(), Camera.main);
+            Xray.Update(Camera.main);
             UpdateEditorMarkers();
         }
 
@@ -313,9 +357,18 @@ namespace FIHMapEditor
         {
             var sel = SelectionSys.Current;
             if (sel.IsMarker)
-                return sel.Marker == "goal"
-                    ? (Goal != null ? GoalProxy().transform : null)
-                    : (Spawn != null ? SpawnProxy().transform : null);
+            {
+                switch (sel.Marker)
+                {
+                    case "goal": return Goal != null ? GoalProxy().transform : null;
+                    case "spawn": return Spawn != null ? SpawnProxy().transform : null;
+                    case "checkpoint":
+                        return sel.MarkerIndex < Checkpoints.Count ? CheckpointProxy().transform : null;
+                    case "reset":
+                        return sel.MarkerIndex < ResetZones.Count ? ResetProxy().transform : null;
+                    default: return null;
+                }
+            }
             return sel.Target?.transform;
         }
 
@@ -337,6 +390,26 @@ namespace FIHMapEditor
                 UnityEngine.Object.DontDestroyOnLoad(_spawnProxy);
             }
             return _spawnProxy;
+        }
+
+        private GameObject CheckpointProxy()
+        {
+            if (_checkpointProxy == null)
+            {
+                _checkpointProxy = new GameObject("FIH_CheckpointProxy");
+                UnityEngine.Object.DontDestroyOnLoad(_checkpointProxy);
+            }
+            return _checkpointProxy;
+        }
+
+        private GameObject ResetProxy()
+        {
+            if (_resetProxy == null)
+            {
+                _resetProxy = new GameObject("FIH_ResetProxy");
+                UnityEngine.Object.DontDestroyOnLoad(_resetProxy);
+            }
+            return _resetProxy;
         }
 
         private void UpdateMarkerProxies()
@@ -377,6 +450,45 @@ namespace FIHMapEditor
                     p.localScale = Vector3.one;
                 }
             }
+
+            if (sel.Marker == "checkpoint" && sel.MarkerIndex < Checkpoints.Count)
+            {
+                var cp = Checkpoints[sel.MarkerIndex];
+                var p = CheckpointProxy().transform;
+                if (Gizmo.IsDragging)
+                {
+                    cp.Pos = VecUtil.ToArray(p.position);
+                    cp.Yaw = p.eulerAngles.y;
+                    // Uniform radius from whatever axis got stretched furthest.
+                    var s = p.localScale;
+                    cp.Radius = Mathf.Clamp(Mathf.Max(s.x, s.y, s.z), 0.5f, 20f);
+                }
+                else
+                {
+                    p.position = VecUtil.ToVector3(cp.Pos);
+                    p.rotation = Quaternion.Euler(0f, cp.Yaw, 0f);
+                    p.localScale = Vector3.one * Mathf.Max(0.5f, cp.Radius);
+                }
+            }
+
+            if (sel.Marker == "reset" && sel.MarkerIndex < ResetZones.Count)
+            {
+                var zone = ResetZones[sel.MarkerIndex];
+                var p = ResetProxy().transform;
+                if (Gizmo.IsDragging)
+                {
+                    zone.Center = VecUtil.ToArray(p.position);
+                    var s = p.localScale;
+                    zone.Size = VecUtil.ToArray(new Vector3(
+                        Mathf.Max(1f, s.x), Mathf.Max(1f, s.y), Mathf.Max(1f, s.z)));
+                }
+                else
+                {
+                    p.position = VecUtil.ToVector3(zone.Center);
+                    p.localScale = VecUtil.ToVector3(zone.Size, Vector3.one * 4f);
+                    p.rotation = Quaternion.identity; // AABB — no rotation
+                }
+            }
         }
 
         private void UpdateEditorMarkers()
@@ -394,9 +506,128 @@ namespace FIHMapEditor
                                   new Color(0.4f, 0.6f, 1f, 0.9f));
             else
                 _spawnBox.Hide();
+
+            // Checkpoint rings (orange) — same coin visual as play mode.
+            while (_checkpointBoxes.Count < Checkpoints.Count)
+                _checkpointBoxes.Add(new LineBox($"FIH_Line_EdCheckpoint{_checkpointBoxes.Count}"));
+            for (int i = 0; i < _checkpointBoxes.Count; i++)
+            {
+                if (i >= Checkpoints.Count || Checkpoints[i]?.Pos == null)
+                {
+                    _checkpointBoxes[i].Hide();
+                    continue;
+                }
+                var cp = Checkpoints[i];
+                _checkpointBoxes[i].ShowRing(VecUtil.ToVector3(cp.Pos) + Vector3.up * 1f,
+                    Mathf.Max(0.5f, cp.Radius), new Color(1f, 0.62f, 0.15f, 0.95f));
+            }
+
+            // Reset triggers (red boxes) — editor-only, invisible while playing.
+            while (_resetBoxes.Count < ResetZones.Count)
+                _resetBoxes.Add(new LineBox($"FIH_Line_EdReset{_resetBoxes.Count}"));
+            for (int i = 0; i < _resetBoxes.Count; i++)
+            {
+                if (i >= ResetZones.Count || ResetZones[i]?.Center == null)
+                {
+                    _resetBoxes[i].Hide();
+                    continue;
+                }
+                var zone = ResetZones[i];
+                _resetBoxes[i].ShowBox(new Bounds(VecUtil.ToVector3(zone.Center),
+                                                  VecUtil.ToVector3(zone.Size, Vector3.one * 4f)),
+                                       new Color(1f, 0.25f, 0.25f, 0.9f));
+            }
+        }
+
+        private void HideMarkerVisuals()
+        {
+            _goalBox.Hide();
+            _spawnBox.Hide();
+            foreach (var box in _checkpointBoxes) box.Hide();
+            foreach (var box in _resetBoxes) box.Hide();
         }
 
         private bool AnyTextFieldFocused() => _menu.HasFocusedTextField || _mapsHub.HasFocusedTextField;
+
+        // ─────────────────────────────────────────────────────────────── undo ──
+
+        private void CaptureTransformUndo(GameObject go, bool isRaw)
+        {
+            if (go == null) return;
+            var t = go.transform;
+            _pendingUndoGo = go;
+            _pendingUndoRaw = isRaw;
+            _pendingUndoPos = t.position;
+            _pendingUndoRot = t.rotation;
+            _pendingUndoScale = t.localScale;
+        }
+
+        private void PushTransformUndoIfChanged()
+        {
+            var go = _pendingUndoGo;
+            _pendingUndoGo = null;
+            if (go == null) return;
+
+            var t = go.transform;
+            if (Vector3.Distance(t.position, _pendingUndoPos) < 0.001f &&
+                Quaternion.Angle(t.rotation, _pendingUndoRot) < 0.01f &&
+                Vector3.Distance(t.localScale, _pendingUndoScale) < 0.001f)
+                return;
+
+            Vector3 pos = _pendingUndoPos;
+            Quaternion rot = _pendingUndoRot;
+            Vector3 scale = _pendingUndoScale;
+            bool raw = _pendingUndoRaw;
+            Undo.Push($"transform of {go.name}", () =>
+            {
+                if (go == null) return;
+                var tt = go.transform;
+                tt.position = pos;
+                tt.rotation = rot;
+                tt.localScale = scale;
+                if (raw) LevelEdits.RecordTransform(go);
+                SetDirty();
+            });
+        }
+
+        private void ClearPendingUndo()
+        {
+            _pendingUndoGo = null;
+            _pendingMarkerUndo = null;
+        }
+
+        // Deep copy of every marker (spawn/goal/checkpoints/resets) as a restore closure.
+        private Action CaptureMarkersState()
+        {
+            var spawn = Spawn == null ? null
+                : new SpawnPointData { Pos = (float[])Spawn.Pos?.Clone(), Yaw = Spawn.Yaw };
+            var goal = Goal == null ? null
+                : new GoalZoneData { Center = (float[])Goal.Center?.Clone(), Size = (float[])Goal.Size?.Clone() };
+            var cps = new List<CheckpointData>();
+            foreach (var c in Checkpoints)
+                cps.Add(new CheckpointData { Pos = (float[])c.Pos?.Clone(), Yaw = c.Yaw, Radius = c.Radius });
+            var zones = new List<ResetZoneData>();
+            foreach (var z in ResetZones)
+                zones.Add(new ResetZoneData { Center = (float[])z.Center?.Clone(), Size = (float[])z.Size?.Clone() });
+
+            return () =>
+            {
+                Spawn = spawn;
+                Goal = goal;
+                Checkpoints = cps;
+                ResetZones = zones;
+                if (SelectionSys.Current.IsMarker) SelectionSys.Deselect();
+                SetDirty();
+            };
+        }
+
+        public void UndoLast()
+        {
+            if (Undo.Undo(out string label))
+                ShowToast($"Undone: {label}  ({Undo.Count} more)");
+            else
+                ShowToast("Nothing to undo");
+        }
 
         private void HandleWorldClick()
         {
@@ -408,6 +639,15 @@ namespace FIHMapEditor
                     Gizmo.EndDrag();
                     var dragged = SelectionSys.Current;
                     if (dragged.IsRaw) LevelEdits.RecordTransform(dragged.Raw);
+                    if (_pendingMarkerUndo != null)
+                    {
+                        Undo.Push($"edit of {dragged.DisplayName}", _pendingMarkerUndo);
+                        _pendingMarkerUndo = null;
+                    }
+                    else
+                    {
+                        PushTransformUndoIfChanged();
+                    }
                     SetDirty();
                 }
                 else
@@ -433,6 +673,12 @@ namespace FIHMapEditor
             {
                 // Capture the pristine state of a level object before the drag mutates it.
                 if (SelectionSys.Current.IsRaw) LevelEdits.CaptureOriginal(SelectionSys.Current.Raw);
+
+                // Arm the Ctrl+Z entry for this drag.
+                if (SelectionSys.Current.IsMarker)
+                    _pendingMarkerUndo = CaptureMarkersState();
+                else
+                    CaptureTransformUndo(gizmoTarget.gameObject, SelectionSys.Current.IsRaw);
                 return;
             }
 
@@ -444,22 +690,40 @@ namespace FIHMapEditor
                 ? Vector3.Distance(ray.Value.origin, hitPoint)
                 : float.MaxValue;
             string marker = null;
+            int markerIndex = 0;
             float markerDist = worldDist;
             if (Goal?.Center != null)
             {
                 var b = new Bounds(VecUtil.ToVector3(Goal.Center), VecUtil.ToVector3(Goal.Size, Vector3.one * 4f));
                 if (SelectionSystem.RayIntersectsAABB(ray.Value, b, out float d) && d < markerDist)
-                    { marker = "goal"; markerDist = d; }
+                    { marker = "goal"; markerIndex = 0; markerDist = d; }
             }
             if (Spawn?.Pos != null)
             {
                 var b = new Bounds(VecUtil.ToVector3(Spawn.Pos) + Vector3.up * 1f, new Vector3(1f, 2f, 1f));
                 if (SelectionSystem.RayIntersectsAABB(ray.Value, b, out float d) && d < markerDist)
-                    { marker = "spawn"; markerDist = d; }
+                    { marker = "spawn"; markerIndex = 0; markerDist = d; }
+            }
+            for (int i = 0; i < Checkpoints.Count; i++)
+            {
+                var cp = Checkpoints[i];
+                if (cp?.Pos == null) continue;
+                float r = Mathf.Max(0.5f, cp.Radius);
+                var b = new Bounds(VecUtil.ToVector3(cp.Pos) + Vector3.up * 1f, Vector3.one * r * 2f);
+                if (SelectionSystem.RayIntersectsAABB(ray.Value, b, out float d) && d < markerDist)
+                    { marker = "checkpoint"; markerIndex = i; markerDist = d; }
+            }
+            for (int i = 0; i < ResetZones.Count; i++)
+            {
+                var zone = ResetZones[i];
+                if (zone?.Center == null) continue;
+                var b = new Bounds(VecUtil.ToVector3(zone.Center), VecUtil.ToVector3(zone.Size, Vector3.one * 4f));
+                if (SelectionSystem.RayIntersectsAABB(ray.Value, b, out float d) && d < markerDist)
+                    { marker = "reset"; markerIndex = i; markerDist = d; }
             }
             if (marker != null)
             {
-                SelectionSys.SelectMarker(marker);
+                SelectionSys.SelectMarker(marker, markerIndex);
                 return;
             }
 
@@ -545,14 +809,17 @@ namespace FIHMapEditor
                 // Leave old mode
                 if (old == EditorMode.Editor)
                 {
+                    // Closing the editor / starting a run are the moments a crash hurts
+                    // most — snapshot to the autosave right now.
+                    AutosaveNow("leaving editor");
                     if (CursorFree) SetCursorFree(false);
                     _mapsHub.Close();
                     Fly.Exit();
                     Highlight.Hide();
                     Gizmo.CancelDrag();
                     Gizmo.Hide();
-                    _goalBox.Hide();
-                    _spawnBox.Hide();
+                    Xray.HideAll();
+                    HideMarkerVisuals();
                 }
                 else if (old == EditorMode.Play)
                 {
@@ -571,7 +838,8 @@ namespace FIHMapEditor
                 else if (newMode == EditorMode.Play)
                 {
                     RefreshSnapshot();
-                    PlayMode.Enter(Spawn, Goal, BaseMode == MapBaseMode.Blank, MapName);
+                    PlayMode.Enter(Spawn, Goal, BaseMode == MapBaseMode.Blank, MapName,
+                        Checkpoints, ResetZones);
                     ShowToast($"PLAY — {EditorConfig.Settings.RestartRunKey}: restart run, {EditorConfig.Settings.TogglePlayKey}: back to editor");
                 }
 
@@ -653,6 +921,8 @@ namespace FIHMapEditor
                 Goal = Goal,
                 Objects = PlacedManager.Snapshot(),
                 LevelEdits = LevelEdits.Snapshot(),
+                Checkpoints = new List<CheckpointData>(Checkpoints),
+                ResetZones = new List<ResetZoneData>(ResetZones),
             };
         }
 
@@ -660,19 +930,31 @@ namespace FIHMapEditor
         {
             if (!Dirty || _autosaveDirtySince < 0) return;
             if (Time.unscaledTime - _autosaveDirtySince < EditorConfig.Settings.AutosaveIntervalSeconds) return;
+            AutosaveNow("interval");
+        }
 
+        private void AutosaveNow(string reason)
+        {
+            if (!Dirty) return;
             try
             {
                 RefreshSnapshot();
-                MapSerializer.Save(_workingSnapshot, MapSerializer.AUTOSAVE_NAME);
+                MapSerializer.SaveAutosave(_workingSnapshot);
                 LastAutosaveTime = Time.unscaledTime;
                 _autosaveDirtySince = Time.unscaledTime; // keep autosaving while still dirty
-                MapEditorPlugin.Logger.LogInfo("[MAP] Autosaved.");
+                MapEditorPlugin.Logger.LogInfo($"[MAP] Autosaved ({reason}).");
             }
             catch (Exception ex)
             {
                 MapEditorPlugin.Logger.LogError($"[MAP] Autosave error: {ex.Message}");
             }
+        }
+
+        // Ctrl+S: overwrite the current file, or create one from the map name.
+        public void QuickSave()
+        {
+            if (!SaveOverwrite())
+                SaveAsNew(MapName);
         }
 
         public void NewMap(bool silent = false)
@@ -686,9 +968,13 @@ namespace FIHMapEditor
             BaseMode = MapBaseMode.Overlay;
             Spawn = null;
             Goal = null;
+            Checkpoints.Clear();
+            ResetZones.Clear();
             Dirty = false;
             _autosaveDirtySince = -1f;
             LoadReport = "";
+            Undo.Clear();
+            ClearPendingUndo();
             RefreshSnapshot();
             if (!silent) ShowToast("New empty map");
         }
@@ -737,7 +1023,8 @@ namespace FIHMapEditor
             {
                 var map = MapSerializer.Load(fileName);
                 ApplyMapFile(map, resetDirty: true);
-                CurrentFileName = fileName == MapSerializer.AUTOSAVE_NAME ? null : fileName;
+                // Autosave slots are recovery buffers, never a save target.
+                CurrentFileName = fileName.StartsWith(MapSerializer.AUTOSAVE_NAME) ? null : fileName;
                 ShowToast($"Loaded \"{MapName}\" — {LoadReport}");
             }
             catch (Exception ex)
@@ -754,10 +1041,14 @@ namespace FIHMapEditor
             PlacedManager.WipeAll();
             LevelEdits.RestoreAll();
             SelectionSys.Deselect();
+            Undo.Clear();
+            ClearPendingUndo();
 
             MapName = map.Name ?? "Untitled";
             Spawn = map.Spawn;
             Goal = map.Goal;
+            Checkpoints = map.Checkpoints != null ? new List<CheckpointData>(map.Checkpoints) : new List<CheckpointData>();
+            ResetZones = map.ResetZones != null ? new List<ResetZoneData>(map.ResetZones) : new List<ResetZoneData>();
             BaseMode = map.BaseMode;
 
             if (BaseMode == MapBaseMode.Blank) BlankCanvas.Apply();
@@ -832,6 +1123,14 @@ namespace FIHMapEditor
                     placed.Root.transform.position += Vector3.up * (point.y - bounds.min.y);
             }
 
+            var undoTarget = placed;
+            Undo.Push($"place {entry.DisplayName}", () =>
+            {
+                if (SelectionSys.Current.Placed == undoTarget) SelectionSys.Deselect();
+                PlacedManager.Delete(undoTarget);
+                SetDirty();
+            });
+
             SelectionSys.Select(placed);
             SetDirty();
         }
@@ -870,6 +1169,14 @@ namespace FIHMapEditor
                 t.position + offset, t.rotation, scale, tint);
             if (placed != null)
             {
+                var undoTarget = placed;
+                Undo.Push($"duplicate of {sourceName}", () =>
+                {
+                    if (SelectionSys.Current.Placed == undoTarget) SelectionSys.Deselect();
+                    PlacedManager.Delete(undoTarget);
+                    SetDirty();
+                });
+
                 SelectionSys.Select(placed);
                 SetDirty();
                 ShowToast($"Duplicated: {placed.Root.name}");
@@ -889,6 +1196,7 @@ namespace FIHMapEditor
                 return null;
             }
             if (sel.IsRaw) LevelEdits.CaptureOriginal(sel.Raw);
+            CaptureTransformUndo(sel.Target, sel.IsRaw);
             return sel.Target.transform;
         }
 
@@ -896,6 +1204,7 @@ namespace FIHMapEditor
         {
             var sel = SelectionSys.Current;
             if (sel.IsRaw) LevelEdits.RecordTransform(sel.Raw);
+            PushTransformUndoIfChanged();
             SetDirty();
         }
 
@@ -1057,14 +1366,26 @@ namespace FIHMapEditor
 
             var t = sourceGo.transform;
             PlacedObject last = null;
+            var spawnedList = new List<PlacedObject>();
             for (int i = 1; i <= count; i++)
             {
                 Vector3 pos = t.position + direction * stepAlong * i + Vector3.up * stepUp * i;
                 last = PlacedManager.Spawn(sourceGo, sourcePath, sourceName,
                     pos, t.rotation, t.localScale, tint);
+                if (last != null) spawnedList.Add(last);
             }
             if (last != null)
             {
+                Undo.Push($"multi-clone ×{spawnedList.Count}", () =>
+                {
+                    foreach (var p in spawnedList)
+                    {
+                        if (SelectionSys.Current.Placed == p) SelectionSys.Deselect();
+                        PlacedManager.Delete(p);
+                    }
+                    SetDirty();
+                });
+
                 SelectionSys.Select(last);
                 SetDirty();
                 ShowToast($"Multi-clone: {count} copies{(stairs ? " as stairs" : "")}");
@@ -1078,17 +1399,62 @@ namespace FIHMapEditor
 
             if (sel.IsMarker)
             {
-                if (sel.Marker == "goal") ClearGoal(); else ClearSpawn();
+                Undo.Push($"delete of {sel.DisplayName}", CaptureMarkersState());
+                switch (sel.Marker)
+                {
+                    case "goal":
+                        ClearGoal();
+                        ShowToast("Goal removed");
+                        break;
+                    case "spawn":
+                        ClearSpawn();
+                        ShowToast("Spawn removed");
+                        break;
+                    case "checkpoint":
+                        if (sel.MarkerIndex < Checkpoints.Count)
+                        {
+                            Checkpoints.RemoveAt(sel.MarkerIndex);
+                            SetDirty();
+                            ShowToast("Checkpoint removed");
+                        }
+                        break;
+                    case "reset":
+                        if (sel.MarkerIndex < ResetZones.Count)
+                        {
+                            ResetZones.RemoveAt(sel.MarkerIndex);
+                            SetDirty();
+                            ShowToast("Reset trigger removed");
+                        }
+                        break;
+                }
                 SelectionSys.Deselect();
-                ShowToast(sel.Marker == "goal" ? "Goal removed" : "Spawn removed");
                 return;
             }
 
             if (sel.IsPlaced)
             {
                 var name = sel.Placed.Root.name;
+                var data = sel.Placed.ToData();
                 PlacedManager.Delete(sel.Placed);
                 SelectionSys.Deselect();
+
+                Undo.Push($"delete of {name}", () =>
+                {
+                    var src = Catalog.ResolveSource(data.Source, data.SourceName);
+                    if (src == null)
+                    {
+                        ShowToast($"Undo failed: source \"{data.SourceName}\" not found");
+                        return;
+                    }
+                    var respawned = PlacedManager.Spawn(src, data.Source, data.SourceName,
+                        VecUtil.ToVector3(data.Pos),
+                        Quaternion.Euler(VecUtil.ToVector3(data.Rot)),
+                        VecUtil.ToVector3(data.Scale, Vector3.one),
+                        data.Tint);
+                    if (respawned != null) SelectionSys.Select(respawned);
+                    SetDirty();
+                });
+
                 SetDirty();
                 ShowToast($"Deleted: {name}");
                 return;
@@ -1096,8 +1462,21 @@ namespace FIHMapEditor
 
             // Original level object: hide it (revertible from the LIST tab), never destroy.
             var rawName = sel.Raw.name;
-            LevelEdits.Hide(sel.Raw);
+            var rawGo = sel.Raw;
+            LevelEdits.Hide(rawGo);
             SelectionSys.Deselect();
+
+            Undo.Push($"hide of {rawName}", () =>
+            {
+                var record = LevelEdits.Find(rawGo);
+                if (record != null)
+                {
+                    LevelEdits.Unhide(record);
+                    LevelEdits.RecordTransform(rawGo); // prunes the record if now pristine
+                }
+                SetDirty();
+            });
+
             SetDirty();
             ShowToast($"Level object hidden: {rawName} (revert from LIST)");
         }
@@ -1105,8 +1484,27 @@ namespace FIHMapEditor
         public void WipeCustomObjects()
         {
             int n = PlacedManager.Count;
+            var datas = PlacedManager.Snapshot();
             PlacedManager.WipeAll();
             SelectionSys.Deselect();
+
+            Undo.Push($"wipe of {n} objects", () =>
+            {
+                int restored = 0;
+                foreach (var data in datas)
+                {
+                    var src = Catalog.ResolveSource(data.Source, data.SourceName);
+                    if (src == null) continue;
+                    if (PlacedManager.Spawn(src, data.Source, data.SourceName,
+                        VecUtil.ToVector3(data.Pos),
+                        Quaternion.Euler(VecUtil.ToVector3(data.Rot)),
+                        VecUtil.ToVector3(data.Scale, Vector3.one),
+                        data.Tint) != null) restored++;
+                }
+                SetDirty();
+                ShowToast($"Restored {restored} objects");
+            });
+
             SetDirty();
             ShowToast($"Deleted {n} custom objects");
         }
@@ -1161,6 +1559,7 @@ namespace FIHMapEditor
             var t = Finder.FindPlayerTransform();
             var cam = Finder.FindCameraTransform();
             if (t == null) return;
+            Undo.Push("spawn change", CaptureMarkersState());
             Spawn = new SpawnPointData
             {
                 Pos = VecUtil.ToArray(t.position),
@@ -1172,6 +1571,7 @@ namespace FIHMapEditor
 
         public void ClearSpawn()
         {
+            if (Spawn != null) Undo.Push("spawn removal", CaptureMarkersState());
             Spawn = null;
             if (SelectionSys.Current.Marker == "spawn") SelectionSys.Deselect();
             SetDirty();
@@ -1181,6 +1581,7 @@ namespace FIHMapEditor
         {
             var t = Finder.FindPlayerTransform();
             if (t == null) return;
+            Undo.Push("goal change", CaptureMarkersState());
             var size = Goal?.Size ?? new float[] { 4f, 4f, 4f };
             Goal = new GoalZoneData
             {
@@ -1193,20 +1594,70 @@ namespace FIHMapEditor
 
         public void ClearGoal()
         {
+            if (Goal != null) Undo.Push("goal removal", CaptureMarkersState());
             Goal = null;
             if (SelectionSys.Current.Marker == "goal") SelectionSys.Deselect();
             SetDirty();
         }
 
+        public void AddCheckpointHere()
+        {
+            var t = Finder.FindPlayerTransform();
+            var cam = Finder.FindCameraTransform();
+            if (t == null) return;
+            Undo.Push("checkpoint add", CaptureMarkersState());
+            Checkpoints.Add(new CheckpointData
+            {
+                Pos = VecUtil.ToArray(t.position),
+                Yaw = cam != null ? cam.eulerAngles.y : t.eulerAngles.y,
+                Radius = 1.5f,
+            });
+            SelectionSys.SelectMarker("checkpoint", Checkpoints.Count - 1);
+            SetDirty();
+            ShowToast($"Checkpoint #{Checkpoints.Count} placed here");
+        }
+
+        public void AddResetZoneHere()
+        {
+            var t = Finder.FindPlayerTransform();
+            if (t == null) return;
+            Undo.Push("reset-trigger add", CaptureMarkersState());
+            ResetZones.Add(new ResetZoneData
+            {
+                Center = VecUtil.ToArray(t.position + Vector3.up * 1f),
+                Size = new float[] { 4f, 4f, 4f },
+            });
+            SelectionSys.SelectMarker("reset", ResetZones.Count - 1);
+            SetDirty();
+            ShowToast($"Reset trigger #{ResetZones.Count} placed here (invisible in play)");
+        }
+
         public void AdjustGoalSize(float delta)
         {
             if (Goal == null) return;
+            Undo.Push("goal resize", CaptureMarkersState());
             var size = VecUtil.ToVector3(Goal.Size, Vector3.one * 4f) + Vector3.one * delta;
             size.x = Mathf.Max(1f, size.x);
             size.y = Mathf.Max(1f, size.y);
             size.z = Mathf.Max(1f, size.z);
             Goal.Size = VecUtil.ToArray(size);
             SetDirty();
+        }
+
+        // "Clear space" button: hide the whole original level like Blank canvas does,
+        // but with no starting platform and no spawn changes — a truly empty void.
+        public void WipeLevelGeometry()
+        {
+            if (BaseMode == MapBaseMode.Blank)
+            {
+                ShowToast("Level is already hidden (Blank canvas)");
+                return;
+            }
+            Undo.Push("level wipe", () => SetBaseMode(MapBaseMode.Overlay));
+            BaseMode = MapBaseMode.Blank;
+            BlankCanvas.Apply();
+            SetDirty();
+            ShowToast("Level wiped — clean space. Overlay (or Ctrl+Z) brings it back.");
         }
 
         public void SetBaseMode(MapBaseMode mode)

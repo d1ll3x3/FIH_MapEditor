@@ -108,6 +108,40 @@ namespace FIHMapEditor
             catch { }
         }
 
+        // Spinning vertical ring — the coin-style checkpoint marker. Redrawn every
+        // frame, so the spin is just a time-based rotation of the circle's plane.
+        public void ShowRing(Vector3 center, float radius, Color color)
+        {
+            if (!EnsureCreated()) return;
+            try
+            {
+                float spin = Time.time * 1.6f;
+                Vector3 normal = new Vector3(Mathf.Cos(spin), 0f, Mathf.Sin(spin));
+                Vector3 u = Vector3.up;
+                Vector3 v = Vector3.Cross(normal, u).normalized;
+
+                const int SEGMENTS = 28;
+                _lr.positionCount = SEGMENTS + 1;
+                for (int i = 0; i <= SEGMENTS; i++)
+                {
+                    float a = i * Mathf.PI * 2f / SEGMENTS;
+                    _lr.SetPosition(i, center + (u * Mathf.Cos(a) + v * Mathf.Sin(a)) * radius);
+                }
+
+                _lr.startWidth = 0.09f;
+                _lr.endWidth = 0.09f;
+                _lr.startColor = color;
+                _lr.endColor = color;
+                if (_lr.material != null)
+                {
+                    if (_lr.material.HasProperty("_BaseColor")) _lr.material.SetColor("_BaseColor", color);
+                    else if (_lr.material.HasProperty("_Color")) _lr.material.color = color;
+                }
+                _go.SetActive(true);
+            }
+            catch { }
+        }
+
         // Four vertical edges only — a subtle beacon for the goal in play mode.
         public void ShowBeacon(Bounds bounds, Color color, float height)
         {

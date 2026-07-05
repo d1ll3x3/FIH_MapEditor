@@ -127,7 +127,9 @@ namespace FIHMapEditor
             for (int i = _top; i < _maps.Count && i < _top + ROWS; i++)
             {
                 var m = _maps[i];
-                string title = m.IsAutosave ? $"⟲ AUTOSAVE — {m.MapName}" : m.MapName;
+                string title = m.FileName == MapSerializer.AUTOSAVE_PREV_NAME
+                    ? $"⟲ AUTOSAVE (older) — {m.MapName}"
+                    : m.IsAutosave ? $"⟲ AUTOSAVE — {m.MapName}" : m.MapName;
                 string sub = m.ObjectCount >= 0
                     ? $"{m.ObjectCount} objects — {m.LastWrite:dd/MM/yyyy HH:mm}"
                     : $"corrupted file — {m.LastWrite:dd/MM/yyyy HH:mm}";

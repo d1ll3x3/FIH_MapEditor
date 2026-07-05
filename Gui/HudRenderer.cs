@@ -128,6 +128,11 @@ namespace FIHMapEditor
                     sub = pm.NewBest ? "GOAL! ★ new best — R for another run" : "GOAL! — R for another run";
                 else if (pm.BestTime.HasValue)
                     sub = $"best: {PlayModeController.FormatTime(pm.BestTime.Value)}";
+                if (pm.CheckpointCount > 0 && pm.Timer != TimerState.Finished)
+                {
+                    string cp = pm.ActiveCheckpoint >= 0 ? (pm.ActiveCheckpoint + 1).ToString() : "—";
+                    sub += (sub == "" ? "" : "  |  ") + $"checkpoint: {cp}/{pm.CheckpointCount}";
+                }
                 if (sub != "")
                     GUI.Label(new Rect(Screen.width / 2f - 200, 86, 400, 20), sub, _styleToast);
             }

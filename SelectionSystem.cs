@@ -7,7 +7,8 @@ namespace FIHMapEditor
     {
         public PlacedObject Placed;   // set when the selection is one of our clones
         public GameObject Raw;        // set when "Unlock" selected an original scene object
-        public string Marker;         // "goal" | "spawn" when a map marker is selected
+        public string Marker;         // "goal" | "spawn" | "checkpoint" | "reset"
+        public int MarkerIndex;       // which checkpoint / reset zone in the map's list
 
         public bool IsPlaced => Placed != null;
         public bool IsRaw => Raw != null;
@@ -16,6 +17,8 @@ namespace FIHMapEditor
         public bool IsValid => Target != null || IsMarker;
         public string DisplayName => Marker == "goal" ? "Goal zone"
             : Marker == "spawn" ? "Spawn point"
+            : Marker == "checkpoint" ? $"Checkpoint #{MarkerIndex + 1}"
+            : Marker == "reset" ? $"Reset trigger #{MarkerIndex + 1}"
             : Placed != null ? Placed.Root.name
             : (Raw != null ? Raw.name : "");
     }
@@ -42,9 +45,9 @@ namespace FIHMapEditor
             Current = new Selection { Placed = placed };
         }
 
-        public void SelectMarker(string marker)
+        public void SelectMarker(string marker, int index = 0)
         {
-            Current = new Selection { Marker = marker };
+            Current = new Selection { Marker = marker, MarkerIndex = index };
         }
 
         public void SelectRaw(GameObject go)
@@ -106,9 +109,13 @@ namespace FIHMapEditor
                     }
                 }
 
-                // Bounds pass: collider-less objects are invisible to physics raycasts.
-                // Test their AABBs (our clones live, scene decor from the scan cache) and
-                // take one only when it's closer than the physics hit.
+                // Bounds pass: collider-less objects are invisible to physics raycasts,
+                // so they're tested against their AABBs. Priority rules:
+                //  - our own collider-less clones compete with physics hits by distance
+                //    (the user placed them and must be able to reselect them), but
+                //  - scene decor (SM_* visual-only meshes) NEVER beats a collider hit —
+                //    an AABB always starts before the real surface behind it, so letting
+                //    it compete would hijack almost every click. Decor is last resort.
                 Transform boundsTransform = null;
                 float boundsDist = bestDist;
 
@@ -118,10 +125,14 @@ namespace FIHMapEditor
                     var b = ObjectCatalog.ComputeBounds(p.Root);
                     TestBounds(p.Root.transform, b, ray, ref boundsDist, ref boundsTransform);
                 }
-                foreach (var decor in _catalog.ColliderlessRoots)
+
+                if (boundsTransform == null && bestTransform == null)
                 {
-                    if (decor.Root == null || !decor.Root.activeInHierarchy) continue;
-                    TestBounds(decor.Root.transform, decor.Bounds, ray, ref boundsDist, ref boundsTransform);
+                    foreach (var decor in _catalog.ColliderlessRoots)
+                    {
+                        if (decor.Root == null || !decor.Root.activeInHierarchy) continue;
+                        TestBounds(decor.Root.transform, decor.Bounds, ray, ref boundsDist, ref boundsTransform);
+                    }
                 }
 
                 if (boundsTransform != null)
@@ -235,7 +246,8 @@ namespace FIHMapEditor
             return true;
         }
 
-        private static Transform ClimbToLogicalRoot(Transform t)
+        // Public: the invisible-collider visualizer groups colliders by the same root.
+        public static Transform ClimbToLogicalRoot(Transform t)
         {
             var root = t;
             var cache = new System.Collections.Generic.Dictionary<int, int>();

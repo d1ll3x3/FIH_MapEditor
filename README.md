@@ -30,6 +30,7 @@ All main keys are rebindable from the **KEYS** tab of the menu.
 | `[` `]` | Rotate Y by the degrees set in the SELECT tab |
 | `+` `-` | Scale by the value set in the SELECT tab |
 | `Ctrl+D` / `Del` | Duplicate / delete (level objects are hidden, revertible) |
+| `Ctrl+Z` / `Ctrl+S` | Undo last edit / save the map (letters rebindable in KEYS) |
 
 The menu header has two buttons: **Mouse placement ON/OFF** (master switch for Stamp
 mode, so menu clicks never place objects) and **Back to camera** (locks the cursor
@@ -46,7 +47,9 @@ again to move the camera).
   SELECT tab buttons.
   Selection ignores triggers and invisible colliders by default so you always pick
   what you see — flip **Pick invisible: ON** in the SELECT tab to grab kill zones and
-  invisible walls too.
+  invisible walls too, and **Show invisible: ON** to draw wireframes around them
+  (magenta = trigger, white = solid). Objects with collision always win the click;
+  visual-only meshes are picked last.
 - **Editing the original level**: with **Unlock: ON** you can select the game's own
   geometry and move / rotate / scale it (gizmo or menu) or delete it (`Del` hides it —
   nothing is ever destroyed). These level edits are saved in the map file, re-applied
@@ -73,8 +76,16 @@ again to move the camera).
 ## Map base
 
 - **Overlay**: build on top of the original level.
-- **Blank (empty canvas)**: hides the original level geometry (renderers and colliders
-  only — nothing critical) and creates a starting platform to build from scratch.
+- **Wipe Level (clean space)**: hides every game asset — all renderers and colliders
+  except the player, your placed objects and the UI — leaving a truly empty space to
+  build from scratch. Fully revertible with the Overlay button or `Ctrl+Z`.
+
+## Saving
+
+`Ctrl+S` saves instantly (creates a file from the map name if you never saved).
+The editor also autosaves every 30 seconds while there are unsaved changes, plus
+whenever you close the editor or enter Play mode. The two most recent autosaves are
+kept in the Maps Hub (`⟲ AUTOSAVE` and `⟲ AUTOSAVE (older)`).
 
 ## Sharing maps
 

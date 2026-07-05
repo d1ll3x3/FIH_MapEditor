@@ -19,6 +19,22 @@ namespace FIHMapEditor
         public float[] Size { get; set; }
     }
 
+    // Coin-style checkpoint: touching its sphere makes it the active respawn point.
+    public class CheckpointData
+    {
+        public float[] Pos { get; set; }      // respawn position (player feet)
+        public float Yaw { get; set; }        // respawn facing
+        public float Radius { get; set; } = 1.5f;
+    }
+
+    // Reset trigger: entering it teleports the player back to the last checkpoint
+    // (or the spawn when none is active). Only visible in the editor.
+    public class ResetZoneData
+    {
+        public float[] Center { get; set; }
+        public float[] Size { get; set; }
+    }
+
     // An edit applied to an ORIGINAL level object (not one of our clones): a transform
     // override and/or "deleted" (renderers+colliders disabled). Identified by the same
     // stable hierarchy path used for clone sources.
@@ -47,8 +63,9 @@ namespace FIHMapEditor
 
     public class MapFile
     {
-        // v2: added LevelEdits (v1 files load fine — the list is simply empty).
-        public const int CURRENT_FORMAT_VERSION = 2;
+        // v2: added LevelEdits. v3: added Checkpoints + ResetZones.
+        // Older files load fine — the missing lists are simply empty.
+        public const int CURRENT_FORMAT_VERSION = 3;
 
         public int FormatVersion { get; set; } = CURRENT_FORMAT_VERSION;
         public string Name { get; set; } = "Untitled";
@@ -58,6 +75,8 @@ namespace FIHMapEditor
         public GoalZoneData Goal { get; set; }
         public List<MapObjectData> Objects { get; set; } = new List<MapObjectData>();
         public List<LevelEditData> LevelEdits { get; set; } = new List<LevelEditData>();
+        public List<CheckpointData> Checkpoints { get; set; } = new List<CheckpointData>();
+        public List<ResetZoneData> ResetZones { get; set; } = new List<ResetZoneData>();
     }
 
     public static class VecUtil

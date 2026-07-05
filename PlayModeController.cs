@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace FIHMapEditor
@@ -22,22 +23,33 @@ namespace FIHMapEditor
         private float _spawnYaw;
         private bool _hasSpawn;
         private GoalZoneData _goal;
-        private bool _blankMode;
         private string _mapName = "";
 
+        // Checkpoints / reset triggers
+        private List<CheckpointData> _checkpoints = new List<CheckpointData>();
+        private List<ResetZoneData> _resetZones = new List<ResetZoneData>();
+        private float _resetCooldownUntil = 0f;
+
+        public int ActiveCheckpoint { get; private set; } = -1;
+        public int CheckpointCount => _checkpoints.Count;
+
         private readonly LineBox _goalBeacon = new LineBox("FIH_Line_GoalBeacon");
+        private readonly List<LineBox> _checkpointRings = new List<LineBox>();
 
         public PlayModeController(GameObjectFinder finder)
         {
             _finder = finder;
         }
 
-        public void Enter(SpawnPointData spawn, GoalZoneData goal, bool blankMode, string mapName)
+        public void Enter(SpawnPointData spawn, GoalZoneData goal, bool blankMode, string mapName,
+                          List<CheckpointData> checkpoints = null, List<ResetZoneData> resetZones = null)
         {
-            _goal = goal;
-            _blankMode = blankMode;
+            _goal = goal;   // blankMode no longer changes play behaviour; kept for signature stability
             _mapName = mapName ?? "";
             _hasSpawn = spawn?.Pos != null;
+            _checkpoints = checkpoints ?? new List<CheckpointData>();
+            _resetZones = resetZones ?? new List<ResetZoneData>();
+            ActiveCheckpoint = -1;
             GoalReachedThisRun = false;
             NewBest = false;
 
@@ -68,10 +80,12 @@ namespace FIHMapEditor
         {
             Timer = TimerState.Idle;
             _goalBeacon.Hide();
+            foreach (var ring in _checkpointRings) ring.Hide();
         }
 
         public void RestartRun()
         {
+            ActiveCheckpoint = -1;   // full restart: back to spawn, checkpoints forgotten
             TeleportToSpawn();
             Timer = TimerState.Armed;
             ElapsedSeconds = 0;
@@ -93,6 +107,8 @@ namespace FIHMapEditor
                 var bounds = GoalBounds();
                 _goalBeacon.ShowBeacon(bounds, new Color(0.3f, 1f, 0.5f, 0.8f), Mathf.Max(bounds.size.y, 6f));
             }
+
+            DrawCheckpointRings();
 
             switch (Timer)
             {
@@ -118,9 +134,84 @@ namespace FIHMapEditor
                     break;
             }
 
-            // Fall respawn (blank canvas has no ground outside the map)
-            if (_blankMode && Timer != TimerState.Finished && pos.y < _spawnPos.y - 100f)
-                RestartRun();
+            if (Timer != TimerState.Finished)
+            {
+                UpdateCheckpoints(pos);
+                UpdateResetZones(pos);
+                // No automatic fall respawn: falling forever is the player's business.
+                // Map makers who want one place a reset trigger where they need it.
+            }
+        }
+
+        private void UpdateCheckpoints(Vector3 playerPos)
+        {
+            for (int i = 0; i < _checkpoints.Count; i++)
+            {
+                if (i == ActiveCheckpoint) continue;
+                var cp = _checkpoints[i];
+                if (cp?.Pos == null) continue;
+                float r = Mathf.Max(0.5f, cp.Radius);
+                Vector3 center = VecUtil.ToVector3(cp.Pos) + Vector3.up * 1f;
+                if ((playerPos - center).sqrMagnitude <= r * r)
+                {
+                    ActiveCheckpoint = i;
+                    break;
+                }
+            }
+        }
+
+        private void UpdateResetZones(Vector3 playerPos)
+        {
+            if (Time.unscaledTime < _resetCooldownUntil) return;
+            foreach (var zone in _resetZones)
+            {
+                if (zone?.Center == null) continue;
+                var b = new Bounds(VecUtil.ToVector3(zone.Center), VecUtil.ToVector3(zone.Size, Vector3.one * 4f));
+                if (b.Contains(playerPos))
+                {
+                    RespawnAtCheckpoint();
+                    _resetCooldownUntil = Time.unscaledTime + 0.5f;
+                    return;
+                }
+            }
+        }
+
+        // Back to the last checkpoint — or the spawn when none is active. The timer
+        // keeps running: a reset is a mid-run punishment, not a restart.
+        private void RespawnAtCheckpoint()
+        {
+            if (ActiveCheckpoint >= 0 && ActiveCheckpoint < _checkpoints.Count
+                && _checkpoints[ActiveCheckpoint]?.Pos != null)
+            {
+                var cp = _checkpoints[ActiveCheckpoint];
+                TeleportTo(VecUtil.ToVector3(cp.Pos), cp.Yaw);
+            }
+            else
+            {
+                TeleportTo(_spawnPos, _spawnYaw);
+            }
+        }
+
+        // Reset zones themselves stay invisible in play mode — only the coin rings show.
+        private void DrawCheckpointRings()
+        {
+            while (_checkpointRings.Count < _checkpoints.Count)
+                _checkpointRings.Add(new LineBox($"FIH_Line_Checkpoint{_checkpointRings.Count}"));
+
+            for (int i = 0; i < _checkpointRings.Count; i++)
+            {
+                if (i >= _checkpoints.Count || _checkpoints[i]?.Pos == null)
+                {
+                    _checkpointRings[i].Hide();
+                    continue;
+                }
+                var cp = _checkpoints[i];
+                Vector3 center = VecUtil.ToVector3(cp.Pos) + Vector3.up * 1f;
+                var color = i == ActiveCheckpoint
+                    ? new Color(0.35f, 1f, 0.45f, 0.95f)     // active: green
+                    : new Color(1f, 0.62f, 0.15f, 0.95f);    // pending: orange
+                _checkpointRings[i].ShowRing(center, Mathf.Max(0.5f, cp.Radius), color);
+            }
         }
 
         private Bounds GoalBounds()
@@ -147,17 +238,19 @@ namespace FIHMapEditor
             }
         }
 
-        public void TeleportToSpawn()
+        public void TeleportToSpawn() => TeleportTo(_spawnPos, _spawnYaw);
+
+        private void TeleportTo(Vector3 position, float yaw)
         {
             try
             {
                 var playerT = _finder.FindPlayerTransform();
                 var rb = _finder.GetCachedPlayerRigidbody();
-                var rotation = Quaternion.Euler(0f, _spawnYaw, 0f);
+                var rotation = Quaternion.Euler(0f, yaw, 0f);
 
                 if (rb != null)
                 {
-                    rb.position = _spawnPos;
+                    rb.position = position;
                     rb.rotation = rotation;
 
                     // Brief kinematic toggle forces the physics engine to sync immediately.
@@ -173,7 +266,7 @@ namespace FIHMapEditor
                 }
                 if (playerT != null)
                 {
-                    playerT.position = _spawnPos;
+                    playerT.position = position;
                     playerT.rotation = rotation;
                 }
             }
