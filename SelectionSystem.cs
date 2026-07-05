@@ -7,12 +7,16 @@ namespace FIHMapEditor
     {
         public PlacedObject Placed;   // set when the selection is one of our clones
         public GameObject Raw;        // set when "Unlock" selected an original scene object
+        public string Marker;         // "goal" | "spawn" when a map marker is selected
 
         public bool IsPlaced => Placed != null;
-        public GameObject Target => Placed?.Root ?? Raw;
-        public bool IsValid => Target != null;
-        public string DisplayName => Placed != null
-            ? Placed.Root.name
+        public bool IsRaw => Raw != null;
+        public bool IsMarker => Marker != null;
+        public GameObject Target => Placed?.Root ?? Raw;   // null for markers
+        public bool IsValid => Target != null || IsMarker;
+        public string DisplayName => Marker == "goal" ? "Goal zone"
+            : Marker == "spawn" ? "Spawn point"
+            : Placed != null ? Placed.Root.name
             : (Raw != null ? Raw.name : "");
     }
 
@@ -38,14 +42,27 @@ namespace FIHMapEditor
             Current = new Selection { Placed = placed };
         }
 
+        public void SelectMarker(string marker)
+        {
+            Current = new Selection { Marker = marker };
+        }
+
+        public void SelectRaw(GameObject go)
+        {
+            Current = new Selection { Raw = go };
+        }
+
         public void Deselect()
         {
             Current = new Selection();
         }
 
         // Returns the world point hit (for stamp placement) even when nothing selectable
-        // was there. unlockOriginals lets clicks resolve original scene geometry too.
-        public bool PickAtMouse(bool unlockOriginals, out Vector3 hitPoint)
+        // was there. unlockOriginals lets clicks resolve original scene geometry too;
+        // pickInvisible additionally lets clicks land on triggers and renderless
+        // colliders (kill zones, invisible walls) instead of passing through to what
+        // the user actually sees.
+        public bool PickAtMouse(bool unlockOriginals, bool pickInvisible, out Vector3 hitPoint)
         {
             hitPoint = Vector3.zero;
             try
@@ -61,6 +78,10 @@ namespace FIHMapEditor
                 Transform bestTransform = null;
                 Vector3 bestPoint = Vector3.zero;
 
+                // Visibility verdicts are cached per logical root: several hits of one
+                // click often share the same object.
+                var visCache = new System.Collections.Generic.Dictionary<int, bool>();
+
                 var hits = Physics.RaycastAll(ray, 1000f);
                 if (hits != null)
                 {
@@ -70,7 +91,12 @@ namespace FIHMapEditor
                         if (col == null) continue;
                         var t = col.transform;
                         if (playerRoot != null && t.root == playerRoot) continue;
-                        if (t.name.StartsWith("FIH_Line")) continue;
+                        if (t.name.StartsWith("FIH_Line") || t.name.StartsWith("FIH_Gizmo")) continue;
+                        if (!pickInvisible)
+                        {
+                            if (col.isTrigger) continue;
+                            if (!IsVisible(t, visCache)) continue;
+                        }
                         if (hit.distance < bestDist)
                         {
                             bestDist = hit.distance;
@@ -133,6 +159,29 @@ namespace FIHMapEditor
             }
         }
 
+        // An object counts as visible when its logical root has at least one enabled
+        // renderer (ComputeBounds already ignores disabled ones). Our own clones are
+        // always pickable regardless.
+        private bool IsVisible(Transform t, System.Collections.Generic.Dictionary<int, bool> cache)
+        {
+            try
+            {
+                if (_placedManager.FromTransform(t) != null) return true;
+
+                var root = ClimbToLogicalRoot(t);
+                int id = root.GetInstanceID();
+                if (cache.TryGetValue(id, out bool cached)) return cached;
+
+                bool visible = ObjectCatalog.ComputeBounds(root.gameObject).size != Vector3.zero;
+                cache[id] = visible;
+                return visible;
+            }
+            catch
+            {
+                return true; // never let the visibility check eat a click on error
+            }
+        }
+
         private static void TestBounds(Transform t, Bounds bounds, Ray ray,
                                        ref float bestDist, ref Transform best)
         {
@@ -151,8 +200,9 @@ namespace FIHMapEditor
         }
 
         // Pure-managed slab test; avoids relying on the Bounds.IntersectRay interop
-        // out-param overload.
-        private static bool RayIntersectsAABB(Ray ray, Bounds b, out float dist)
+        // out-param overload. Public: the controller also uses it to click-test the
+        // goal/spawn marker boxes, which have no colliders.
+        public static bool RayIntersectsAABB(Ray ray, Bounds b, out float dist)
         {
             dist = 0f;
             Vector3 o = ray.origin, d = ray.direction;

@@ -19,6 +19,20 @@ namespace FIHMapEditor
         public float[] Size { get; set; }
     }
 
+    // An edit applied to an ORIGINAL level object (not one of our clones): a transform
+    // override and/or "deleted" (renderers+colliders disabled). Identified by the same
+    // stable hierarchy path used for clone sources.
+    public class LevelEditData
+    {
+        public string Path { get; set; }
+        public string Name { get; set; }
+        public bool Hidden { get; set; }
+        // Null when the edit is hide-only.
+        public float[] Pos { get; set; }
+        public float[] Rot { get; set; }   // euler angles
+        public float[] Scale { get; set; }
+    }
+
     public class MapObjectData
     {
         // Stable hierarchy path of the scene object this was cloned from (see ObjectCatalog).
@@ -33,7 +47,8 @@ namespace FIHMapEditor
 
     public class MapFile
     {
-        public const int CURRENT_FORMAT_VERSION = 1;
+        // v2: added LevelEdits (v1 files load fine — the list is simply empty).
+        public const int CURRENT_FORMAT_VERSION = 2;
 
         public int FormatVersion { get; set; } = CURRENT_FORMAT_VERSION;
         public string Name { get; set; } = "Untitled";
@@ -42,6 +57,7 @@ namespace FIHMapEditor
         public SpawnPointData Spawn { get; set; }
         public GoalZoneData Goal { get; set; }
         public List<MapObjectData> Objects { get; set; } = new List<MapObjectData>();
+        public List<LevelEditData> LevelEdits { get; set; } = new List<LevelEditData>();
     }
 
     public static class VecUtil

@@ -56,6 +56,7 @@ namespace FIHMapEditor
                 MapEditorPlugin.Logger.LogWarning(
                     $"Map '{fileName}' has format v{map.FormatVersion} (newer than v{MapFile.CURRENT_FORMAT_VERSION}); loading anyway.");
             map.Objects ??= new List<MapObjectData>();
+            map.LevelEdits ??= new List<LevelEditData>();
             return map;
         }
 

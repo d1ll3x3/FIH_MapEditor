@@ -31,6 +31,7 @@ namespace FIHMapEditor
         public float RotateStepDegrees = 45f;       // used by menu buttons and [ ] hotkeys
         public float ScaleStep = 0.5f;              // used by menu buttons and +/- hotkeys
         public bool UnlockOriginals = false;
+        public bool PickInvisible = false;          // clicks also hit triggers / invisible colliders
         public CatalogEntry StampEntry;             // active stamp-mode catalog entry
         public bool MousePlaceEnabled = false;      // master switch: world clicks place stamps
 
@@ -42,8 +43,10 @@ namespace FIHMapEditor
         public PlacedObjectManager PlacedManager { get; private set; }
         public SelectionSystem SelectionSys { get; private set; }
         public HighlightRenderer Highlight { get; private set; }
+        public GizmoController Gizmo { get; private set; }
         public PlayModeController PlayMode { get; private set; }
         public BlankCanvasController BlankCanvas { get; private set; }
+        public LevelEditManager LevelEdits { get; private set; }
 
         // GUI
         private EditorMenuRenderer _menu;
@@ -52,6 +55,11 @@ namespace FIHMapEditor
 
         private readonly LineBox _goalBox = new LineBox("FIH_Line_Goal");
         private readonly LineBox _spawnBox = new LineBox("FIH_Line_Spawn");
+
+        // Empty proxy transforms the gizmo grabs when a marker (goal/spawn) is selected;
+        // data flows proxy→marker while dragging and marker→proxy otherwise.
+        private GameObject _goalProxy;
+        private GameObject _spawnProxy;
 
         // Scene / lifecycle tracking
         private string _lastSceneName = "";
@@ -84,8 +92,10 @@ namespace FIHMapEditor
             PlacedManager = new PlacedObjectManager();
             SelectionSys = new SelectionSystem(Finder, PlacedManager, Catalog);
             Highlight = new HighlightRenderer();
+            Gizmo = new GizmoController();
             PlayMode = new PlayModeController(Finder);
             BlankCanvas = new BlankCanvasController(Finder);
+            LevelEdits = new LevelEditManager();
 
             _menu = new EditorMenuRenderer(this);
             _mapsHub = new MapsHubRenderer(this);
@@ -211,6 +221,7 @@ namespace FIHMapEditor
             Finder.ClearCache();
             PlacedManager.OnSceneChanged();
             BlankCanvas.OnSceneChanged();
+            LevelEdits.OnSceneChanged();
             Catalog.Clear();
             SelectionSys.Deselect();
             Highlight.Hide();
@@ -222,7 +233,8 @@ namespace FIHMapEditor
         {
             return _workingSnapshot != null &&
                    (_workingSnapshot.Objects.Count > 0 || _workingSnapshot.Spawn != null
-                    || _workingSnapshot.Goal != null || _workingSnapshot.BaseMode == MapBaseMode.Blank);
+                    || _workingSnapshot.Goal != null || _workingSnapshot.BaseMode == MapBaseMode.Blank
+                    || (_workingSnapshot.LevelEdits?.Count ?? 0) > 0);
         }
 
         private void HandlePendingReapply()
@@ -285,9 +297,86 @@ namespace FIHMapEditor
                 if (!AnyTextFieldFocused() && !_menu.IsCapturingBind)
                     HandleEditKeys();
             }
+            else if (Gizmo.IsDragging)
+            {
+                Gizmo.CancelDrag();
+            }
 
             Highlight.UpdateHighlight(SelectionSys.Current);
+            UpdateMarkerProxies();
+            Gizmo.UpdateVisual(GizmoTarget(), Camera.main);
             UpdateEditorMarkers();
+        }
+
+        // Transform the gizmo should attach to for the current selection.
+        private Transform GizmoTarget()
+        {
+            var sel = SelectionSys.Current;
+            if (sel.IsMarker)
+                return sel.Marker == "goal"
+                    ? (Goal != null ? GoalProxy().transform : null)
+                    : (Spawn != null ? SpawnProxy().transform : null);
+            return sel.Target?.transform;
+        }
+
+        private GameObject GoalProxy()
+        {
+            if (_goalProxy == null)
+            {
+                _goalProxy = new GameObject("FIH_GoalProxy");
+                UnityEngine.Object.DontDestroyOnLoad(_goalProxy);
+            }
+            return _goalProxy;
+        }
+
+        private GameObject SpawnProxy()
+        {
+            if (_spawnProxy == null)
+            {
+                _spawnProxy = new GameObject("FIH_SpawnProxy");
+                UnityEngine.Object.DontDestroyOnLoad(_spawnProxy);
+            }
+            return _spawnProxy;
+        }
+
+        private void UpdateMarkerProxies()
+        {
+            var sel = SelectionSys.Current;
+
+            if (Goal?.Center != null)
+            {
+                var p = GoalProxy().transform;
+                if (Gizmo.IsDragging && sel.Marker == "goal")
+                {
+                    // Live sync while dragging so the box visual follows the gizmo.
+                    Goal.Center = VecUtil.ToArray(p.position);
+                    var s = p.localScale;
+                    Goal.Size = VecUtil.ToArray(new Vector3(
+                        Mathf.Max(1f, s.x), Mathf.Max(1f, s.y), Mathf.Max(1f, s.z)));
+                }
+                else
+                {
+                    p.position = VecUtil.ToVector3(Goal.Center);
+                    p.localScale = VecUtil.ToVector3(Goal.Size, Vector3.one * 4f);
+                    p.rotation = Quaternion.identity; // the goal is an AABB — no rotation
+                }
+            }
+
+            if (Spawn?.Pos != null)
+            {
+                var p = SpawnProxy().transform;
+                if (Gizmo.IsDragging && sel.Marker == "spawn")
+                {
+                    Spawn.Pos = VecUtil.ToArray(p.position);
+                    Spawn.Yaw = p.eulerAngles.y;
+                }
+                else
+                {
+                    p.position = VecUtil.ToVector3(Spawn.Pos);
+                    p.rotation = Quaternion.Euler(0f, Spawn.Yaw, 0f);
+                    p.localScale = Vector3.one;
+                }
+            }
         }
 
         private void UpdateEditorMarkers()
@@ -311,12 +400,68 @@ namespace FIHMapEditor
 
         private void HandleWorldClick()
         {
+            // Ongoing gizmo drag owns the mouse until release.
+            if (Gizmo.IsDragging)
+            {
+                if (!UnityEngine.Input.GetMouseButton(0))
+                {
+                    Gizmo.EndDrag();
+                    var dragged = SelectionSys.Current;
+                    if (dragged.IsRaw) LevelEdits.RecordTransform(dragged.Raw);
+                    SetDirty();
+                }
+                else
+                {
+                    var dragRay = MouseRay();
+                    if (dragRay.HasValue) Gizmo.UpdateDrag(dragRay.Value);
+                }
+                return;
+            }
+
             if (!UnityEngine.Input.GetMouseButtonDown(0)) return;
             // Ask the windows directly whether the mouse is on them — clicks on the menu
             // must never reach the world.
             if (_menu.ContainsMouse() || _mapsHub.ContainsMouse()) return;
 
-            bool hit = SelectionSys.PickAtMouse(UnlockOriginals, out Vector3 hitPoint);
+            var ray = MouseRay();
+            if (!ray.HasValue) return;
+
+            // Gizmo handles win over selection picking — on clones, level objects and
+            // marker proxies alike.
+            var gizmoTarget = GizmoTarget();
+            if (gizmoTarget != null && Gizmo.TryBeginDrag(ray.Value, gizmoTarget, Camera.main))
+            {
+                // Capture the pristine state of a level object before the drag mutates it.
+                if (SelectionSys.Current.IsRaw) LevelEdits.CaptureOriginal(SelectionSys.Current.Raw);
+                return;
+            }
+
+            bool hit = SelectionSys.PickAtMouse(UnlockOriginals, PickInvisible, out Vector3 hitPoint);
+
+            // Markers (goal/spawn boxes have no colliders): select whichever is closer
+            // than the physics hit, so they're clickable like any other object.
+            float worldDist = hit
+                ? Vector3.Distance(ray.Value.origin, hitPoint)
+                : float.MaxValue;
+            string marker = null;
+            float markerDist = worldDist;
+            if (Goal?.Center != null)
+            {
+                var b = new Bounds(VecUtil.ToVector3(Goal.Center), VecUtil.ToVector3(Goal.Size, Vector3.one * 4f));
+                if (SelectionSystem.RayIntersectsAABB(ray.Value, b, out float d) && d < markerDist)
+                    { marker = "goal"; markerDist = d; }
+            }
+            if (Spawn?.Pos != null)
+            {
+                var b = new Bounds(VecUtil.ToVector3(Spawn.Pos) + Vector3.up * 1f, new Vector3(1f, 2f, 1f));
+                if (SelectionSystem.RayIntersectsAABB(ray.Value, b, out float d) && d < markerDist)
+                    { marker = "spawn"; markerDist = d; }
+            }
+            if (marker != null)
+            {
+                SelectionSys.SelectMarker(marker);
+                return;
+            }
 
             // Stamp placement only when the master mouse-place switch is on.
             if (MousePlaceEnabled && StampEntry != null && hit)
@@ -325,9 +470,21 @@ namespace FIHMapEditor
             }
         }
 
+        private Ray? MouseRay()
+        {
+            var cam = Camera.main;
+            if (cam == null) return null;
+            return cam.ScreenPointToRay(UnityEngine.Input.mousePosition);
+        }
+
         private void HandleEditKeys()
         {
             var sel = SelectionSys.Current;
+
+            // Gizmo mode hotkeys (1/2/3, like Unity's W/E/R but free of fly-key conflicts)
+            if (Input.WasKeyPressed("gzMove", KeyCode.Alpha1)) Gizmo.Mode = GizmoMode.Move;
+            if (Input.WasKeyPressed("gzRot", KeyCode.Alpha2)) Gizmo.Mode = GizmoMode.Rotate;
+            if (Input.WasKeyPressed("gzScale", KeyCode.Alpha3)) Gizmo.Mode = GizmoMode.Scale;
 
             if (Input.IsCtrlHeld() && Input.WasKeyPressed("dup", KeyCode.D))
             {
@@ -392,6 +549,8 @@ namespace FIHMapEditor
                     _mapsHub.Close();
                     Fly.Exit();
                     Highlight.Hide();
+                    Gizmo.CancelDrag();
+                    Gizmo.Hide();
                     _goalBox.Hide();
                     _spawnBox.Hide();
                 }
@@ -493,6 +652,7 @@ namespace FIHMapEditor
                 Spawn = Spawn,
                 Goal = Goal,
                 Objects = PlacedManager.Snapshot(),
+                LevelEdits = LevelEdits.Snapshot(),
             };
         }
 
@@ -518,6 +678,7 @@ namespace FIHMapEditor
         public void NewMap(bool silent = false)
         {
             PlacedManager.WipeAll();
+            LevelEdits.RestoreAll();
             SelectionSys.Deselect();
             BlankCanvas.Restore();
             MapName = "Untitled";
@@ -591,6 +752,7 @@ namespace FIHMapEditor
             if (!Catalog.HasScanned) Catalog.Scan();
 
             PlacedManager.WipeAll();
+            LevelEdits.RestoreAll();
             SelectionSys.Deselect();
 
             MapName = map.Name ?? "Untitled";
@@ -620,7 +782,13 @@ namespace FIHMapEditor
                 else skipped++;
             }
 
+            LevelEdits.Apply(map.LevelEdits, Catalog, out int editsApplied, out int editsSkipped);
+
             LoadReport = skipped == 0 ? $"{loaded} objects" : $"{loaded} objects, {skipped} skipped";
+            if (editsApplied + editsSkipped > 0)
+                LoadReport += editsSkipped == 0
+                    ? $", {editsApplied} level edits"
+                    : $", {editsApplied} level edits ({editsSkipped} skipped)";
             if (resetDirty)
             {
                 Dirty = false;
@@ -671,7 +839,7 @@ namespace FIHMapEditor
         public void DuplicateSelected()
         {
             var sel = SelectionSys.Current;
-            if (!sel.IsValid) return;
+            if (!sel.IsValid || sel.Target == null) return;
 
             string sourcePath;
             string sourceName;
@@ -708,88 +876,132 @@ namespace FIHMapEditor
             }
         }
 
-        // Only placed clones can be mutated; originals are select/duplicate-only.
-        private bool RequirePlaced()
+        // Transform that menu/keyboard mutations act on: a placed clone's root or an
+        // original level object (whose pristine state gets captured first). Markers are
+        // gizmo-only. Pair every use with EndTransformEdit().
+        private Transform BeginTransformEdit()
         {
             var sel = SelectionSys.Current;
-            if (!sel.IsValid) return false;
-            if (!sel.IsPlaced)
+            if (!sel.IsValid) return null;
+            if (sel.IsMarker)
             {
-                ShowToast("Original level object: use Duplicate to create an editable copy");
-                return false;
+                ShowToast("Markers: drag the gizmo, or use the Set Spawn/Goal Here buttons");
+                return null;
             }
-            return true;
+            if (sel.IsRaw) LevelEdits.CaptureOriginal(sel.Raw);
+            return sel.Target.transform;
+        }
+
+        private void EndTransformEdit()
+        {
+            var sel = SelectionSys.Current;
+            if (sel.IsRaw) LevelEdits.RecordTransform(sel.Raw);
+            SetDirty();
         }
 
         public void MoveSelected(Vector3 delta)
         {
-            if (!RequirePlaced()) return;
-            SelectionSys.Current.Placed.Root.transform.position += delta;
-            SetDirty();
+            var t = BeginTransformEdit();
+            if (t == null) return;
+            t.position += delta;
+            EndTransformEdit();
         }
 
         public void RotateSelectedY(float degrees)
         {
-            if (!RequirePlaced()) return;
-            SelectionSys.Current.Placed.Root.transform.Rotate(0f, degrees, 0f, Space.World);
-            SetDirty();
+            var t = BeginTransformEdit();
+            if (t == null) return;
+            t.Rotate(0f, degrees, 0f, Space.World);
+            EndTransformEdit();
         }
 
         public void RotateSelected(Vector3 axis, float degrees)
         {
-            if (!RequirePlaced()) return;
-            SelectionSys.Current.Placed.Root.transform.Rotate(axis, degrees, Space.World);
-            SetDirty();
+            var t = BeginTransformEdit();
+            if (t == null) return;
+            t.Rotate(axis, degrees, Space.World);
+            EndTransformEdit();
         }
 
         public void ScaleSelected(float delta)
         {
-            if (!RequirePlaced()) return;
-            var t = SelectionSys.Current.Placed.Root.transform;
+            var t = BeginTransformEdit();
+            if (t == null) return;
             var s = t.localScale + Vector3.one * delta;
             s.x = Mathf.Max(0.05f, s.x);
             s.y = Mathf.Max(0.05f, s.y);
             s.z = Mathf.Max(0.05f, s.z);
             t.localScale = s;
-            SetDirty();
+            EndTransformEdit();
+        }
+
+        // Per-axis scale step along the object's local axes (menu buttons).
+        public void ScaleSelectedAxis(int axis, float delta)
+        {
+            var t = BeginTransformEdit();
+            if (t == null) return;
+            var s = t.localScale;
+            if (axis == 0) s.x = Mathf.Max(0.05f, s.x + delta);
+            else if (axis == 1) s.y = Mathf.Max(0.05f, s.y + delta);
+            else s.z = Mathf.Max(0.05f, s.z + delta);
+            t.localScale = s;
+            EndTransformEdit();
         }
 
         // Absolute scale: multiplier over the object's original scale, so 1 = original
         // size and 2 = twice as big regardless of previous tweaking.
         public void SetScaleFactorSelected(float factor)
         {
-            if (!RequirePlaced()) return;
             factor = Mathf.Max(0.05f, factor);
-            var placed = SelectionSys.Current.Placed;
-            placed.Root.transform.localScale = placed.OriginalScale * factor;
-            SetDirty();
+            var sel = SelectionSys.Current;
+            if (sel.IsPlaced)
+            {
+                sel.Placed.Root.transform.localScale = sel.Placed.OriginalScale * factor;
+                SetDirty();
+            }
+            else if (sel.IsRaw)
+            {
+                var record = LevelEdits.CaptureOriginal(sel.Raw);
+                sel.Raw.transform.localScale = record.OrigScale * factor;
+                EndTransformEdit();
+            }
         }
 
         public void ResetSelected()
         {
-            if (!RequirePlaced()) return;
-            var placed = SelectionSys.Current.Placed;
-            var t = placed.Root.transform;
-            t.rotation = Quaternion.identity;
-            t.localScale = placed.OriginalScale;
-            SetDirty();
+            var sel = SelectionSys.Current;
+            if (sel.IsPlaced)
+            {
+                var t = sel.Placed.Root.transform;
+                t.rotation = Quaternion.identity;
+                t.localScale = sel.Placed.OriginalScale;
+                SetDirty();
+            }
+            else if (sel.IsRaw)
+            {
+                // Level object: back to exactly how the game placed it.
+                var record = LevelEdits.Find(sel.Raw);
+                if (record != null) LevelEdits.RevertTransform(record);
+                SetDirty();
+            }
         }
 
         public void AlignSelected()
         {
-            if (!RequirePlaced()) return;
-            var t = SelectionSys.Current.Placed.Root.transform;
+            var t = BeginTransformEdit();
+            if (t == null) return;
             var p = t.position;
             t.position = new Vector3(Mathf.Round(p.x * 2f) / 2f, Mathf.Round(p.y * 2f) / 2f, Mathf.Round(p.z * 2f) / 2f);
             var e = t.eulerAngles;
             t.eulerAngles = new Vector3(Mathf.Round(e.x / 15f) * 15f, Mathf.Round(e.y / 15f) * 15f, Mathf.Round(e.z / 15f) * 15f);
-            SetDirty();
+            EndTransformEdit();
         }
 
         public void DropSelectedToFloor()
         {
-            if (!RequirePlaced()) return;
-            var root = SelectionSys.Current.Placed.Root;
+            var targetT = BeginTransformEdit();
+            if (targetT == null) return;
+            var root = targetT.gameObject;
             var bounds = ObjectCatalog.ComputeBounds(root);
             if (bounds.size == Vector3.zero) return;
 
@@ -818,7 +1030,7 @@ namespace FIHMapEditor
                     return;
                 }
                 root.transform.position += Vector3.up * (floorY - bounds.min.y);
-                SetDirty();
+                EndTransformEdit();
             }
             catch (Exception ex)
             {
@@ -829,22 +1041,27 @@ namespace FIHMapEditor
         public void MultiClone(int count, Vector3 direction, bool stairs)
         {
             var sel = SelectionSys.Current;
-            if (!RequirePlaced()) return;
-            var placed = sel.Placed;
-            var bounds = ObjectCatalog.ComputeBounds(placed.Root);
+            if (!sel.IsValid || sel.IsMarker || sel.Target == null) return;
+
+            GameObject sourceGo = sel.Target;
+            string sourcePath = sel.IsPlaced ? sel.Placed.SourcePath : ObjectCatalog.BuildPath(sel.Raw.transform);
+            string sourceName = sel.IsPlaced ? sel.Placed.SourceName : sel.Raw.name;
+            TintColor tint = sel.IsPlaced ? sel.Placed.Tint : TintColor.None;
+
+            var bounds = ObjectCatalog.ComputeBounds(sourceGo);
             if (bounds.size == Vector3.zero) return;
 
             float stepAlong = Mathf.Abs(Vector3.Dot(bounds.size, direction));
             if (stepAlong < 0.05f) stepAlong = 1f;
             float stepUp = stairs ? bounds.size.y : 0f;
 
-            var t = placed.Root.transform;
+            var t = sourceGo.transform;
             PlacedObject last = null;
             for (int i = 1; i <= count; i++)
             {
                 Vector3 pos = t.position + direction * stepAlong * i + Vector3.up * stepUp * i;
-                last = PlacedManager.Spawn(placed.Root, placed.SourcePath, placed.SourceName,
-                    pos, t.rotation, t.localScale, placed.Tint);
+                last = PlacedManager.Spawn(sourceGo, sourcePath, sourceName,
+                    pos, t.rotation, t.localScale, tint);
             }
             if (last != null)
             {
@@ -856,12 +1073,33 @@ namespace FIHMapEditor
 
         public void DeleteSelected()
         {
-            if (!RequirePlaced()) return;
-            var name = SelectionSys.Current.Placed.Root.name;
-            PlacedManager.Delete(SelectionSys.Current.Placed);
+            var sel = SelectionSys.Current;
+            if (!sel.IsValid) return;
+
+            if (sel.IsMarker)
+            {
+                if (sel.Marker == "goal") ClearGoal(); else ClearSpawn();
+                SelectionSys.Deselect();
+                ShowToast(sel.Marker == "goal" ? "Goal removed" : "Spawn removed");
+                return;
+            }
+
+            if (sel.IsPlaced)
+            {
+                var name = sel.Placed.Root.name;
+                PlacedManager.Delete(sel.Placed);
+                SelectionSys.Deselect();
+                SetDirty();
+                ShowToast($"Deleted: {name}");
+                return;
+            }
+
+            // Original level object: hide it (revertible from the LIST tab), never destroy.
+            var rawName = sel.Raw.name;
+            LevelEdits.Hide(sel.Raw);
             SelectionSys.Deselect();
             SetDirty();
-            ShowToast($"Deleted: {name}");
+            ShowToast($"Level object hidden: {rawName} (revert from LIST)");
         }
 
         public void WipeCustomObjects()
@@ -876,7 +1114,7 @@ namespace FIHMapEditor
         public void TpPlayerOntoSelected()
         {
             var sel = SelectionSys.Current;
-            if (!sel.IsValid) return;
+            if (!sel.IsValid || sel.Target == null) return;
             var bounds = ObjectCatalog.ComputeBounds(sel.Target);
             if (bounds.size == Vector3.zero) return;
 
@@ -889,11 +1127,31 @@ namespace FIHMapEditor
 
         public void BringSelectedHere()
         {
-            if (!RequirePlaced()) return;
+            var t = BeginTransformEdit();
+            if (t == null) return;
             var cam = Finder.FindCameraTransform();
             if (cam == null) return;
-            SelectionSys.Current.Placed.Root.transform.position = cam.position + cam.forward * 6f;
+            t.position = cam.position + cam.forward * 6f;
+            EndTransformEdit();
+        }
+
+        public void RevertLevelEdit(LevelEditRecord record)
+        {
+            if (record == null) return;
+            if (SelectionSys.Current.IsRaw && SelectionSys.Current.Raw == record.Target)
+                SelectionSys.Deselect();
+            LevelEdits.Revert(record);
             SetDirty();
+            ShowToast($"Level edit reverted: {record.Name}");
+        }
+
+        public void RestoreAllLevelEdits()
+        {
+            int n = LevelEdits.Count;
+            if (SelectionSys.Current.IsRaw) SelectionSys.Deselect();
+            LevelEdits.RestoreAll();
+            SetDirty();
+            ShowToast($"Reverted {n} level edits");
         }
 
         // ─────────────────────────────────────────────────────── spawn/goal/base ──
@@ -915,6 +1173,7 @@ namespace FIHMapEditor
         public void ClearSpawn()
         {
             Spawn = null;
+            if (SelectionSys.Current.Marker == "spawn") SelectionSys.Deselect();
             SetDirty();
         }
 
@@ -935,6 +1194,7 @@ namespace FIHMapEditor
         public void ClearGoal()
         {
             Goal = null;
+            if (SelectionSys.Current.Marker == "goal") SelectionSys.Deselect();
             SetDirty();
         }
 

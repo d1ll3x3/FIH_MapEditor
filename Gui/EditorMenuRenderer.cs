@@ -25,12 +25,14 @@ namespace FIHMapEditor
         // Catalog state
         private string _filter = "";
         private string _category = "";        // empty = all
+        private bool _solidOnly = false;      // hide collider-less decoration (SM meshes...)
         private int _catalogTop = 0;
         private const int CATALOG_ROWS = 15;
 
         // List state
+        private string _listFilter = "";
         private int _listTop = 0;
-        private const int LIST_ROWS = 17;
+        private const int LIST_ROWS = 16;
 
         // Multi-clone state
         private int _mcCount = 5;
@@ -45,8 +47,9 @@ namespace FIHMapEditor
         // Map tab state
         private string _nameField = null;     // lazily initialised from controller
 
-        // Wipe confirmation
+        // Wipe / revert confirmations
         private float _wipeConfirmUntil = 0f;
+        private float _revertEditsConfirmUntil = 0f;
 
         private GUIStyle _styleTitle, _styleSmall, _styleRow;
         private bool _stylesReady;
@@ -168,36 +171,46 @@ namespace FIHMapEditor
             float y = ContentY;
 
             GUI.Label(new Rect(15, y + 3, 45, 20), "Filter:", _styleSmall);
-            _filter = _win.TextField(new Rect(60, y, 220, 22), "filter", _filter);
-            if (_win.Button(new Rect(290, y, 90, 22), "Rescan"))
+            _filter = _win.TextField(new Rect(60, y, 160, 22), "filter", _filter);
+            if (_win.Button(new Rect(228, y, 80, 22), "Rescan"))
             {
                 _c.Catalog.Scan();
                 _catalogTop = 0;
                 _c.ShowToast($"Catalog: {_c.Catalog.Entries.Count} unique objects");
             }
+            // Hide pure decoration (SM meshes, VFX...) that has no collision to stand on.
+            if (_win.ToggleButton(new Rect(314, y, 120, 22), "Solid only", _solidOnly))
+            {
+                _solidOnly = !_solidOnly;
+                _catalogTop = 0;
+            }
             if (_c.StampEntry != null)
             {
                 string state = _c.MousePlaceEnabled ? "" : " (mouse OFF)";
                 GUI.backgroundColor = _c.MousePlaceEnabled ? new Color(1f, 0.5f, 0.2f) : new Color(0.45f, 0.45f, 0.45f);
-                if (_win.Button(new Rect(390, y, W - 405, 22), $"STAMP: {Truncate(_c.StampEntry.DisplayName, 13)}{state} [X]"))
+                if (_win.Button(new Rect(444, y, W - 459, 22), $"STAMP: {Truncate(_c.StampEntry.DisplayName, 11)}{state} [X]"))
                     _c.StampEntry = null;
                 GUI.backgroundColor = Color.white;
             }
             else
             {
-                GUI.Label(new Rect(390, y + 3, W - 405, 20), "Stamp: click places copies", _styleSmall);
+                GUI.Label(new Rect(444, y + 3, W - 459, 20), "Stamp: click places copies", _styleSmall);
             }
             y += 28;
 
-            // Category filter row
+            // Category filter — wraps onto extra rows so no category is ever dropped.
             float cx = 15;
             if (_win.ToggleButton(new Rect(cx, y, 60, 22), "All", _category == ""))
                 { _category = ""; _catalogTop = 0; }
             cx += 64;
             foreach (var cat in _c.Catalog.Categories)
             {
-                float cw = 18 + cat.Length * 8;
-                if (cx + cw > W - 15) break;
+                float cw = 22 + cat.Length * 9;
+                if (cx + cw > W - 15)
+                {
+                    cx = 15;
+                    y += 26;
+                }
                 if (_win.ToggleButton(new Rect(cx, y, cw, 22), cat, _category == cat))
                     { _category = cat; _catalogTop = 0; }
                 cx += cw + 4;
@@ -252,6 +265,7 @@ namespace FIHMapEditor
             foreach (var e in _c.Catalog.Entries)
             {
                 if (_category != "" && e.Category != _category) continue;
+                if (_solidOnly && !e.HasCollider) continue;
                 if (f != "" && !e.DisplayName.ToLowerInvariant().Contains(f)) continue;
                 result.Add(e);
             }
@@ -266,10 +280,25 @@ namespace FIHMapEditor
             var sel = _c.SelectionSys.Current;
 
             string selName = sel.IsValid ? sel.DisplayName : "(nothing selected — click an object)";
-            GUI.Label(new Rect(15, y, 440, 22), $"Selected: {Truncate(selName, 42)}", _styleTitle);
-            if (_win.ToggleButton(new Rect(460, y, 145, 22), $"Unlock: {(_c.UnlockOriginals ? "ON" : "OFF")}", _c.UnlockOriginals))
+            GUI.Label(new Rect(15, y, 325, 22), $"Selected: {Truncate(selName, 26)}", _styleTitle);
+            if (_win.ToggleButton(new Rect(345, y, 150, 22), $"Unlock: {(_c.UnlockOriginals ? "ON" : "OFF")}", _c.UnlockOriginals))
                 _c.UnlockOriginals = !_c.UnlockOriginals;
-            y += 30;
+            // OFF = clicks ignore triggers and renderless colliders (kill zones, invisible
+            // walls) so you always pick what you actually see.
+            if (_win.ToggleButton(new Rect(500, y, 165, 22), $"Pick invisible: {(_c.PickInvisible ? "ON" : "OFF")}", _c.PickInvisible))
+                _c.PickInvisible = !_c.PickInvisible;
+            y += 28;
+
+            // Gizmo mode (mouse dragging on the axes; 1/2/3 hotkeys)
+            GUI.Label(new Rect(15, y + 3, 55, 20), "Gizmo:", _styleSmall);
+            (string, GizmoMode)[] gizmoModes = { ("Move (1)", GizmoMode.Move), ("Rotate (2)", GizmoMode.Rotate), ("Scale (3)", GizmoMode.Scale) };
+            for (int i = 0; i < gizmoModes.Length; i++)
+            {
+                if (_win.ToggleButton(new Rect(75 + i * 104, y, 100, 22), gizmoModes[i].Item1, _c.Gizmo.Mode == gizmoModes[i].Item2))
+                    _c.Gizmo.Mode = gizmoModes[i].Item2;
+            }
+            GUI.Label(new Rect(395, y + 3, 270, 20), "drag the colored axes on the object", _styleSmall);
+            y += 28;
 
             // Move speed
             GUI.Label(new Rect(15, y + 3, 100, 20), "Move Speed:", _styleSmall);
@@ -323,6 +352,16 @@ namespace FIHMapEditor
             }
             y += 30;
 
+            // Per-axis scale (local axes), stepping by the same box value.
+            GUI.Label(new Rect(15, y + 4, 70, 20), "Scale axis:", _styleSmall);
+            string[] axisLabels = { "X -", "X +", "Y -", "Y +", "Z -", "Z +" };
+            for (int i = 0; i < 6; i++)
+            {
+                if (_win.Button(new Rect(85 + i * 60, y, 56, 24), axisLabels[i]))
+                    _c.ScaleSelectedAxis(i / 2, (i % 2 == 0 ? -1f : 1f) * scaleVal);
+            }
+            y += 30;
+
             // Actions row
             if (_win.Button(new Rect(15, y, 140, 24), "Duplicate (Ctrl+D)")) _c.DuplicateSelected();
             if (_win.Button(new Rect(160, y, 100, 24), "Delete (Del)")) _c.DeleteSelected();
@@ -361,7 +400,7 @@ namespace FIHMapEditor
             y += 32;
 
             GUI.Label(new Rect(15, y, W - 30, 60),
-                "Keys (free cursor): arrows = move  |  PgUp/PgDn = up/down\n" +
+                "Keys (free cursor): arrows = move  |  PgUp/PgDn = up/down  |  1/2/3 = gizmo mode\n" +
                 "[ ] = rotate Y by the ° box  |  +/- = scale by the box  |  Ctrl+D = duplicate  |  Del = delete",
                 _styleSmall);
         }
@@ -414,6 +453,19 @@ namespace FIHMapEditor
                 else _wipeConfirmUntil = Time.unscaledTime + 3f;
             }
             GUI.backgroundColor = Color.white;
+
+            if (_c.LevelEdits.Count > 0)
+            {
+                bool confirmingEdits = Time.unscaledTime < _revertEditsConfirmUntil;
+                GUI.backgroundColor = confirmingEdits ? Color.red : new Color(0.8f, 0.6f, 0.3f);
+                if (_win.Button(new Rect(445, y, 200, 30),
+                    confirmingEdits ? "SURE? (click again)" : $"Revert Level Edits ({_c.LevelEdits.Count})"))
+                {
+                    if (confirmingEdits) { _c.RestoreAllLevelEdits(); _revertEditsConfirmUntil = 0f; }
+                    else _revertEditsConfirmUntil = Time.unscaledTime + 3f;
+                }
+                GUI.backgroundColor = Color.white;
+            }
             y += 44;
 
             GUI.Label(new Rect(15, y, W - 30, 80),
@@ -429,49 +481,94 @@ namespace FIHMapEditor
         private void DrawListTab()
         {
             float y = ContentY;
-            var placed = _c.PlacedManager.Placed;
 
-            GUI.Label(new Rect(15, y, 400, 22), $"Placed objects: {placed.Count}", _styleTitle);
-            y += 26;
+            // Filtered views of both lists: our clones and edited level objects.
+            string f = _listFilter.Trim().ToLowerInvariant();
+            var placed = new List<PlacedObject>();
+            foreach (var p in _c.PlacedManager.Placed)
+            {
+                if (p.Root == null) continue;
+                if (f != "" && !p.Root.name.ToLowerInvariant().Contains(f)) continue;
+                placed.Add(p);
+            }
+            var edits = new List<LevelEditRecord>();
+            foreach (var r in _c.LevelEdits.Records)
+            {
+                if (r.Target == null) continue;
+                if (f != "" && !r.Name.ToLowerInvariant().Contains(f)) continue;
+                edits.Add(r);
+            }
+
+            GUI.Label(new Rect(15, y + 3, 300, 22),
+                $"Placed: {placed.Count}   Level edits: {edits.Count}", _styleTitle);
+            GUI.Label(new Rect(320, y + 6, 45, 20), "Filter:", _styleSmall);
+            _listFilter = _win.TextField(new Rect(370, y + 2, 220, 22), "listfilter", _listFilter);
+            if (_listFilter != "" && _win.Button(new Rect(596, y + 2, 44, 22), "X"))
+                _listFilter = "";
+            y += 30;
 
             var listRect = new Rect(10, y, W - 20, LIST_ROWS * 26 + 4);
             GUI.Box(listRect, "");
 
+            int total = placed.Count + edits.Count;
             float scroll = _win.ScrollDeltaOver(listRect);
             if (scroll != 0)
-                _listTop = Mathf.Clamp(_listTop + (scroll < 0 ? 3 : -3), 0, Mathf.Max(0, placed.Count - LIST_ROWS));
-            _listTop = Mathf.Clamp(_listTop, 0, Mathf.Max(0, placed.Count - LIST_ROWS));
+                _listTop = Mathf.Clamp(_listTop + (scroll < 0 ? 3 : -3), 0, Mathf.Max(0, total - LIST_ROWS));
+            _listTop = Mathf.Clamp(_listTop, 0, Mathf.Max(0, total - LIST_ROWS));
 
             float ry = y + 4;
-            for (int i = _listTop; i < placed.Count && i < _listTop + LIST_ROWS; i++)
+            for (int i = _listTop; i < total && i < _listTop + LIST_ROWS; i++)
             {
-                var p = placed[i];
-                if (p.Root == null) continue;
-                bool isSelected = _c.SelectionSys.Current.Placed == p;
-                var pos = p.Root.transform.position;
-
-                if (isSelected) GUI.backgroundColor = new Color(0.2f, 0.75f, 0.35f);
-                if (_win.Button(new Rect(15, ry, 470, 24),
-                    $"#{p.Id:000}  {Truncate(p.Root.name, 30)}  ({pos.x:0.#}, {pos.y:0.#}, {pos.z:0.#})"))
-                {
-                    _c.SelectionSys.Select(p);
-                }
-                GUI.backgroundColor = Color.white;
-
-                if (_win.Button(new Rect(490, ry, 85, 24), "TP to it"))
-                {
-                    _c.SelectionSys.Select(p);
-                    _c.TpPlayerOntoSelected();
-                }
-                GUI.backgroundColor = new Color(0.8f, 0.35f, 0.3f);
-                if (_win.Button(new Rect(580, ry, 60, 24), "X"))
-                {
-                    _c.SelectionSys.Select(p);
-                    _c.DeleteSelected();
-                }
-                GUI.backgroundColor = Color.white;
+                if (i < placed.Count) DrawPlacedRow(placed[i], ry);
+                else DrawLevelEditRow(edits[i - placed.Count], ry);
                 ry += 26;
             }
+        }
+
+        private void DrawPlacedRow(PlacedObject p, float ry)
+        {
+            bool isSelected = _c.SelectionSys.Current.Placed == p;
+            var pos = p.Root.transform.position;
+
+            if (isSelected) GUI.backgroundColor = new Color(0.2f, 0.75f, 0.35f);
+            if (_win.Button(new Rect(15, ry, 470, 24),
+                $"#{p.Id:000}  {Truncate(p.Root.name, 30)}  ({pos.x:0.#}, {pos.y:0.#}, {pos.z:0.#})"))
+            {
+                _c.SelectionSys.Select(p);
+            }
+            GUI.backgroundColor = Color.white;
+
+            if (_win.Button(new Rect(490, ry, 85, 24), "TP to it"))
+            {
+                _c.SelectionSys.Select(p);
+                _c.TpPlayerOntoSelected();
+            }
+            GUI.backgroundColor = new Color(0.8f, 0.35f, 0.3f);
+            if (_win.Button(new Rect(580, ry, 60, 24), "X"))
+            {
+                _c.SelectionSys.Select(p);
+                _c.DeleteSelected();
+            }
+            GUI.backgroundColor = Color.white;
+        }
+
+        private void DrawLevelEditRow(LevelEditRecord r, float ry)
+        {
+            bool isSelected = _c.SelectionSys.Current.Raw == r.Target;
+            string state = r.Hidden
+                ? (r.TransformEdited ? "hidden+moved" : "hidden")
+                : "moved";
+
+            if (isSelected) GUI.backgroundColor = new Color(0.2f, 0.75f, 0.35f);
+            else GUI.backgroundColor = new Color(0.9f, 0.75f, 0.4f);
+            if (_win.Button(new Rect(15, ry, 470, 24), $"[LVL] {Truncate(r.Name, 30)}  ({state})"))
+            {
+                _c.SelectionSys.SelectRaw(r.Target);
+            }
+            GUI.backgroundColor = Color.white;
+
+            if (_win.Button(new Rect(490, ry, 145, 24), "Revert"))
+                _c.RevertLevelEdit(r);
         }
 
         // ────────────────────────────────────────────────────────────── MAP ──

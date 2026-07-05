@@ -24,11 +24,12 @@ All main keys are rebindable from the **KEYS** tab of the menu.
 | `P` | Toggle Editor ↔ Play mode |
 | `R` (in Play) | Restart the run |
 | `WASD` + `Space`/`Ctrl` (+`Shift` boost) | Fly |
-| Left click (free cursor) | Select object / place with Stamp |
+| Left click (free cursor) | Select object / place with Stamp / drag a gizmo axis |
+| `1` `2` `3` (free cursor) | Gizmo mode: Move / Rotate / Scale |
 | Arrows / `PgUp` `PgDn` | Move the selected object |
 | `[` `]` | Rotate Y by the degrees set in the SELECT tab |
 | `+` `-` | Scale by the value set in the SELECT tab |
-| `Ctrl+D` / `Del` | Duplicate / delete |
+| `Ctrl+D` / `Del` | Duplicate / delete (level objects are hidden, revertible) |
 
 The menu header has two buttons: **Mouse placement ON/OFF** (master switch for Stamp
 mode, so menu clicks never place objects) and **Back to camera** (locks the cursor
@@ -39,7 +40,20 @@ again to move the camera).
 - **Editor**: fly freely, scan the scene and the game files into the object catalog
   (CATALOG tab → Rescan), place objects with PLACE/STAMP and edit them with the menu
   or the keyboard. The SELECT tab has numeric boxes for exact rotation degrees and
-  scale values.
+  scale values, per-axis rotate and scale buttons, and a Blender/Unity-style **gizmo**:
+  drag the colored axes on the selected object to move it, spin the rings to rotate,
+  or stretch an axis to scale (per-axis). Switch gizmo modes with `1`/`2`/`3` or the
+  SELECT tab buttons.
+  Selection ignores triggers and invisible colliders by default so you always pick
+  what you see — flip **Pick invisible: ON** in the SELECT tab to grab kill zones and
+  invisible walls too.
+- **Editing the original level**: with **Unlock: ON** you can select the game's own
+  geometry and move / rotate / scale it (gizmo or menu) or delete it (`Del` hides it —
+  nothing is ever destroyed). These level edits are saved in the map file, re-applied
+  on load, and revertible one by one from the LIST tab or all at once from TOOLS.
+- **Goal & spawn**: click the goal box or spawn marker to select it and edit it with
+  the gizmo — move the goal, stretch its size per axis in Scale mode, rotate the spawn
+  to change the starting view. `Del` removes the selected marker.
 - **Play**: if the map has a spawn you appear there; the timer starts on your first
   movement and stops when you enter the goal zone. Best time per map is saved locally.
 
@@ -48,8 +62,13 @@ again to move the camera).
 - **Scene objects**: everything visible in the level, with or without colliders
   (collider-less decoration is listed under the *Decor* category and picked by
   bounding box when clicked).
+- **Hidden scene objects**: level objects that are disabled at scan time
+  (phase-specific obstacles, pooled props) appear under the *Hidden* category and
+  become visible when placed.
 - **Game files**: prefab assets Unity has loaded from the game's data files appear
   under the *GameFiles* category, even if they are not present in the current level.
+  Only assets Unity has actually loaded can be listed — unreferenced bundles on disk
+  are not visible to the mod.
 
 ## Map base
 

@@ -15,6 +15,7 @@ namespace FIHMapEditor
         public Vector3 BoundsSize;
         public GameObject Source;     // live reference; re-resolved by path when destroyed
         public int InstanceCount;     // how many identical objects the scan found
+        public bool HasCollider;      // false = pure decoration (SM meshes, VFX...)
     }
 
     // A collider-less scene object: physics raycasts can't hit it, so clicking it is
@@ -105,6 +106,7 @@ namespace FIHMapEditor
                         BoundsSize = bounds.size,
                         InstanceCount = 1,
                         Category = Categorize(display, bounds.size),
+                        HasCollider = true,
                     };
                     seen[key] = entry;
                     Entries.Add(entry);
@@ -148,10 +150,12 @@ namespace FIHMapEditor
                         BoundsSize = bounds.size,
                         InstanceCount = 1,
                         Category = hasCollider ? Categorize(display, bounds.size) : "Decor",
+                        HasCollider = hasCollider,
                     };
                     Entries.Add(seen[key]);
                 }
 
+                ScanInactiveSceneObjects(seen, playerRoot);
                 ScanPrefabAssets(seen);
 
                 Entries.Sort((a, b) => string.CompareOrdinal(a.DisplayName, b.DisplayName));
@@ -161,11 +165,72 @@ namespace FIHMapEditor
                 Categories.Sort();
 
                 HasScanned = true;
-                MapEditorPlugin.Logger.LogInfo($"[CATALOG] Scan found {Entries.Count} unique objects ({colliders.Length} colliders examined).");
+                var counts = new Dictionary<string, int>();
+                foreach (var e in Entries)
+                    counts[e.Category] = counts.TryGetValue(e.Category, out int n) ? n + 1 : 1;
+                var summary = new StringBuilder();
+                foreach (var cat in Categories)
+                    summary.Append($"{cat}: {counts[cat]}  ");
+                MapEditorPlugin.Logger.LogInfo(
+                    $"[CATALOG] Scan found {Entries.Count} unique objects ({colliders.Length} colliders examined). {summary}");
             }
             catch (Exception ex)
             {
                 MapEditorPlugin.Logger.LogError($"[CATALOG] Scan error: {ex}");
+            }
+        }
+
+        // Third scan source: scene objects that were DISABLED at scan time (phase-specific
+        // obstacles, pooled props, despawned pickups). FindObjectsOfType never returns
+        // them, so without this pass they simply look "missing" from the catalog.
+        // Cloning re-activates the clone root, so they place as visible objects.
+        private void ScanInactiveSceneObjects(Dictionary<string, CatalogEntry> seen, Transform playerRoot)
+        {
+            try
+            {
+                var all = Resources.FindObjectsOfTypeAll(Il2CppType.Of<GameObject>());
+                int added = 0;
+                foreach (var obj in all)
+                {
+                    var go = obj?.TryCast<GameObject>();
+                    if (go == null) continue;
+                    if (!go.scene.IsValid()) continue;               // assets: separate pass
+                    if (go.activeInHierarchy) continue;              // active: already scanned
+                    var t = go.transform;
+                    // Only the topmost node of each disabled subtree.
+                    if (t.parent != null && !t.parent.gameObject.activeInHierarchy) continue;
+                    if (t.root.name == "FIH_SpawnRoot" || t.root.name == "FIH_MapObjectsRoot") continue;
+                    if ((go.hideFlags & HideFlags.HideAndDontSave) != 0) continue;
+                    if (!IsValidCandidate(t, playerRoot, requireActive: false)) continue;
+                    if (go.GetComponentInChildren<Renderer>(true) == null) continue;
+
+                    // Renderer.bounds is meaningless while disabled; measure the meshes.
+                    var bounds = ComputeAssetBounds(go);
+                    if (bounds.size == Vector3.zero) continue;
+
+                    string display = CleanName(go.name);
+                    string key = display + "|" + FirstMeshName(go);
+                    if (seen.ContainsKey(key)) continue;             // active twin already listed
+
+                    var entry = new CatalogEntry
+                    {
+                        DisplayName = display,
+                        SourcePath = BuildPath(t),
+                        Source = go,
+                        BoundsSize = bounds.size,
+                        InstanceCount = 1,
+                        Category = "Hidden",
+                        HasCollider = go.GetComponentInChildren<Collider>(true) != null,
+                    };
+                    seen[key] = entry;
+                    Entries.Add(entry);
+                    added++;
+                }
+                MapEditorPlugin.Logger.LogInfo($"[CATALOG] Inactive-object scan added {added} hidden entries.");
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[CATALOG] Inactive-object scan failed: {ex.Message}");
             }
         }
 
@@ -204,6 +269,7 @@ namespace FIHMapEditor
                         BoundsSize = bounds.size,
                         InstanceCount = 1,
                         Category = ASSET_CATEGORY,
+                        HasCollider = go.GetComponentInChildren<Collider>(true) != null,
                     };
                     seen[key] = entry;
                     Entries.Add(entry);
@@ -247,19 +313,29 @@ namespace FIHMapEditor
                 foreach (var mf in go.GetComponentsInChildren<MeshFilter>(true))
                 {
                     if (mf == null || mf.sharedMesh == null) continue;
-                    var b = mf.sharedMesh.bounds;
-                    Vector3 center = mf.transform.TransformPoint(b.center);
-                    Vector3 scale = mf.transform.lossyScale;
-                    Vector3 size = new Vector3(Mathf.Abs(b.size.x * scale.x),
-                                               Mathf.Abs(b.size.y * scale.y),
-                                               Mathf.Abs(b.size.z * scale.z));
-                    var wb = new Bounds(center, size);
-                    if (!has) { bounds = wb; has = true; }
-                    else bounds.Encapsulate(wb);
+                    Accumulate(mf.sharedMesh.bounds, mf.transform, ref bounds, ref has);
+                }
+                // Skinned meshes have no MeshFilter; without this they'd measure as zero.
+                foreach (var smr in go.GetComponentsInChildren<SkinnedMeshRenderer>(true))
+                {
+                    if (smr == null || smr.sharedMesh == null) continue;
+                    Accumulate(smr.sharedMesh.bounds, smr.transform, ref bounds, ref has);
                 }
             }
             catch { }
             return has ? bounds : new Bounds(Vector3.zero, Vector3.zero);
+
+            static void Accumulate(Bounds local, Transform t, ref Bounds bounds, ref bool has)
+            {
+                Vector3 center = t.TransformPoint(local.center);
+                Vector3 scale = t.lossyScale;
+                Vector3 size = new Vector3(Mathf.Abs(local.size.x * scale.x),
+                                           Mathf.Abs(local.size.y * scale.y),
+                                           Mathf.Abs(local.size.z * scale.z));
+                var wb = new Bounds(center, size);
+                if (!has) { bounds = wb; has = true; }
+                else bounds.Encapsulate(wb);
+            }
         }
 
         // Re-find a prefab asset by name (used when a stored map references an asset
@@ -324,11 +400,11 @@ namespace FIHMapEditor
             return count;
         }
 
-        private bool IsValidCandidate(Transform root, Transform playerRoot)
+        private bool IsValidCandidate(Transform root, Transform playerRoot, bool requireActive = true)
         {
             if (root == null) return false;
             var go = root.gameObject;
-            if (!go.activeInHierarchy) return false;
+            if (requireActive && !go.activeInHierarchy) return false;
             if (go.name.Contains(CLONE_MARKER)) return false;
             if (go.name == "FIH_MapObjectsRoot" || go.name == "FIH_SpawnRoot") return false;
             if (playerRoot != null && root.root == playerRoot) return false;

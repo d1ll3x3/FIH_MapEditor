@@ -66,6 +66,7 @@ $dllsToCopy = @(
     "Il2Cppmscorlib.dll",
     "Il2CppSystem.dll",
     "Unity.InputSystem.dll",
+    "UnityEngine.AssetBundleModule.dll",
     "UnityEngine.AudioModule.dll",
     "UnityEngine.CoreModule.dll",
     "UnityEngine.IMGUIModule.dll",
