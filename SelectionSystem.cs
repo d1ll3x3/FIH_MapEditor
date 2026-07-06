@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace FIHMapEditor
@@ -19,6 +20,8 @@ namespace FIHMapEditor
             : Marker == "spawn" ? "Spawn point"
             : Marker == "checkpoint" ? $"Checkpoint #{MarkerIndex + 1}"
             : Marker == "reset" ? $"Reset trigger #{MarkerIndex + 1}"
+            : Marker == "cannontarget" ? $"Launch target (obj #{MarkerIndex:000})"
+            : Marker == "cannonlaunch" ? $"Launch point (obj #{MarkerIndex:000})"
             : Placed != null ? Placed.Root.name
             : (Raw != null ? Raw.name : "");
     }
@@ -33,6 +36,11 @@ namespace FIHMapEditor
 
         public Selection Current { get; private set; } = new Selection();
 
+        // Ctrl+Click multi-selection: placed clones and level objects only (no markers).
+        // Current always mirrors the last-clicked member while active.
+        public readonly List<Selection> Multi = new List<Selection>();
+        public bool IsMulti => Multi.Count > 1;
+
         public SelectionSystem(GameObjectFinder finder, PlacedObjectManager placedManager, ObjectCatalog catalog)
         {
             _finder = finder;
@@ -42,22 +50,80 @@ namespace FIHMapEditor
 
         public void Select(PlacedObject placed)
         {
+            Multi.Clear();
             Current = new Selection { Placed = placed };
         }
 
         public void SelectMarker(string marker, int index = 0)
         {
+            Multi.Clear();
             Current = new Selection { Marker = marker, MarkerIndex = index };
         }
 
         public void SelectRaw(GameObject go)
         {
+            Multi.Clear();
             Current = new Selection { Raw = go };
         }
 
         public void Deselect()
         {
+            Multi.Clear();
             Current = new Selection();
+        }
+
+        // Ctrl-click path: Current was just re-picked; toggle its membership, seeding
+        // the group with whatever was selected before.
+        public void CtrlMerge(Selection previous)
+        {
+            var cur = Current;
+            if (!cur.IsValid || cur.IsMarker) return;
+
+            if (Multi.Count == 0 && previous != null && previous.IsValid && !previous.IsMarker
+                && previous.Target != cur.Target)
+                Multi.Add(previous);
+
+            var existing = Multi.Find(m => m.Target == cur.Target);
+            if (existing != null)
+            {
+                Multi.Remove(existing);
+                Current = Multi.Count > 0 ? Multi[Multi.Count - 1] : new Selection();
+            }
+            else
+            {
+                Multi.Add(cur);
+            }
+
+            if (Multi.Count == 1)
+            {
+                Current = Multi[0];
+                Multi.Clear();
+            }
+        }
+
+        // Replace the whole group programmatically (e.g. after a group duplicate).
+        public void SetMulti(List<Selection> members)
+        {
+            Multi.Clear();
+            if (members != null) Multi.AddRange(members);
+            Current = Multi.Count > 0 ? Multi[Multi.Count - 1] : new Selection();
+            if (Multi.Count == 1) Multi.Clear();
+        }
+
+        // Drop members whose objects were destroyed; collapse to single when only one left.
+        public void PruneMulti()
+        {
+            if (Multi.Count == 0) return;
+            Multi.RemoveAll(m => m.Target == null);
+            if (Multi.Count == 1)
+            {
+                Current = Multi[0];
+                Multi.Clear();
+            }
+            else if (Multi.Count == 0 && Current.Target == null && !Current.IsMarker)
+            {
+                Current = new Selection();
+            }
         }
 
         // Returns the world point hit (for stamp placement) even when nothing selectable

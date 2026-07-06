@@ -54,13 +54,15 @@ namespace FIHMapEditor
         public bool IsShiftHeld() => KeyHeld(KeyCode.LeftShift) || KeyHeld(KeyCode.RightShift)
             || (Gamepad.current?[UnityEngine.InputSystem.LowLevel.GamepadButton.East].isPressed == true);
 
-        // Fly mode movement — keyboard + gamepad left stick / triggers
-        public bool IsFlyForward() => KeyHeld(KeyCode.W) || GetLeftStickY() > STICK_DEADZONE;
-        public bool IsFlyBack() => KeyHeld(KeyCode.S) || GetLeftStickY() < -STICK_DEADZONE;
-        public bool IsFlyLeft() => KeyHeld(KeyCode.A) || GetLeftStickX() < -STICK_DEADZONE;
-        public bool IsFlyRight() => KeyHeld(KeyCode.D) || GetLeftStickX() > STICK_DEADZONE;
-        public bool IsFlyUp() => KeyHeld(KeyCode.Space) || GetRightTrigger() > STICK_DEADZONE;
-        public bool IsFlyDown() => KeyHeld(KeyCode.LeftControl) || KeyHeld(KeyCode.RightControl) || GetLeftTrigger() > STICK_DEADZONE;
+        // Fly mode movement — configurable keyboard binds + gamepad left stick / triggers
+        public bool IsFlyForward() => KeyHeld(EditorConfig.Settings.FlyForwardKey) || GetLeftStickY() > STICK_DEADZONE;
+        public bool IsFlyBack() => KeyHeld(EditorConfig.Settings.FlyBackKey) || GetLeftStickY() < -STICK_DEADZONE;
+        public bool IsFlyLeft() => KeyHeld(EditorConfig.Settings.FlyLeftKey) || GetLeftStickX() < -STICK_DEADZONE;
+        public bool IsFlyRight() => KeyHeld(EditorConfig.Settings.FlyRightKey) || GetLeftStickX() > STICK_DEADZONE;
+        public bool IsFlyUp() => KeyHeld(EditorConfig.Settings.FlyUpKey) || GetRightTrigger() > STICK_DEADZONE;
+        public bool IsFlyDown() => KeyHeld(EditorConfig.Settings.FlyDownKey) || GetLeftTrigger() > STICK_DEADZONE;
+        public bool IsBoostHeld() => KeyHeld(EditorConfig.Settings.FlyBoostKey)
+            || (Gamepad.current?[UnityEngine.InputSystem.LowLevel.GamepadButton.East].isPressed == true);
 
         private float GetLeftStickX() => Gamepad.current?.leftStick.x.ReadValue() ?? 0f;
         private float GetLeftStickY() => Gamepad.current?.leftStick.y.ReadValue() ?? 0f;

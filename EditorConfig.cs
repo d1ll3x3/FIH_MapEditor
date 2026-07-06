@@ -10,7 +10,7 @@ namespace FIHMapEditor
 {
     public class EditorSettings
     {
-        public const int CURRENT_VERSION = 2;
+        public const int CURRENT_VERSION = 3;
 
         // No initializer on purpose: an old JSON without this field deserializes to 0,
         // which triggers the migration below.
@@ -26,6 +26,20 @@ namespace FIHMapEditor
         // share letters with plain single-key binds without conflicting.
         public KeyCode UndoKey { get; set; } = KeyCode.Z;
         public KeyCode SaveKey { get; set; } = KeyCode.S;
+        // No version bump for this addition: a missing JSON field keeps the initializer
+        // default, and a migration would wipe the user's other binds.
+        // E: interact with cannons/boost pads in play mode (no conflict with fly mode).
+        public KeyCode InteractKey { get; set; } = KeyCode.E;
+
+        // Fly-mode movement. Space/E default for up/down; Ctrl is reserved for editor
+        // shortcuts (Ctrl+Z/D/S), so avoid it for movement.
+        public KeyCode FlyForwardKey { get; set; } = KeyCode.W;
+        public KeyCode FlyBackKey { get; set; } = KeyCode.S;
+        public KeyCode FlyLeftKey { get; set; } = KeyCode.A;
+        public KeyCode FlyRightKey { get; set; } = KeyCode.D;
+        public KeyCode FlyUpKey { get; set; } = KeyCode.Space;
+        public KeyCode FlyDownKey { get; set; } = KeyCode.Q;
+        public KeyCode FlyBoostKey { get; set; } = KeyCode.LeftShift;
 
         public float FlySpeed { get; set; } = 18.0f;
         public float FlySpeedBoost { get; set; } = 3.0f;

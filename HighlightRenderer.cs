@@ -108,6 +108,29 @@ namespace FIHMapEditor
             catch { }
         }
 
+        // Straight segment between two points (cannon → target aim line).
+        public void ShowLine(Vector3 a, Vector3 b, Color color)
+        {
+            if (!EnsureCreated()) return;
+            try
+            {
+                _lr.positionCount = 2;
+                _lr.SetPosition(0, a);
+                _lr.SetPosition(1, b);
+                _lr.startWidth = 0.05f;
+                _lr.endWidth = 0.05f;
+                _lr.startColor = color;
+                _lr.endColor = color;
+                if (_lr.material != null)
+                {
+                    if (_lr.material.HasProperty("_BaseColor")) _lr.material.SetColor("_BaseColor", color);
+                    else if (_lr.material.HasProperty("_Color")) _lr.material.color = color;
+                }
+                _go.SetActive(true);
+            }
+            catch { }
+        }
+
         // Spinning vertical ring — the coin-style checkpoint marker. Redrawn every
         // frame, so the spin is just a time-based rotation of the circle's plane.
         public void ShowRing(Vector3 center, float radius, Color color)

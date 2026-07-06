@@ -51,6 +51,7 @@ namespace FIHMapEditor
         public BlankCanvasController BlankCanvas { get; private set; }
         public LevelEditManager LevelEdits { get; private set; }
         public UndoSystem Undo { get; private set; }
+        public MechanicsController Mechanics { get; private set; }
 
         // In-flight undo capture: filled when a transform edit / marker drag begins,
         // pushed onto the stack when it ends (only if something actually changed).
@@ -75,10 +76,29 @@ namespace FIHMapEditor
         private GameObject _spawnProxy;
         private GameObject _checkpointProxy;
         private GameObject _resetProxy;
+        private GameObject _cannonTargetProxy;
+        private GameObject _cannonLaunchProxy;
+        private GameObject _multiProxy;   // group gizmo handle at the selection centroid
+
+        // Multi-drag state: each member's transform at drag start, relative to the centroid.
+        private class MultiDragStart
+        {
+            public GameObject Go;
+            public bool Raw;
+            public Vector3 Pos;
+            public Quaternion Rot;
+            public Vector3 Scale;
+        }
+        private readonly List<MultiDragStart> _multiDragStarts = new List<MultiDragStart>();
+        private Vector3 _multiDragCentroid;
 
         // Editor-mode visuals for the marker lists (rings + red boxes), pooled.
         private readonly List<LineBox> _checkpointBoxes = new List<LineBox>();
         private readonly List<LineBox> _resetBoxes = new List<LineBox>();
+        private readonly List<LineBox> _cannonTargetBoxes = new List<LineBox>();
+        private readonly List<LineBox> _cannonLines = new List<LineBox>();
+        private readonly List<LineBox> _cannonLaunchBoxes = new List<LineBox>();
+        private readonly List<LineBox> _multiBoxes = new List<LineBox>();
 
         // Scene / lifecycle tracking
         private string _lastSceneName = "";
@@ -117,6 +137,7 @@ namespace FIHMapEditor
             BlankCanvas = new BlankCanvasController(Finder);
             LevelEdits = new LevelEditManager();
             Undo = new UndoSystem();
+            Mechanics = new MechanicsController(Finder, PlacedManager, Input, Fly);
 
             _menu = new EditorMenuRenderer(this);
             _mapsHub = new MapsHubRenderer(this);
@@ -171,6 +192,7 @@ namespace FIHMapEditor
                         break;
                     case EditorMode.Play:
                         PlayMode.Update();
+                        Mechanics.Update(Mode, acceptInput, AnyTextFieldFocused());
                         if (acceptInput && Input.WasKeyPressed("restart", EditorConfig.Settings.RestartRunKey))
                         {
                             if (Input.IsShiftHeld()) PlayMode.RestartRun();   // full restart
@@ -251,6 +273,7 @@ namespace FIHMapEditor
         {
             if (CursorFree) SetCursorFree(false);
             Mode = EditorMode.Off;
+            Mechanics.ResetState();
             PlayMode.Exit();
             Finder.ClearCache();
             PlacedManager.OnSceneChanged();
@@ -333,8 +356,11 @@ namespace FIHMapEditor
                 SetCursorFree(!CursorFree);
             }
 
-            if (acceptInput && (!CursorFree || !AnyTextFieldFocused()))
+            // While a cannon holds (or test-launches) the player, fly must not move it.
+            if (acceptInput && (!CursorFree || !AnyTextFieldFocused()) && !Mechanics.IsControllingPlayer)
                 Fly.Move();
+
+            Mechanics.Update(Mode, acceptInput, AnyTextFieldFocused());
 
             if (acceptInput && CursorFree)
             {
@@ -348,16 +374,50 @@ namespace FIHMapEditor
                 ClearPendingUndo();
             }
 
+            SelectionSys.PruneMulti();
+            if (SelectionSys.IsMulti && !Gizmo.IsDragging)
+            {
+                // Park the group handle on the centroid between drags.
+                var p = MultiProxy().transform;
+                p.position = MultiCentroid();
+                p.rotation = Quaternion.identity;
+                p.localScale = Vector3.one;
+            }
+
             Highlight.UpdateHighlight(SelectionSys.Current);
+            UpdateMultiHighlights();
             UpdateMarkerProxies();
             Gizmo.UpdateVisual(GizmoTarget(), Camera.main);
             Xray.Update(Camera.main);
             UpdateEditorMarkers();
         }
 
+        // Dim cyan boxes on every group member except the primary (which has the
+        // pulsing highlight already).
+        private void UpdateMultiHighlights()
+        {
+            var members = SelectionSys.Multi;
+            while (_multiBoxes.Count < members.Count)
+                _multiBoxes.Add(new LineBox($"FIH_Line_Multi{_multiBoxes.Count}"));
+            for (int i = 0; i < _multiBoxes.Count; i++)
+            {
+                if (i >= members.Count || members[i].Target == null
+                    || members[i].Target == SelectionSys.Current.Target)
+                {
+                    _multiBoxes[i].Hide();
+                    continue;
+                }
+                var bounds = ObjectCatalog.ComputeBounds(members[i].Target);
+                if (bounds.size == Vector3.zero) { _multiBoxes[i].Hide(); continue; }
+                _multiBoxes[i].ShowBox(bounds, new Color(0.2f, 0.8f, 0.8f, 0.5f));
+            }
+        }
+
         // Transform the gizmo should attach to for the current selection.
         private Transform GizmoTarget()
         {
+            if (SelectionSys.IsMulti) return MultiProxy().transform;
+
             var sel = SelectionSys.Current;
             if (sel.IsMarker)
             {
@@ -369,6 +429,13 @@ namespace FIHMapEditor
                         return sel.MarkerIndex < Checkpoints.Count ? CheckpointProxy().transform : null;
                     case "reset":
                         return sel.MarkerIndex < ResetZones.Count ? ResetProxy().transform : null;
+                    case "cannontarget":
+                        // MarkerIndex holds the PlacedObject.Id (stable), not a list index.
+                        var pc = PlacedManager.FindById(sel.MarkerIndex);
+                        return pc?.CannonTarget != null ? CannonTargetProxy().transform : null;
+                    case "cannonlaunch":
+                        var lc = PlacedManager.FindById(sel.MarkerIndex);
+                        return lc != null && lc.Mechanic == MechanicType.Cannon ? CannonLaunchProxy().transform : null;
                     default: return null;
                 }
             }
@@ -413,6 +480,49 @@ namespace FIHMapEditor
                 UnityEngine.Object.DontDestroyOnLoad(_resetProxy);
             }
             return _resetProxy;
+        }
+
+        private GameObject CannonTargetProxy()
+        {
+            if (_cannonTargetProxy == null)
+            {
+                _cannonTargetProxy = new GameObject("FIH_CannonTargetProxy");
+                UnityEngine.Object.DontDestroyOnLoad(_cannonTargetProxy);
+            }
+            return _cannonTargetProxy;
+        }
+
+        private GameObject CannonLaunchProxy()
+        {
+            if (_cannonLaunchProxy == null)
+            {
+                _cannonLaunchProxy = new GameObject("FIH_CannonLaunchProxy");
+                UnityEngine.Object.DontDestroyOnLoad(_cannonLaunchProxy);
+            }
+            return _cannonLaunchProxy;
+        }
+
+        private GameObject MultiProxy()
+        {
+            if (_multiProxy == null)
+            {
+                _multiProxy = new GameObject("FIH_MultiProxy");
+                UnityEngine.Object.DontDestroyOnLoad(_multiProxy);
+            }
+            return _multiProxy;
+        }
+
+        private Vector3 MultiCentroid()
+        {
+            Vector3 sum = Vector3.zero;
+            int n = 0;
+            foreach (var m in SelectionSys.Multi)
+            {
+                if (m.Target == null) continue;
+                sum += m.Target.transform.position;
+                n++;
+            }
+            return n > 0 ? sum / n : Vector3.zero;
         }
 
         private void UpdateMarkerProxies()
@@ -492,6 +602,54 @@ namespace FIHMapEditor
                     p.rotation = Quaternion.identity; // AABB — no rotation
                 }
             }
+
+            if (sel.Marker == "cannontarget")
+            {
+                var pc = PlacedManager.FindById(sel.MarkerIndex);
+                if (pc?.CannonTarget == null)
+                {
+                    SelectionSys.Deselect(); // cannon deleted while its target was selected
+                }
+                else
+                {
+                    var p = CannonTargetProxy().transform;
+                    if (Gizmo.IsDragging)
+                    {
+                        pc.CannonTarget = VecUtil.ToArray(p.position);
+                    }
+                    else
+                    {
+                        p.position = VecUtil.ToVector3(pc.CannonTarget);
+                        p.rotation = Quaternion.identity;  // a point: position only
+                        p.localScale = Vector3.one;
+                    }
+                }
+            }
+
+            if (sel.Marker == "cannonlaunch")
+            {
+                var lc = PlacedManager.FindById(sel.MarkerIndex);
+                if (lc == null || lc.Mechanic != MechanicType.Cannon || lc.Root == null)
+                {
+                    SelectionSys.Deselect();
+                }
+                else
+                {
+                    // Materialize the auto position so there is a stored value to edit.
+                    lc.CannonLaunchPos ??= VecUtil.ToArray(MechanicsController.GetLaunchPos(lc));
+                    var p = CannonLaunchProxy().transform;
+                    if (Gizmo.IsDragging)
+                    {
+                        lc.CannonLaunchPos = VecUtil.ToArray(p.position);
+                    }
+                    else
+                    {
+                        p.position = VecUtil.ToVector3(lc.CannonLaunchPos);
+                        p.rotation = Quaternion.identity;
+                        p.localScale = Vector3.one;
+                    }
+                }
+            }
         }
 
         private void UpdateEditorMarkers()
@@ -540,6 +698,49 @@ namespace FIHMapEditor
                                                   VecUtil.ToVector3(zone.Size, Vector3.one * 4f)),
                                        new Color(1f, 0.25f, 0.25f, 0.9f));
             }
+
+            // Launch targets (violet ring + aim line) of cannons and aimed pads — editor-only.
+            var cannons = new List<PlacedObject>();
+            foreach (var p in PlacedManager.Placed)
+                if (p.Mechanic != MechanicType.None && p.CannonTarget != null && p.Root != null)
+                    cannons.Add(p);
+
+            while (_cannonTargetBoxes.Count < cannons.Count)
+            {
+                _cannonTargetBoxes.Add(new LineBox($"FIH_Line_EdCannonTgt{_cannonTargetBoxes.Count}"));
+                _cannonLines.Add(new LineBox($"FIH_Line_EdCannonAim{_cannonLines.Count}"));
+            }
+            while (_cannonLaunchBoxes.Count < cannons.Count)
+                _cannonLaunchBoxes.Add(new LineBox($"FIH_Line_EdCannonLaunch{_cannonLaunchBoxes.Count}"));
+            for (int i = 0; i < _cannonTargetBoxes.Count; i++)
+            {
+                if (i >= cannons.Count)
+                {
+                    _cannonTargetBoxes[i].Hide();
+                    _cannonLines[i].Hide();
+                    if (i < _cannonLaunchBoxes.Count) _cannonLaunchBoxes[i].Hide();
+                    continue;
+                }
+                var cannon = cannons[i];
+                Vector3 target = VecUtil.ToVector3(cannon.CannonTarget);
+                var color = new Color(0.75f, 0.45f, 1f, 0.95f);
+                _cannonTargetBoxes[i].ShowRing(target + Vector3.up * 0.2f, 0.8f, color);
+
+                if (cannon.Mechanic == MechanicType.Cannon)
+                {
+                    // Cyan ring = where the cannon holds and launches you from.
+                    Vector3 launch = MechanicsController.GetLaunchPos(cannon);
+                    _cannonLaunchBoxes[i].ShowRing(launch, 0.55f, new Color(0.25f, 0.9f, 1f, 0.95f));
+                    _cannonLines[i].ShowLine(launch, target, new Color(0.75f, 0.45f, 1f, 0.5f));
+                }
+                else
+                {
+                    _cannonLaunchBoxes[i].Hide();
+                    var padBounds = MechanicsController.ComputeColliderBounds(cannon.Root);
+                    _cannonLines[i].ShowLine(padBounds.center + Vector3.up * padBounds.extents.y, target,
+                                             new Color(0.75f, 0.45f, 1f, 0.5f));
+                }
+            }
         }
 
         private void HideMarkerVisuals()
@@ -548,6 +749,10 @@ namespace FIHMapEditor
             _spawnBox.Hide();
             foreach (var box in _checkpointBoxes) box.Hide();
             foreach (var box in _resetBoxes) box.Hide();
+            foreach (var box in _cannonTargetBoxes) box.Hide();
+            foreach (var box in _cannonLines) box.Hide();
+            foreach (var box in _cannonLaunchBoxes) box.Hide();
+            foreach (var box in _multiBoxes) box.Hide();
         }
 
         private bool AnyTextFieldFocused() => _menu.HasFocusedTextField || _mapsHub.HasFocusedTextField;
@@ -624,6 +829,208 @@ namespace FIHMapEditor
             };
         }
 
+        // ─────────────────────────────────────────────────────── multi-selection ──
+
+        private void BeginMultiDrag()
+        {
+            _multiDragStarts.Clear();
+            _multiDragCentroid = MultiCentroid();
+            foreach (var m in SelectionSys.Multi)
+            {
+                if (m.Target == null) continue;
+                if (m.IsRaw) LevelEdits.CaptureOriginal(m.Raw);
+                var t = m.Target.transform;
+                _multiDragStarts.Add(new MultiDragStart
+                {
+                    Go = m.Target,
+                    Raw = m.IsRaw,
+                    Pos = t.position,
+                    Rot = t.rotation,
+                    Scale = t.localScale,
+                });
+            }
+            _pendingMarkerUndo = CaptureMultiState();
+        }
+
+        // Move/rotate/scale every member by the proxy's delta, pivoting on the centroid
+        // (Blender-style group transform).
+        private void ApplyMultiDrag()
+        {
+            var p = MultiProxy().transform;
+            Vector3 dPos = p.position - _multiDragCentroid;
+            Quaternion dRot = p.rotation;                    // started as identity
+            float f = Mathf.Max(0.05f, Mathf.Max(p.localScale.x, Mathf.Max(p.localScale.y, p.localScale.z)));
+
+            foreach (var start in _multiDragStarts)
+            {
+                if (start.Go == null) continue;
+                var t = start.Go.transform;
+                t.position = _multiDragCentroid + dPos + dRot * ((start.Pos - _multiDragCentroid) * f);
+                t.rotation = dRot * start.Rot;
+                t.localScale = start.Scale * f;
+            }
+        }
+
+        // One restore closure for the whole group (single Ctrl+Z entry).
+        private Action CaptureMultiState()
+        {
+            var snap = new List<MultiDragStart>();
+            foreach (var m in SelectionSys.Multi)
+            {
+                if (m.Target == null) continue;
+                var t = m.Target.transform;
+                snap.Add(new MultiDragStart
+                {
+                    Go = m.Target,
+                    Raw = m.IsRaw,
+                    Pos = t.position,
+                    Rot = t.rotation,
+                    Scale = t.localScale,
+                });
+            }
+            return () =>
+            {
+                foreach (var s in snap)
+                {
+                    if (s.Go == null) continue;
+                    var t = s.Go.transform;
+                    t.position = s.Pos;
+                    t.rotation = s.Rot;
+                    t.localScale = s.Scale;
+                    if (s.Raw) LevelEdits.RecordTransform(s.Go);
+                }
+                SetDirty();
+            };
+        }
+
+        private void MultiTransform(string undoLabel, Action<Transform, Vector3> apply)
+        {
+            Undo.Push(undoLabel, CaptureMultiState());
+            Vector3 centroid = MultiCentroid();
+            foreach (var m in SelectionSys.Multi)
+            {
+                if (m.Target == null) continue;
+                if (m.IsRaw) LevelEdits.CaptureOriginal(m.Raw);
+                apply(m.Target.transform, centroid);
+                if (m.IsRaw) LevelEdits.RecordTransform(m.Raw);
+            }
+            SetDirty();
+        }
+
+        private void MultiDelete()
+        {
+            var placedDatas = new List<MapObjectData>();
+            var hiddenRaws = new List<GameObject>();
+            foreach (var m in SelectionSys.Multi)
+            {
+                if (m.IsPlaced && m.Placed.Root != null)
+                {
+                    placedDatas.Add(m.Placed.ToData());
+                    PlacedManager.Delete(m.Placed);
+                }
+                else if (m.IsRaw && m.Raw != null)
+                {
+                    LevelEdits.Hide(m.Raw);
+                    hiddenRaws.Add(m.Raw);
+                }
+            }
+            int total = placedDatas.Count + hiddenRaws.Count;
+            SelectionSys.Deselect();
+
+            Undo.Push($"group delete ({total} objects)", () =>
+            {
+                foreach (var data in placedDatas)
+                {
+                    var src = Catalog.ResolveSource(data.Source, data.SourceName);
+                    if (src == null) continue;
+                    PlacedManager.Spawn(src, data.Source, data.SourceName,
+                        VecUtil.ToVector3(data.Pos),
+                        Quaternion.Euler(VecUtil.ToVector3(data.Rot)),
+                        VecUtil.ToVector3(data.Scale, Vector3.one),
+                        data.Tint, restore: data);
+                }
+                foreach (var raw in hiddenRaws)
+                {
+                    var record = LevelEdits.Find(raw);
+                    if (record != null)
+                    {
+                        LevelEdits.Unhide(record);
+                        LevelEdits.RecordTransform(raw);
+                    }
+                }
+                SetDirty();
+            });
+
+            SetDirty();
+            ShowToast($"Deleted {total} objects (placed removed, level objects hidden)");
+        }
+
+        private void MultiDuplicate()
+        {
+            Vector3 offset = Vector3.up * 0.5f + CameraAxisForward() * 1.5f;
+            var copies = new List<PlacedObject>();
+            foreach (var m in SelectionSys.Multi)
+            {
+                if (m.Target == null) continue;
+                GameObject source = m.Target;
+                string path = m.IsPlaced ? m.Placed.SourcePath : ObjectCatalog.BuildPath(m.Raw.transform);
+                string name = m.IsPlaced ? m.Placed.SourceName : m.Raw.name;
+                TintColor tint = m.IsPlaced ? m.Placed.Tint : TintColor.None;
+                var restore = m.IsPlaced ? m.Placed.ToData() : null;
+
+                var t = source.transform;
+                var copy = PlacedManager.Spawn(source, path, name, t.position + offset, t.rotation, t.localScale, tint, restore);
+                if (copy == null) continue;
+                if (copy.Mechanic != MechanicType.None && copy.CannonTarget != null)
+                    copy.CannonTarget = VecUtil.ToArray(VecUtil.ToVector3(copy.CannonTarget) + offset);
+                copies.Add(copy);
+            }
+            if (copies.Count == 0) return;
+
+            var undoCopies = new List<PlacedObject>(copies);
+            Undo.Push($"group duplicate ({copies.Count})", () =>
+            {
+                foreach (var c in undoCopies)
+                {
+                    if (SelectionSys.Current.Placed == c) SelectionSys.Deselect();
+                    PlacedManager.Delete(c);
+                }
+                SelectionSys.PruneMulti();
+                SetDirty();
+            });
+
+            // The copies become the new group.
+            var newMembers = new List<Selection>();
+            foreach (var c in copies) newMembers.Add(new Selection { Placed = c });
+            SelectionSys.SetMulti(newMembers);
+            SetDirty();
+            ShowToast($"Duplicated {copies.Count} objects");
+        }
+
+        // Cannon targets live on PlacedObjects, not the marker lists, so they need
+        // their own restore closure (CaptureMarkersState would miss them).
+        private Action CaptureCannonTargetState(PlacedObject cannon)
+        {
+            if (cannon?.CannonTarget == null) return null;
+            var saved = (float[])cannon.CannonTarget.Clone();
+            return () =>
+            {
+                if (cannon.Root != null) cannon.CannonTarget = (float[])saved.Clone();
+                SetDirty();
+            };
+        }
+
+        private Action CaptureCannonLaunchState(PlacedObject cannon)
+        {
+            if (cannon == null) return null;
+            var saved = (float[])cannon.CannonLaunchPos?.Clone();   // null = auto position
+            return () =>
+            {
+                if (cannon.Root != null) cannon.CannonLaunchPos = (float[])saved?.Clone();
+                SetDirty();
+            };
+        }
+
         public void UndoLast()
         {
             if (Undo.Undo(out string label))
@@ -637,14 +1044,26 @@ namespace FIHMapEditor
             // Ongoing gizmo drag owns the mouse until release.
             if (Gizmo.IsDragging)
             {
+                bool multi = SelectionSys.IsMulti;
                 if (!UnityEngine.Input.GetMouseButton(0))
                 {
                     Gizmo.EndDrag();
                     var dragged = SelectionSys.Current;
-                    if (dragged.IsRaw) LevelEdits.RecordTransform(dragged.Raw);
+                    if (multi)
+                    {
+                        foreach (var start in _multiDragStarts)
+                            if (start.Raw && start.Go != null) LevelEdits.RecordTransform(start.Go);
+                    }
+                    else if (dragged.IsRaw)
+                    {
+                        LevelEdits.RecordTransform(dragged.Raw);
+                    }
                     if (_pendingMarkerUndo != null)
                     {
-                        Undo.Push($"edit of {dragged.DisplayName}", _pendingMarkerUndo);
+                        string label = multi
+                            ? $"group edit ({SelectionSys.Multi.Count} objects)"
+                            : $"edit of {dragged.DisplayName}";
+                        Undo.Push(label, _pendingMarkerUndo);
                         _pendingMarkerUndo = null;
                     }
                     else
@@ -657,6 +1076,7 @@ namespace FIHMapEditor
                 {
                     var dragRay = MouseRay();
                     if (dragRay.HasValue) Gizmo.UpdateDrag(dragRay.Value);
+                    if (multi) ApplyMultiDrag();
                 }
                 return;
             }
@@ -669,23 +1089,50 @@ namespace FIHMapEditor
             var ray = MouseRay();
             if (!ray.HasValue) return;
 
+            // Ctrl+Click = multi-selection toggle; it never grabs the gizmo or stamps.
+            bool ctrlClick = Input.IsCtrlHeld();
+
             // Gizmo handles win over selection picking — on clones, level objects and
             // marker proxies alike.
             var gizmoTarget = GizmoTarget();
-            if (gizmoTarget != null && Gizmo.TryBeginDrag(ray.Value, gizmoTarget, Camera.main))
+            if (!ctrlClick && gizmoTarget != null && Gizmo.TryBeginDrag(ray.Value, gizmoTarget, Camera.main))
             {
+                if (SelectionSys.IsMulti)
+                {
+                    BeginMultiDrag();
+                    return;
+                }
+
                 // Capture the pristine state of a level object before the drag mutates it.
                 if (SelectionSys.Current.IsRaw) LevelEdits.CaptureOriginal(SelectionSys.Current.Raw);
 
                 // Arm the Ctrl+Z entry for this drag.
-                if (SelectionSys.Current.IsMarker)
+                if (SelectionSys.Current.Marker == "cannontarget")
+                    _pendingMarkerUndo = CaptureCannonTargetState(PlacedManager.FindById(SelectionSys.Current.MarkerIndex));
+                else if (SelectionSys.Current.Marker == "cannonlaunch")
+                    _pendingMarkerUndo = CaptureCannonLaunchState(PlacedManager.FindById(SelectionSys.Current.MarkerIndex));
+                else if (SelectionSys.Current.IsMarker)
                     _pendingMarkerUndo = CaptureMarkersState();
                 else
                     CaptureTransformUndo(gizmoTarget.gameObject, SelectionSys.Current.IsRaw);
                 return;
             }
 
+            var previousSelection = SelectionSys.Current;
             bool hit = SelectionSys.PickAtMouse(UnlockOriginals, PickInvisible, out Vector3 hitPoint);
+
+            if (ctrlClick)
+            {
+                // Only merge when the click actually picked something (PickAtMouse
+                // leaves Current untouched on empty space).
+                if (!ReferenceEquals(SelectionSys.Current, previousSelection))
+                {
+                    SelectionSys.CtrlMerge(previousSelection);
+                    if (SelectionSys.IsMulti)
+                        ShowToast($"{SelectionSys.Multi.Count} objects selected (Ctrl+Click to add/remove)");
+                }
+                return;
+            }
 
             // Markers (goal/spawn boxes have no colliders): select whichever is closer
             // than the physics hit, so they're clickable like any other object.
@@ -723,6 +1170,22 @@ namespace FIHMapEditor
                 var b = new Bounds(VecUtil.ToVector3(zone.Center), VecUtil.ToVector3(zone.Size, Vector3.one * 4f));
                 if (SelectionSystem.RayIntersectsAABB(ray.Value, b, out float d) && d < markerDist)
                     { marker = "reset"; markerIndex = i; markerDist = d; }
+            }
+            foreach (var p in PlacedManager.Placed)
+            {
+                if (p.Mechanic == MechanicType.None || p.Root == null) continue;
+                if (p.CannonTarget != null)
+                {
+                    var b = new Bounds(VecUtil.ToVector3(p.CannonTarget), Vector3.one * 1.6f);
+                    if (SelectionSystem.RayIntersectsAABB(ray.Value, b, out float d) && d < markerDist)
+                        { marker = "cannontarget"; markerIndex = p.Id; markerDist = d; }
+                }
+                if (p.Mechanic == MechanicType.Cannon)
+                {
+                    var b = new Bounds(MechanicsController.GetLaunchPos(p), Vector3.one * 1.2f);
+                    if (SelectionSystem.RayIntersectsAABB(ray.Value, b, out float d) && d < markerDist)
+                        { marker = "cannonlaunch"; markerIndex = p.Id; markerDist = d; }
+                }
             }
             if (marker != null)
             {
@@ -817,6 +1280,7 @@ namespace FIHMapEditor
                     AutosaveNow("leaving editor");
                     if (CursorFree) SetCursorFree(false);
                     _mapsHub.Close();
+                    Mechanics.ResetState(); // before Fly.Exit: it may need to re-enter fly first
                     Fly.Exit();
                     Highlight.Hide();
                     Gizmo.CancelDrag();
@@ -826,6 +1290,7 @@ namespace FIHMapEditor
                 }
                 else if (old == EditorMode.Play)
                 {
+                    Mechanics.ResetState();
                     PlayMode.Exit();
                 }
 
@@ -1071,7 +1536,7 @@ namespace FIHMapEditor
                     VecUtil.ToVector3(obj.Pos),
                     Quaternion.Euler(VecUtil.ToVector3(obj.Rot)),
                     VecUtil.ToVector3(obj.Scale, Vector3.one),
-                    obj.Tint);
+                    obj.Tint, restore: obj);
                 if (placed != null) loaded++;
                 else skipped++;
             }
@@ -1140,6 +1605,12 @@ namespace FIHMapEditor
 
         public void DuplicateSelected()
         {
+            if (SelectionSys.IsMulti)
+            {
+                MultiDuplicate();
+                return;
+            }
+
             var sel = SelectionSys.Current;
             if (!sel.IsValid || sel.Target == null) return;
 
@@ -1168,10 +1639,15 @@ namespace FIHMapEditor
 
             var t = sel.Target.transform;
             Vector3 offset = Vector3.up * 0.5f + CameraAxisForward() * 1.5f;
+            var restore = sel.IsPlaced ? sel.Placed.ToData() : null;
             var placed = PlacedManager.Spawn(source, sourcePath, sourceName,
-                t.position + offset, t.rotation, scale, tint);
+                t.position + offset, t.rotation, scale, tint, restore);
             if (placed != null)
             {
+                // A duplicated cannon/aimed pad keeps its aim relative to itself.
+                if (placed.Mechanic != MechanicType.None && placed.CannonTarget != null)
+                    placed.CannonTarget = VecUtil.ToArray(VecUtil.ToVector3(placed.CannonTarget) + offset);
+
                 var undoTarget = placed;
                 Undo.Push($"duplicate of {sourceName}", () =>
                 {
@@ -1213,17 +1689,33 @@ namespace FIHMapEditor
 
         public void MoveSelected(Vector3 delta)
         {
-            var t = BeginTransformEdit();
-            if (t == null) return;
-            t.position += delta;
+            if (SelectionSys.IsMulti)
+            {
+                MultiTransform("group move", (t, _) => t.position += delta);
+                return;
+            }
+            var single = BeginTransformEdit();
+            if (single == null) return;
+            single.position += delta;
             EndTransformEdit();
         }
 
         public void RotateSelectedY(float degrees)
         {
-            var t = BeginTransformEdit();
-            if (t == null) return;
-            t.Rotate(0f, degrees, 0f, Space.World);
+            if (SelectionSys.IsMulti)
+            {
+                // Group rotation pivots on the centroid, like the gizmo.
+                var q = Quaternion.AngleAxis(degrees, Vector3.up);
+                MultiTransform("group rotate", (t, centroid) =>
+                {
+                    t.position = centroid + q * (t.position - centroid);
+                    t.rotation = q * t.rotation;
+                });
+                return;
+            }
+            var single = BeginTransformEdit();
+            if (single == null) return;
+            single.Rotate(0f, degrees, 0f, Space.World);
             EndTransformEdit();
         }
 
@@ -1237,13 +1729,25 @@ namespace FIHMapEditor
 
         public void ScaleSelected(float delta)
         {
-            var t = BeginTransformEdit();
-            if (t == null) return;
-            var s = t.localScale + Vector3.one * delta;
+            if (SelectionSys.IsMulti)
+            {
+                MultiTransform("group scale", (t, _) =>
+                {
+                    var ms = t.localScale + Vector3.one * delta;
+                    ms.x = Mathf.Max(0.05f, ms.x);
+                    ms.y = Mathf.Max(0.05f, ms.y);
+                    ms.z = Mathf.Max(0.05f, ms.z);
+                    t.localScale = ms;
+                });
+                return;
+            }
+            var single = BeginTransformEdit();
+            if (single == null) return;
+            var s = single.localScale + Vector3.one * delta;
             s.x = Mathf.Max(0.05f, s.x);
             s.y = Mathf.Max(0.05f, s.y);
             s.z = Mathf.Max(0.05f, s.z);
-            t.localScale = s;
+            single.localScale = s;
             EndTransformEdit();
         }
 
@@ -1370,12 +1874,19 @@ namespace FIHMapEditor
             var t = sourceGo.transform;
             PlacedObject last = null;
             var spawnedList = new List<PlacedObject>();
+            var restore = sel.IsPlaced ? sel.Placed.ToData() : null;
             for (int i = 1; i <= count; i++)
             {
-                Vector3 pos = t.position + direction * stepAlong * i + Vector3.up * stepUp * i;
+                Vector3 shift = direction * stepAlong * i + Vector3.up * stepUp * i;
+                Vector3 pos = t.position + shift;
                 last = PlacedManager.Spawn(sourceGo, sourcePath, sourceName,
-                    pos, t.rotation, t.localScale, tint);
-                if (last != null) spawnedList.Add(last);
+                    pos, t.rotation, t.localScale, tint, restore);
+                if (last != null)
+                {
+                    if (last.Mechanic != MechanicType.None && last.CannonTarget != null)
+                        last.CannonTarget = VecUtil.ToArray(VecUtil.ToVector3(last.CannonTarget) + shift);
+                    spawnedList.Add(last);
+                }
             }
             if (last != null)
             {
@@ -1397,11 +1908,39 @@ namespace FIHMapEditor
 
         public void DeleteSelected()
         {
+            if (SelectionSys.IsMulti)
+            {
+                MultiDelete();
+                return;
+            }
+
             var sel = SelectionSys.Current;
             if (!sel.IsValid) return;
 
             if (sel.IsMarker)
             {
+                if (sel.Marker == "cannontarget")
+                {
+                    // Mechanics are always aimed — move the ring, or delete the object.
+                    ShowToast("Launch targets can't be deleted — move it, or delete the object");
+                    SelectionSys.Deselect();
+                    return;
+                }
+                if (sel.Marker == "cannonlaunch")
+                {
+                    // Del on the launch point = back to the automatic position.
+                    var owner = PlacedManager.FindById(sel.MarkerIndex);
+                    if (owner != null && owner.CannonLaunchPos != null)
+                    {
+                        var restore = CaptureCannonLaunchState(owner);
+                        if (restore != null) Undo.Push("launch point reset", restore);
+                        owner.CannonLaunchPos = null;
+                        SetDirty();
+                        ShowToast("Launch point reset to automatic");
+                    }
+                    SelectionSys.Deselect();
+                    return;
+                }
                 Undo.Push($"delete of {sel.DisplayName}", CaptureMarkersState());
                 switch (sel.Marker)
                 {
@@ -1453,7 +1992,7 @@ namespace FIHMapEditor
                         VecUtil.ToVector3(data.Pos),
                         Quaternion.Euler(VecUtil.ToVector3(data.Rot)),
                         VecUtil.ToVector3(data.Scale, Vector3.one),
-                        data.Tint);
+                        data.Tint, restore: data);
                     if (respawned != null) SelectionSys.Select(respawned);
                     SetDirty();
                 });
@@ -1502,7 +2041,7 @@ namespace FIHMapEditor
                         VecUtil.ToVector3(data.Pos),
                         Quaternion.Euler(VecUtil.ToVector3(data.Rot)),
                         VecUtil.ToVector3(data.Scale, Vector3.one),
-                        data.Tint) != null) restored++;
+                        data.Tint, restore: data) != null) restored++;
                 }
                 SetDirty();
                 ShowToast($"Restored {restored} objects");

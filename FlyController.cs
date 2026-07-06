@@ -111,7 +111,7 @@ namespace FIHMapEditor
             if (right.magnitude > 0.001f) right.Normalize();
 
             float speed = EditorConfig.Settings.FlySpeed;
-            if (_input.IsShiftHeld()) speed *= EditorConfig.Settings.FlySpeedBoost;
+            if (_input.IsBoostHeld()) speed *= EditorConfig.Settings.FlySpeedBoost;
 
             Vector3 velocity = Vector3.zero;
             if (_input.IsFlyForward()) velocity += forward * speed;

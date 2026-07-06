@@ -28,7 +28,7 @@ if ($GamePath) {
 }
 else {
     $drives = @("C","D","E","F","G","H","I","J","K")
-    $names  = @("Flipping is Hard Demo", "Flipping is Hard")
+    $names  = @("Flipping is Hard Demo", "Flipping is Hard Playtest", "Flipping is Hard")
     $roots  = @("SteamLibrary\steamapps\common",
                 "Program Files\Steam\steamapps\common",
                 "Program Files (x86)\Steam\steamapps\common")

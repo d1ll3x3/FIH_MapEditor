@@ -48,6 +48,13 @@ namespace FIHMapEditor
         // Map tab state
         private string _nameField = null;     // lazily initialised from controller
 
+        // Mechanics row state: numeric boxes re-seeded when the selection changes.
+        private string _mechForceField, _mechTimerField;
+        private int _mechFieldsForId = -1;
+
+        // KEYS tab fly tuning fields (lazy-seeded from config).
+        private string _flySpeedField, _flyBoostField;
+
         // Wipe / revert confirmations
         private float _wipeConfirmUntil = 0f;
         private float _revertEditsConfirmUntil = 0f;
@@ -304,7 +311,9 @@ namespace FIHMapEditor
             float y = ContentY;
             var sel = _c.SelectionSys.Current;
 
-            string selName = sel.IsValid ? sel.DisplayName : "(nothing selected — click an object)";
+            string selName = _c.SelectionSys.IsMulti
+                ? $"{_c.SelectionSys.Multi.Count} objects (Ctrl+Click)"
+                : sel.IsValid ? sel.DisplayName : "(nothing selected — click an object)";
             GUI.Label(new Rect(15, y, 325, 22), $"Selected: {Truncate(selName, 26)}", _styleTitle);
             if (_win.ToggleButton(new Rect(345, y, 150, 22), $"Unlock: {(_c.UnlockOriginals ? "ON" : "OFF")}", _c.UnlockOriginals))
                 _c.UnlockOriginals = !_c.UnlockOriginals;
@@ -313,6 +322,8 @@ namespace FIHMapEditor
             if (_win.ToggleButton(new Rect(500, y, 165, 22), $"Pick invisible: {(_c.PickInvisible ? "ON" : "OFF")}", _c.PickInvisible))
                 _c.PickInvisible = !_c.PickInvisible;
             y += 28;
+
+            DrawMechanicsRow(sel, ref y);
 
             // Gizmo mode (mouse dragging on the axes; 1/2/3 hotkeys)
             GUI.Label(new Rect(15, y + 3, 55, 20), "Gizmo:", _styleSmall);
@@ -670,6 +681,68 @@ namespace FIHMapEditor
                 "from the Maps Hub.", _styleSmall);
         }
 
+        // Boost pad / cannon tuning row, shown only when the selection has a mechanic.
+        private void DrawMechanicsRow(Selection sel, ref float y)
+        {
+            if (_c.SelectionSys.IsMulti) return;
+            if (!sel.IsPlaced || sel.Placed.Mechanic == MechanicType.None) return;
+            var placed = sel.Placed;
+
+            if (_mechFieldsForId != placed.Id)
+            {
+                _mechFieldsForId = placed.Id;
+                _mechForceField = placed.BoostForce.ToString("0.#");
+                _mechTimerField = placed.CannonTimer.ToString("0.##");
+            }
+
+            if (placed.Mechanic == MechanicType.BoostPad)
+            {
+                // Pads are always aimed: the violet ring is exactly where you land.
+                GUI.Label(new Rect(15, y + 3, 200, 20), "Boost pad — landing target:", _styleSmall);
+                if (_win.Button(new Rect(220, y, 115, 22), "Select target"))
+                    _c.SelectionSys.SelectMarker("cannontarget", placed.Id);
+                if (placed.CannonTarget != null && placed.Root != null)
+                {
+                    float dist = Vector3.Distance(placed.Root.transform.position, VecUtil.ToVector3(placed.CannonTarget));
+                    GUI.Label(new Rect(345, y + 3, 320, 20),
+                        $"target: {FmtVec(placed.CannonTarget)}  dist: {dist:0.#}m", _styleSmall);
+                }
+            }
+            else if (placed.Mechanic == MechanicType.Cannon)
+            {
+                GUI.Label(new Rect(15, y + 3, 125, 20), "Cannon — hold (s):", _styleSmall);
+                _mechTimerField = _win.TextField(new Rect(145, y, 60, 22), "mechtimer", _mechTimerField);
+                if (_win.Button(new Rect(211, y, 50, 22), "Set"))
+                    CommitCannonTimer(placed, ParseFloat(_mechTimerField, placed.CannonTimer));
+                if (_win.Button(new Rect(270, y, 115, 22), "Select target"))
+                    _c.SelectionSys.SelectMarker("cannontarget", placed.Id);
+                // Cyan ring: where the player is held and launched from. Del resets it.
+                if (_win.Button(new Rect(390, y, 115, 22), "Select launch"))
+                    _c.SelectionSys.SelectMarker("cannonlaunch", placed.Id);
+                if (placed.CannonTarget != null && placed.Root != null)
+                {
+                    float dist = Vector3.Distance(placed.Root.transform.position, VecUtil.ToVector3(placed.CannonTarget));
+                    GUI.Label(new Rect(512, y + 3, 155, 20), $"dist: {dist:0.#}m", _styleSmall);
+                }
+            }
+            y += 28;
+        }
+
+        private void CommitCannonTimer(PlacedObject placed, float value)
+        {
+            value = Mathf.Clamp(value, 0.2f, 5f);
+            float old = placed.CannonTimer;
+            if (Mathf.Approximately(old, value)) return;
+            _c.Undo.Push("cannon timer change", () =>
+            {
+                placed.CannonTimer = old;
+                _c.SetDirty();
+            });
+            placed.CannonTimer = value;
+            _mechTimerField = value.ToString("0.##");
+            _c.SetDirty();
+        }
+
         // ───────────────────────────────────────────────────────────── KEYS ──
 
         private static readonly (string id, string label)[] BindRows =
@@ -679,8 +752,21 @@ namespace FIHMapEditor
             ("hub",     "Maps Hub"),
             ("play",    "Editor ↔ Play mode"),
             ("restart", "Restart run (in Play)"),
+            ("interact", "Launch cannon (near one)"),
             ("undo",    "Undo (Ctrl + key)"),
             ("save",    "Save map (Ctrl + key)"),
+        };
+
+        // Fly-mode binds, drawn as a second column.
+        private static readonly (string id, string label)[] FlyBindRows =
+        {
+            ("flyfwd",   "Fly forward"),
+            ("flyback",  "Fly back"),
+            ("flyleft",  "Fly left"),
+            ("flyright", "Fly right"),
+            ("flyup",    "Fly up"),
+            ("flydown",  "Fly down"),
+            ("flyboost", "Fly turbo (hold)"),
         };
 
         // Ctrl-combo binds can share letters with plain binds without conflicting.
@@ -693,8 +779,16 @@ namespace FIHMapEditor
             "hub" => EditorConfig.Settings.MapsHubKey,
             "play" => EditorConfig.Settings.TogglePlayKey,
             "restart" => EditorConfig.Settings.RestartRunKey,
+            "interact" => EditorConfig.Settings.InteractKey,
             "undo" => EditorConfig.Settings.UndoKey,
             "save" => EditorConfig.Settings.SaveKey,
+            "flyfwd" => EditorConfig.Settings.FlyForwardKey,
+            "flyback" => EditorConfig.Settings.FlyBackKey,
+            "flyleft" => EditorConfig.Settings.FlyLeftKey,
+            "flyright" => EditorConfig.Settings.FlyRightKey,
+            "flyup" => EditorConfig.Settings.FlyUpKey,
+            "flydown" => EditorConfig.Settings.FlyDownKey,
+            "flyboost" => EditorConfig.Settings.FlyBoostKey,
             _ => KeyCode.None,
         };
 
@@ -708,8 +802,16 @@ namespace FIHMapEditor
                 case "hub": s.MapsHubKey = key; break;
                 case "play": s.TogglePlayKey = key; break;
                 case "restart": s.RestartRunKey = key; break;
+                case "interact": s.InteractKey = key; break;
                 case "undo": s.UndoKey = key; break;
                 case "save": s.SaveKey = key; break;
+                case "flyfwd": s.FlyForwardKey = key; break;
+                case "flyback": s.FlyBackKey = key; break;
+                case "flyleft": s.FlyLeftKey = key; break;
+                case "flyright": s.FlyRightKey = key; break;
+                case "flyup": s.FlyUpKey = key; break;
+                case "flydown": s.FlyDownKey = key; break;
+                case "flyboost": s.FlyBoostKey = key; break;
             }
             EditorConfig.Save();
         }
@@ -718,40 +820,67 @@ namespace FIHMapEditor
         {
             float y = ContentY;
 
-            GUI.Label(new Rect(15, y, 400, 22), "Configurable keys:", _styleTitle);
+            GUI.Label(new Rect(15, y, 300, 22), "General:", _styleTitle);
+            GUI.Label(new Rect(350, y, 300, 22), "Fly mode:", _styleTitle);
             y += 28;
 
             HandleBindCapture();
 
+            float leftY = y, rightY = y;
             foreach (var (bindId, label) in BindRows)
+                DrawBindRow(bindId, label, 20, 175, 150, ref leftY);
+            foreach (var (bindId, label) in FlyBindRows)
+                DrawBindRow(bindId, label, 355, 480, 185, ref rightY);
+
+            y = Mathf.Max(leftY, rightY) + 8;
+
+            // Fly tuning values live here too — they pair with the fly binds.
+            _flySpeedField ??= EditorConfig.Settings.FlySpeed.ToString("0.#");
+            _flyBoostField ??= EditorConfig.Settings.FlySpeedBoost.ToString("0.#");
+            GUI.Label(new Rect(15, y + 4, 80, 20), "Fly speed:", _styleSmall);
+            _flySpeedField = _win.TextField(new Rect(95, y, 60, 22), "flyspeed", _flySpeedField);
+            GUI.Label(new Rect(170, y + 4, 60, 20), "Turbo ×:", _styleSmall);
+            _flyBoostField = _win.TextField(new Rect(232, y, 60, 22), "flyboostx", _flyBoostField);
+            if (_win.Button(new Rect(300, y, 50, 22), "Set"))
             {
-                GUI.Label(new Rect(20, y + 4, 230, 22), label, _styleRow);
-
-                bool listening = _listeningBind == bindId;
-                if (listening) GUI.backgroundColor = new Color(0.3f, 0.8f, 0.4f);
-                string text = listening ? "[ press a key — Esc cancels ]"
-                    : IsCtrlBind(bindId) ? $"[ Ctrl + {GetBind(bindId)} ]"
-                    : $"[ {GetBind(bindId)} ]";
-                if (_win.Button(new Rect(260, y, 280, 26), text))
-                    _listeningBind = listening ? null : bindId;
-                GUI.backgroundColor = Color.white;
-
-                y += 32;
+                EditorConfig.Settings.FlySpeed = Mathf.Clamp(ParseFloat(_flySpeedField, 18f), 2f, 100f);
+                EditorConfig.Settings.FlySpeedBoost = Mathf.Clamp(ParseFloat(_flyBoostField, 3f), 1f, 10f);
+                _flySpeedField = EditorConfig.Settings.FlySpeed.ToString("0.#");
+                _flyBoostField = EditorConfig.Settings.FlySpeedBoost.ToString("0.#");
+                EditorConfig.Save();
+                _c.ShowToast($"Fly speed {EditorConfig.Settings.FlySpeed:0.#} m/s, turbo ×{EditorConfig.Settings.FlySpeedBoost:0.#}");
             }
 
-            y += 10;
-            if (_win.Button(new Rect(15, y, 180, 28), "Reset Defaults"))
+            if (_win.Button(new Rect(430, y, 180, 24), "Reset Defaults"))
             {
                 EditorConfig.ResetToDefaults();
                 _listeningBind = null;
+                _flySpeedField = null;
+                _flyBoostField = null;
                 _c.ShowToast("Keys reset to defaults");
             }
-            y += 40;
+            y += 32;
 
             GUI.Label(new Rect(15, y, W - 30, 60),
                 "Click a key to change it, then press the new one. Saved instantly.\n" +
                 "Edit keys (arrows, PgUp/PgDn, [ ], +/-, Del, Ctrl+D) are fixed.",
                 _styleSmall);
+        }
+
+        private void DrawBindRow(string bindId, string label, float labelX, float btnX, float btnW, ref float y)
+        {
+            GUI.Label(new Rect(labelX, y + 3, btnX - labelX - 5, 22), label, _styleRow);
+
+            bool listening = _listeningBind == bindId;
+            if (listening) GUI.backgroundColor = new Color(0.3f, 0.8f, 0.4f);
+            string text = listening ? "[ press... ]"
+                : IsCtrlBind(bindId) ? $"[ Ctrl + {GetBind(bindId)} ]"
+                : $"[ {GetBind(bindId)} ]";
+            if (_win.Button(new Rect(btnX, y, btnW, 24), text))
+                _listeningBind = listening ? null : bindId;
+            GUI.backgroundColor = Color.white;
+
+            y += 29;
         }
 
         private void HandleBindCapture()
@@ -778,7 +907,9 @@ namespace FIHMapEditor
 
             // Refuse keys already used by another action of the same kind — a Ctrl-combo
             // and a plain key can share the same letter without conflict.
-            foreach (var (otherId, otherLabel) in BindRows)
+            var allRows = new List<(string id, string label)>(BindRows);
+            allRows.AddRange(FlyBindRows);
+            foreach (var (otherId, otherLabel) in allRows)
             {
                 if (otherId != _listeningBind && GetBind(otherId) == e.keyCode
                     && IsCtrlBind(otherId) == IsCtrlBind(_listeningBind))

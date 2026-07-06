@@ -7,6 +7,10 @@ namespace FIHMapEditor
 
     public enum TintColor { None, Red, Blue, Green, Yellow }
 
+    // Game mechanic a placed clone re-implements (the original EHS.Interactables
+    // components are stripped from clones; the mod simulates the behavior instead).
+    public enum MechanicType { None, BoostPad, Cannon }
+
     public class SpawnPointData
     {
         public float[] Pos { get; set; }
@@ -59,13 +63,20 @@ namespace FIHMapEditor
         public float[] Rot { get; set; }   // euler angles
         public float[] Scale { get; set; }
         public TintColor Tint { get; set; } = TintColor.None;
+
+        // Mechanics (v4). Null/None on plain scenery and on older files.
+        public MechanicType Mechanic { get; set; } = MechanicType.None;
+        public float? BoostForce { get; set; }
+        public float? CannonTimer { get; set; }
+        public float[] CannonTarget { get; set; }    // landing point (cannons + pads)
+        public float[] CannonLaunchPos { get; set; } // where the cannon holds/launches from; null = auto
     }
 
     public class MapFile
     {
-        // v2: added LevelEdits. v3: added Checkpoints + ResetZones.
-        // Older files load fine — the missing lists are simply empty.
-        public const int CURRENT_FORMAT_VERSION = 3;
+        // v2: added LevelEdits. v3: added Checkpoints + ResetZones. v4: mechanics
+        // fields on objects. Older files load fine — missing fields stay at defaults.
+        public const int CURRENT_FORMAT_VERSION = 4;
 
         public int FormatVersion { get; set; } = CURRENT_FORMAT_VERSION;
         public string Name { get; set; } = "Untitled";

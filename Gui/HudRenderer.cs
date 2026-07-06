@@ -52,14 +52,27 @@ namespace FIHMapEditor
 
                 case EditorMode.Editor:
                     DrawEditorBanner();
+                    DrawInteractPrompt();
                     break;
 
                 case EditorMode.Play:
                     DrawPlayHud();
+                    DrawInteractPrompt();
                     break;
             }
 
             DrawToast();
+        }
+
+        // "[E] Launch cannon" while standing next to one of our cannons.
+        private void DrawInteractPrompt()
+        {
+            string prompt = _c.Mechanics?.InteractPrompt;
+            if (string.IsNullOrEmpty(prompt)) return;
+            var rect = new Rect(Screen.width / 2f - 120, Screen.height * 0.62f, 240, 26);
+            GUI.Box(rect, "");
+            GUI.Box(rect, "");
+            GUI.Label(rect, prompt, _styleToast);
         }
 
         // Top banner sized to its text so the background never gets cut short.

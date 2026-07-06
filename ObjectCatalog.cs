@@ -157,6 +157,17 @@ namespace FIHMapEditor
 
                 ScanInactiveSceneObjects(seen, playerRoot);
                 ScanPrefabAssets(seen);
+                ScanMechanicsAssemblies(seen);
+
+                // Interactables (boost pads, cannons...) get their own category so they
+                // are easy to find. Subtree-only check: assembly PIECES (visual mesh,
+                // trigger...) must not clutter Mechanics — the full assembly entry from
+                // ScanMechanicsAssemblies is the one to use.
+                foreach (var e in Entries)
+                {
+                    if (e.Source != null && MechanicsDetector.DetectTypeInSubtree(e.Source) != MechanicType.None)
+                        e.Category = "Mechanics";
+                }
 
                 Entries.Sort((a, b) => string.CompareOrdinal(a.DisplayName, b.DisplayName));
 
@@ -231,6 +242,65 @@ namespace FIHMapEditor
             catch (Exception ex)
             {
                 MapEditorPlugin.Logger.LogWarning($"[CATALOG] Inactive-object scan failed: {ex.Message}");
+            }
+        }
+
+        // Mechanics pass: the game's interactables (boost pads, cannons) are multi-part
+        // assemblies — visual mesh, interact trigger and area as SIBLINGS. The generic
+        // root heuristics catalog those pieces separately, so cloning one piece gives a
+        // broken half-cannon. This pass catalogs the whole assembly as one entry.
+        private void ScanMechanicsAssemblies(Dictionary<string, CatalogEntry> seen)
+        {
+            try
+            {
+                int added = 0;
+                foreach (var mb in UnityEngine.Object.FindObjectsOfType<MonoBehaviour>())
+                {
+                    if (mb == null) continue;
+                    string typeName = null;
+                    try { typeName = mb.GetIl2CppType()?.Name; }
+                    catch { }
+                    if (typeName == null) continue;
+                    if (!typeName.Contains("InteractableBoostPad") && !typeName.Contains("InteractableCannon"))
+                        continue;
+
+                    // Assembly root: climb while the parent is still cannon-sized. Level
+                    // chunk containers fail the bounds guard and stop the climb.
+                    var root = mb.transform;
+                    while (root.parent != null)
+                    {
+                        var parentBounds = ComputeBounds(root.parent.gameObject);
+                        if (parentBounds.size == Vector3.zero) break;
+                        if (parentBounds.size.x > 30f || parentBounds.size.y > 30f || parentBounds.size.z > 30f) break;
+                        root = root.parent;
+                    }
+
+                    var bounds = ComputeBounds(root.gameObject);
+                    if (bounds.size == Vector3.zero) continue;
+
+                    string display = CleanName(root.name);
+                    string key = display + "|" + FirstMeshName(root.gameObject);
+                    if (seen.ContainsKey(key)) continue;
+
+                    var entry = new CatalogEntry
+                    {
+                        DisplayName = display,
+                        SourcePath = BuildPath(root),
+                        Source = root.gameObject,
+                        BoundsSize = bounds.size,
+                        InstanceCount = 1,
+                        Category = "Mechanics",
+                        HasCollider = root.GetComponentInChildren<Collider>(true) != null,
+                    };
+                    seen[key] = entry;
+                    Entries.Add(entry);
+                    added++;
+                }
+                MapEditorPlugin.Logger.LogInfo($"[CATALOG] Mechanics-assembly scan added {added} entries.");
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[CATALOG] Mechanics-assembly scan failed: {ex.Message}");
             }
         }
 
