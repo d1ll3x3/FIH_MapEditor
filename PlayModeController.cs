@@ -137,7 +137,10 @@ namespace FIHMapEditor
                 case TimerState.Running:
                     ElapsedSeconds = Time.unscaledTimeAsDouble - _startTime;
 
-                    if (_goal?.Center != null && GoalBounds().Contains(pos))
+                    if (_goal?.Center != null && VecUtil.ObbContains(pos,
+                            VecUtil.ToVector3(_goal.Center),
+                            VecUtil.ToVector3(_goal.Size, Vector3.one * 3f),
+                            VecUtil.ToRotation(_goal.Rot)))
                     {
                         Timer = TimerState.Finished;
                         GoalReachedThisRun = true;
@@ -179,8 +182,12 @@ namespace FIHMapEditor
             foreach (var zone in _resetZones)
             {
                 if (zone?.Center == null) continue;
-                var b = new Bounds(VecUtil.ToVector3(zone.Center), VecUtil.ToVector3(zone.Size, Vector3.one * 4f));
-                if (b.Contains(playerPos))
+                // Instant: fires the moment the player's BODY grazes the (possibly
+                // rotated) box, not once the pivot is deep inside it.
+                if (VecUtil.PlayerTouchesObb(playerPos,
+                        VecUtil.ToVector3(zone.Center),
+                        VecUtil.ToVector3(zone.Size, Vector3.one * 4f),
+                        VecUtil.ToRotation(zone.Rot)))
                 {
                     RespawnAtCheckpoint();
                     _resetCooldownUntil = Time.unscaledTime + 0.5f;

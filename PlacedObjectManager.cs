@@ -97,8 +97,16 @@ namespace FIHMapEditor
             try
             {
                 // Mechanics must be detected on the SOURCE: the clone gets its
-                // EHS.Interactables components stripped below.
-                var mechanic = MechanicsDetector.Detect(source, out float boostForce, out float cannonTimer);
+                // EHS.Interactables components stripped below. When the source is one of
+                // OUR clones (duplicate/multi-clone), never climb ancestors — the shared
+                // FIH_MapObjectsRoot parent contains every other clone, and a cannon
+                // sibling would leak its mechanic onto a duplicated plank. Duplicates get
+                // their mechanics through `restore` instead.
+                bool sourceIsClone = source.name.Contains(ObjectCatalog.CLONE_MARKER)
+                    || source.transform.root.name == "FIH_MapObjectsRoot"
+                    || source.transform.root.name == "FIH_SpawnRoot";
+                var mechanic = MechanicsDetector.Detect(source, out float boostForce, out float cannonTimer,
+                    climbAncestors: !sourceIsClone);
 
                 // Instantiate under an INACTIVE parent so Awake doesn't run on any
                 // component before we strip the networking ones.

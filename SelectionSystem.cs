@@ -276,6 +276,15 @@ namespace FIHMapEditor
             }
         }
 
+        // Oriented-box ray test: rotate the ray into the box's local frame and reuse
+        // the slab test (rotation preserves distances).
+        public static bool RayIntersectsOBB(Ray ray, Vector3 center, Vector3 size, Quaternion rot, out float dist)
+        {
+            var inv = Quaternion.Inverse(rot);
+            var localRay = new Ray(inv * (ray.origin - center) + center, inv * ray.direction);
+            return RayIntersectsAABB(localRay, new Bounds(center, size), out dist);
+        }
+
         // Pure-managed slab test; avoids relying on the Bounds.IntersectRay interop
         // out-param overload. Public: the controller also uses it to click-test the
         // goal/spawn marker boxes, which have no colliders.

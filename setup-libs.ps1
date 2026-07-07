@@ -61,6 +61,7 @@ Write-Host "Copying Game and Unity Interop DLLs..." -ForegroundColor Cyan
 
 $dllsToCopy = @(
     "Assembly-CSharp.dll",
+    "com.rlabrecque.steamworks.net.dll",
     "EHS.Core.Components.dll",
     "FishNet.Runtime.dll",
     "Il2Cppmscorlib.dll",

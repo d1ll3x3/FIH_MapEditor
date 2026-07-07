@@ -8,3 +8,6 @@ lib/
 # Local tooling
 .claude/
 *.user
+
+# Stray release packages (release zips are built under bin/)
+*.zip

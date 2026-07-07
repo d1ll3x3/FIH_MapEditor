@@ -69,19 +69,23 @@ namespace FIHMapEditor
 
         // Single line strip visiting all 12 edges of the box (16 points).
         public void ShowBox(Bounds bounds, Color color)
+            => ShowBox(bounds.center, bounds.size, Quaternion.identity, color);
+
+        // Oriented variant: same wireframe with the corners rotated around the center.
+        public void ShowBox(Vector3 center, Vector3 size, Quaternion rot, Color color)
         {
             if (!EnsureCreated()) return;
             try
             {
-                Vector3 min = bounds.min, max = bounds.max;
-                Vector3 b0 = new Vector3(min.x, min.y, min.z);
-                Vector3 b1 = new Vector3(max.x, min.y, min.z);
-                Vector3 b2 = new Vector3(max.x, min.y, max.z);
-                Vector3 b3 = new Vector3(min.x, min.y, max.z);
-                Vector3 t0 = new Vector3(min.x, max.y, min.z);
-                Vector3 t1 = new Vector3(max.x, max.y, min.z);
-                Vector3 t2 = new Vector3(max.x, max.y, max.z);
-                Vector3 t3 = new Vector3(min.x, max.y, max.z);
+                Vector3 h = size * 0.5f;
+                Vector3 b0 = center + rot * new Vector3(-h.x, -h.y, -h.z);
+                Vector3 b1 = center + rot * new Vector3(h.x, -h.y, -h.z);
+                Vector3 b2 = center + rot * new Vector3(h.x, -h.y, h.z);
+                Vector3 b3 = center + rot * new Vector3(-h.x, -h.y, h.z);
+                Vector3 t0 = center + rot * new Vector3(-h.x, h.y, -h.z);
+                Vector3 t1 = center + rot * new Vector3(h.x, h.y, -h.z);
+                Vector3 t2 = center + rot * new Vector3(h.x, h.y, h.z);
+                Vector3 t3 = center + rot * new Vector3(-h.x, h.y, h.z);
 
                 var path = new Vector3[]
                 {

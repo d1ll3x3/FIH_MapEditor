@@ -102,11 +102,14 @@ namespace FIHMapEditor
                 _cachedPlayerCount = _c.Finder.CountPlayers();
                 _nextPlayerCountCheck = Time.unscaledTime + 2f;
             }
-            if (_cachedPlayerCount > 1)
+            if (_cachedPlayerCount > 1 && _c.Multiplayer != null)
             {
                 var warnRect = new Rect(Screen.width / 2f - 220, 42, 440, 22);
-                GUI.color = new Color(1f, 0.6f, 0.3f);
-                GUI.Label(warnRect, "⚠ Multiplayer detected: objects only exist on your client", _styleToast);
+                // Green once we're actually syncing with someone; neutral while looking.
+                GUI.color = _c.Multiplayer.PeerCount > 0
+                    ? new Color(0.4f, 1f, 0.55f)
+                    : new Color(1f, 0.9f, 0.6f);
+                GUI.Label(warnRect, $"Co-edit — {_c.Multiplayer.StatusLine}", _styleToast);
                 GUI.color = Color.white;
             }
         }

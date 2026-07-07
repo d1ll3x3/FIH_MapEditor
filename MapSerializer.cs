@@ -41,6 +41,20 @@ namespace FIHMapEditor
 
         public static string PathFor(string fileName) => Path.Combine(MapsDir, fileName + EXTENSION);
 
+        // In-memory (de)serialization for the multiplayer sync channel.
+        public static string ToJson(MapFile map) => JsonSerializer.Serialize(map, Options);
+
+        public static MapFile FromJson(string json)
+        {
+            var map = JsonSerializer.Deserialize<MapFile>(json, Options);
+            if (map == null) throw new InvalidDataException("Map JSON deserialized to null");
+            map.Objects ??= new List<MapObjectData>();
+            map.LevelEdits ??= new List<LevelEditData>();
+            map.Checkpoints ??= new List<CheckpointData>();
+            map.ResetZones ??= new List<ResetZoneData>();
+            return map;
+        }
+
         public static void Save(MapFile map, string fileName)
         {
             Directory.CreateDirectory(MapsDir);

@@ -49,13 +49,20 @@ namespace FIHMapEditor
             if (_initFailed) return false;
             try
             {
-                Shader shader = null;
-                foreach (var s in new[] { "Sprites/Default", "Universal Render Pipeline/Unlit", "Unlit/Color", "UI/Default" })
+                // Prefer Unity's internal handle shader: it exposes _ZTest, letting the
+                // gizmo draw THROUGH geometry (handles must never sink into the object).
+                Shader shader = Shader.Find("Hidden/Internal-Colored");
+                bool overlayCapable = shader != null;
+                if (shader == null)
                 {
-                    shader = Shader.Find(s);
-                    if (shader != null) break;
+                    foreach (var s in new[] { "Sprites/Default", "Universal Render Pipeline/Unlit", "Unlit/Color", "UI/Default" })
+                    {
+                        shader = Shader.Find(s);
+                        if (shader != null) break;
+                    }
                 }
                 if (shader == null) { _initFailed = true; return false; }
+                MapEditorPlugin.Logger.LogInfo($"[GIZMO] Shader: {shader.name} (on-top={overlayCapable})");
 
                 _root = new GameObject("FIH_Gizmo");
                 UnityEngine.Object.DontDestroyOnLoad(_root);
@@ -65,7 +72,17 @@ namespace FIHMapEditor
                     go.transform.SetParent(_root.transform, false);
                     var lr = go.AddComponent<LineRenderer>();
                     lr.useWorldSpace = true;
-                    lr.material = new Material(shader);
+                    var mat = new Material(shader);
+                    try
+                    {
+                        if (mat.HasProperty("_ZTest"))
+                            mat.SetInt("_ZTest", (int)UnityEngine.Rendering.CompareFunction.Always);
+                        if (mat.HasProperty("_ZWrite"))
+                            mat.SetInt("_ZWrite", 0);
+                        mat.renderQueue = 4500;   // overlay: after all opaque + transparent
+                    }
+                    catch { }
+                    lr.material = mat;
                     lr.positionCount = 0;
                     lr.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
                     lr.receiveShadows = false;

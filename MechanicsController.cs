@@ -25,7 +25,8 @@ namespace FIHMapEditor
             return DetectIn(root, ref bf, ref ct);
         }
 
-        public static MechanicType Detect(GameObject root, out float boostForce, out float cannonTimer)
+        public static MechanicType Detect(GameObject root, out float boostForce, out float cannonTimer,
+                                          bool climbAncestors = true)
         {
             boostForce = DEFAULT_BOOST_FORCE;
             cannonTimer = DEFAULT_CANNON_TIMER;
@@ -33,6 +34,7 @@ namespace FIHMapEditor
 
             var found = DetectIn(root, ref boostForce, ref cannonTimer);
             if (found != MechanicType.None) return found;
+            if (!climbAncestors) return MechanicType.None;
 
             // The game's interactables are multi-part assemblies (visual mesh, interact
             // trigger, area — all siblings). Cloning one piece must still detect the
@@ -43,6 +45,9 @@ namespace FIHMapEditor
                 var t = root.transform.parent;
                 for (int level = 0; t != null && level < 2; level++, t = t.parent)
                 {
+                    // Never climb into our own clone containers: a sibling cannon clone
+                    // would leak its mechanic onto every duplicated plank.
+                    if (t.name == "FIH_MapObjectsRoot" || t.name == "FIH_SpawnRoot") break;
                     var bounds = ObjectCatalog.ComputeBounds(t.gameObject);
                     if (bounds.size.x > 40f || bounds.size.y > 40f || bounds.size.z > 40f) break;
                     found = DetectIn(t.gameObject, ref boostForce, ref cannonTimer);
@@ -153,6 +158,7 @@ namespace FIHMapEditor
         private PlacedObject _activeCannon;
         private float _holdUntil;
         private Vector3 _holdPos;
+        private bool _holdWasKinematic;
         private bool _resumeFlyOnEnd;
         private float _flightTimeout;
         private bool _dragLogged;
@@ -179,6 +185,11 @@ namespace FIHMapEditor
         // Abort anything in progress; called on mode switches and scene changes.
         public void ResetState()
         {
+            if (_phase == Phase.Holding)
+            {
+                var rb = _finder.GetCachedPlayerRigidbody();
+                if (rb != null) rb.isKinematic = _holdWasKinematic;
+            }
             if (_resumeFlyOnEnd)
             {
                 _fly.Enter();
@@ -292,13 +303,16 @@ namespace FIHMapEditor
             BeginHold(nearest, rb, mode);
         }
 
-        // Custom launch point when set (cyan ring, gizmo-editable); above the collider
-        // otherwise.
+        // Custom launch point when set (cyan ring, gizmo-editable); otherwise the center
+        // of the cannon's VISUAL. Renderer bounds, not collider bounds: the assembly
+        // carries a huge interact-trigger collider whose center floats far above the
+        // cannon, which is exactly where the ring must NOT be.
         public static Vector3 GetLaunchPos(PlacedObject cannon)
         {
             if (cannon.CannonLaunchPos != null) return VecUtil.ToVector3(cannon.CannonLaunchPos);
-            var bounds = ComputeColliderBounds(cannon.Root);
-            return bounds.center + Vector3.up * (bounds.extents.y + 0.7f);
+            var bounds = ObjectCatalog.ComputeBounds(cannon.Root);
+            if (bounds.size == Vector3.zero) bounds = ComputeColliderBounds(cannon.Root);
+            return bounds.center;
         }
 
         private void BeginHold(PlacedObject cannon, Rigidbody rb, EditorMode mode)
@@ -316,10 +330,14 @@ namespace FIHMapEditor
             _phase = Phase.Holding;
             InteractPrompt = null;
 
+            // The hold point sits INSIDE the cannon: go kinematic so its colliders can't
+            // push the player out; restored just before the launch velocity is applied.
+            _holdWasKinematic = rb.isKinematic;
+            rb.isKinematic = true;
+
             // Snap into the hold immediately — the distance-abort check in UpdateHolding
             // would otherwise fire on the very first frame for tall cannons.
             rb.position = _holdPos;
-            rb.linearVelocity = Vector3.zero;
             var t = _finder.FindPlayerTransform();
             if (t != null) t.position = _holdPos;
             MapEditorPlugin.Logger.LogInfo($"[MECH] Cannon #{cannon.Id}: holding for {cannon.CannonTimer:0.##}s");
@@ -335,19 +353,20 @@ namespace FIHMapEditor
                 return;
             }
 
-            // Pin the player above the muzzle (TeleportTo discipline: rb + transform).
+            // Pin the player inside the muzzle. Body is kinematic during the hold, so
+            // position-only (velocity writes on a kinematic body just log warnings).
             rb.position = _holdPos;
-            rb.linearVelocity = Vector3.zero;
-            rb.angularVelocity = Vector3.zero;
             var t = _finder.FindPlayerTransform();
             if (t != null) t.position = _holdPos;
 
             if (Time.time < _holdUntil) return;
 
-            // Launch!
+            // Launch! Back to dynamic first, or the velocity is ignored.
+            rb.isKinematic = false;
             var target = VecUtil.ToVector3(_activeCannon.CannonTarget, _holdPos + Vector3.forward * 12f);
             float g = Mathf.Abs(Physics.gravity.y);
             rb.linearVelocity = SolveBallisticVelocity(_holdPos, target, g);
+            rb.angularVelocity = Vector3.zero;
             _cooldowns[_activeCannon.Id] = Time.time + CANNON_COOLDOWN;
 
             if (!_dragLogged)
@@ -381,6 +400,13 @@ namespace FIHMapEditor
 
         private void EndCannonControl()
         {
+            // An abort mid-hold leaves the body kinematic — hand it back as it was
+            // (fly.Enter below re-takes it in the editor case anyway).
+            if (_phase == Phase.Holding)
+            {
+                var rb = _finder.GetCachedPlayerRigidbody();
+                if (rb != null) rb.isKinematic = _holdWasKinematic;
+            }
             if (_resumeFlyOnEnd)
             {
                 _fly.Enter();

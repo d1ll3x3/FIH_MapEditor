@@ -526,12 +526,28 @@ namespace FIHMapEditor
             }
             y += 44;
 
-            GUI.Label(new Rect(15, y, W - 30, 96),
-                "Play mode: if a spawn is set you appear there; the timer starts when you\n" +
-                "move and stops at the goal. R = retry from your last coin; Shift+R = full restart.\n" +
-                "Touching a checkpoint ring makes it your respawn; entering a reset\n" +
-                "trigger (invisible in play) sends you back to it without resetting the timer.\n" +
-                "Wipe Level: hides every game asset for a truly clean space (revertible).",
+            // Co-edit: always-on full-map sync over Steam P2P with other modded players
+            // in the lobby. No switch — it activates itself the moment a modded peer is
+            // detected; this block is purely informative (plus a manual resend).
+            GUI.Label(new Rect(15, y, 300, 22), "Co-edit (multiplayer, automatic):", _styleTitle);
+            y += 26;
+            GUI.color = _c.Multiplayer.PeerCount > 0 ? new Color(0.5f, 1f, 0.6f) : Color.white;
+            GUI.Label(new Rect(15, y + 5, 465, 20), _c.Multiplayer.StatusLine, _styleSmall);
+            GUI.color = Color.white;
+            if (_win.Button(new Rect(490, y, 130, 26), "Send map now"))
+                _c.Multiplayer.ForceBroadcast();
+            y += 28;
+            if (_c.Multiplayer.LastSyncInfo != "")
+            {
+                GUI.Label(new Rect(15, y, W - 30, 20), $"last sync: {_c.Multiplayer.LastSyncInfo}", _styleSmall);
+                y += 22;
+            }
+            y += 4;
+
+            GUI.Label(new Rect(15, y, W - 30, 60),
+                "Play: R / pad X = retry from last coin; Shift+R / LB+X = full restart.\n" +
+                "Checkpoint rings set your respawn; reset triggers (invisible in play) send\n" +
+                "you back. Co-edit: everyone with the mod edits, the last change wins.",
                 _styleSmall);
         }
 

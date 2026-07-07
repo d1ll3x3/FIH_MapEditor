@@ -24,7 +24,7 @@ All main keys are rebindable from the **KEYS** tab of the menu.
 | `P` | Toggle Editor ↔ Play mode |
 | `R` (in Play) | Retry from your last collected coin (timer keeps running) |
 | `Shift+R` (in Play) | Full restart: back to spawn, timer and coins reset |
-| `WASD` + `Space`/`Ctrl` (+`Shift` boost) | Fly |
+| `WASD` + `E`/`Q` up/down (+`Shift` boost) | Fly (all fly keys + speeds rebindable in KEYS) |
 | Left click (free cursor) | Select object / place with Stamp / drag a gizmo axis |
 | `1` `2` `3` (free cursor) | Gizmo mode: Move / Rotate / Scale |
 | Arrows / `PgUp` `PgDn` | Move the selected object |
@@ -37,6 +37,10 @@ The menu header has two buttons: **Mouse placement ON/OFF** (master switch for S
 mode, so menu clicks never place objects) and **Back to camera** (locks the cursor
 again to move the camera).
 
+**Gamepad**: fly with the left stick + `RT`/`LT` for up/down (`B`/`Circle` = boost);
+in Play mode `X`/`Square` retries from the last coin and `LB+X` / `L1+Square` does a
+full restart.
+
 ## Modes
 
 - **Editor**: fly freely, scan the scene and the game files into the object catalog
@@ -44,8 +48,9 @@ again to move the camera).
   or the keyboard. The SELECT tab has numeric boxes for exact rotation degrees and
   scale values, per-axis rotate and scale buttons, and a Blender/Unity-style **gizmo**:
   drag the colored axes on the selected object to move it, spin the rings to rotate,
-  or stretch an axis to scale (per-axis). Switch gizmo modes with `1`/`2`/`3` or the
-  SELECT tab buttons.
+  or stretch an axis to scale (per-axis). The gizmo always draws on top of geometry,
+  so the handles never sink into the object. Switch gizmo modes with `1`/`2`/`3` or
+  the SELECT tab buttons.
   Selection ignores triggers and invisible colliders by default so you always pick
   what you see — flip **Pick invisible: ON** in the SELECT tab to grab kill zones and
   invisible walls too, and **Show invisible: ON** to draw wireframes around them
@@ -57,7 +62,9 @@ again to move the camera).
   on load, and revertible one by one from the LIST tab or all at once from TOOLS.
 - **Goal & spawn**: click the goal box or spawn marker to select it and edit it with
   the gizmo — move the goal, stretch its size per axis in Scale mode, rotate the spawn
-  to change the starting view. `Del` removes the selected marker.
+  to change the starting view. Goal and reset-trigger boxes can also be **rotated**
+  (gizmo Rotate mode) and detection respects the rotation. Reset triggers fire the
+  instant the player's body touches them. `Del` removes the selected marker.
 - **Play**: if the map has a spawn you appear there; the timer starts on your first
   movement and stops when you enter the goal zone. Best time per map is saved locally.
 
@@ -91,6 +98,17 @@ remembered across sessions.
 The editor also autosaves every 30 seconds while there are unsaved changes, plus
 whenever you close the editor or enter Play mode. The two most recent autosaves are
 kept in the Maps Hub (`⟲ AUTOSAVE` and `⟲ AUTOSAVE (older)`).
+
+## Co-edit (multiplayer)
+
+If another player joins your game with the mod installed, you build together —
+**automatically, nothing to enable**. Modded players in the lobby find each other on
+their own; edits sync over Steam a moment after you stop editing (the last change
+wins) and late joiners receive the current map right away. The HUD banner and the
+TOOLS tab show the sync status, and a **Send map now** button forces an immediate
+sync. Updates received while someone is in Play mode apply when they return to the
+editor. The sync rides its own Steam P2P channel — it does not touch the game's own
+networking.
 
 ## Sharing maps
 

@@ -5,7 +5,7 @@
     <TargetFramework>net6.0</TargetFramework>
     <AssemblyName>FIHMapEditor</AssemblyName>
     <RootNamespace>FIHMapEditor</RootNamespace>
-    <Version>0.4.0</Version>
+    <Version>0.6.0</Version>
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
@@ -72,6 +72,10 @@
     </Reference>
     <Reference Include="FishNet.Runtime">
       <HintPath>lib\FishNet.Runtime.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="com.rlabrecque.steamworks.net">
+      <HintPath>lib\com.rlabrecque.steamworks.net.dll</HintPath>
       <Private>false</Private>
     </Reference>
   </ItemGroup>

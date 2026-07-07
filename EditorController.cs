@@ -52,6 +52,7 @@ namespace FIHMapEditor
         public LevelEditManager LevelEdits { get; private set; }
         public UndoSystem Undo { get; private set; }
         public MechanicsController Mechanics { get; private set; }
+        public MultiplayerSync Multiplayer { get; private set; }
 
         // In-flight undo capture: filled when a transform edit / marker drag begins,
         // pushed onto the stack when it ends (only if something actually changed).
@@ -138,6 +139,7 @@ namespace FIHMapEditor
             LevelEdits = new LevelEditManager();
             Undo = new UndoSystem();
             Mechanics = new MechanicsController(Finder, PlacedManager, Input, Fly);
+            Multiplayer = new MultiplayerSync(this);
 
             _menu = new EditorMenuRenderer(this);
             _mapsHub = new MapsHubRenderer(this);
@@ -170,6 +172,7 @@ namespace FIHMapEditor
                 if (!InGameScene) return;
 
                 HandlePendingReapply();
+                Multiplayer.Update();
 
                 // Focus gate: no hotkeys while the window is unfocused + short grace after.
                 bool focused = Application.isFocused;
@@ -197,6 +200,19 @@ namespace FIHMapEditor
                         {
                             if (Input.IsShiftHeld()) PlayMode.RestartRun();   // full restart
                             else PlayMode.QuickRestart();                     // last coin
+                        }
+                        // Gamepad: X/Square = retry from last coin, LB+X / L1+Square = full
+                        // restart (the trainer's combo pattern).
+                        if (acceptInput)
+                        {
+                            var gp = UnityEngine.InputSystem.Gamepad.current;
+                            if (gp != null && gp[UnityEngine.InputSystem.LowLevel.GamepadButton.West].wasPressedThisFrame)
+                            {
+                                if (gp[UnityEngine.InputSystem.LowLevel.GamepadButton.LeftShoulder].isPressed)
+                                    PlayMode.RestartRun();
+                                else
+                                    PlayMode.QuickRestart();
+                            }
                         }
                         break;
                 }
@@ -274,6 +290,7 @@ namespace FIHMapEditor
             if (CursorFree) SetCursorFree(false);
             Mode = EditorMode.Off;
             Mechanics.ResetState();
+            Multiplayer.OnSceneLeft();
             PlayMode.Exit();
             Finder.ClearCache();
             PlacedManager.OnSceneChanged();
@@ -536,6 +553,7 @@ namespace FIHMapEditor
                 {
                     // Live sync while dragging so the box visual follows the gizmo.
                     Goal.Center = VecUtil.ToArray(p.position);
+                    Goal.Rot = VecUtil.ToArray(p.eulerAngles);
                     var s = p.localScale;
                     Goal.Size = VecUtil.ToArray(new Vector3(
                         Mathf.Max(1f, s.x), Mathf.Max(1f, s.y), Mathf.Max(1f, s.z)));
@@ -544,7 +562,7 @@ namespace FIHMapEditor
                 {
                     p.position = VecUtil.ToVector3(Goal.Center);
                     p.localScale = VecUtil.ToVector3(Goal.Size, Vector3.one * 4f);
-                    p.rotation = Quaternion.identity; // the goal is an AABB — no rotation
+                    p.rotation = VecUtil.ToRotation(Goal.Rot);
                 }
             }
 
@@ -591,6 +609,7 @@ namespace FIHMapEditor
                 if (Gizmo.IsDragging)
                 {
                     zone.Center = VecUtil.ToArray(p.position);
+                    zone.Rot = VecUtil.ToArray(p.eulerAngles);
                     var s = p.localScale;
                     zone.Size = VecUtil.ToArray(new Vector3(
                         Mathf.Max(1f, s.x), Mathf.Max(1f, s.y), Mathf.Max(1f, s.z)));
@@ -599,7 +618,7 @@ namespace FIHMapEditor
                 {
                     p.position = VecUtil.ToVector3(zone.Center);
                     p.localScale = VecUtil.ToVector3(zone.Size, Vector3.one * 4f);
-                    p.rotation = Quaternion.identity; // AABB — no rotation
+                    p.rotation = VecUtil.ToRotation(zone.Rot);
                 }
             }
 
@@ -655,8 +674,9 @@ namespace FIHMapEditor
         private void UpdateEditorMarkers()
         {
             if (Goal?.Center != null)
-                _goalBox.ShowBox(new Bounds(VecUtil.ToVector3(Goal.Center),
-                                            VecUtil.ToVector3(Goal.Size, Vector3.one * 3f)),
+                _goalBox.ShowBox(VecUtil.ToVector3(Goal.Center),
+                                 VecUtil.ToVector3(Goal.Size, Vector3.one * 3f),
+                                 VecUtil.ToRotation(Goal.Rot),
                                  new Color(0.3f, 1f, 0.5f, 0.9f));
             else
                 _goalBox.Hide();
@@ -694,8 +714,9 @@ namespace FIHMapEditor
                     continue;
                 }
                 var zone = ResetZones[i];
-                _resetBoxes[i].ShowBox(new Bounds(VecUtil.ToVector3(zone.Center),
-                                                  VecUtil.ToVector3(zone.Size, Vector3.one * 4f)),
+                _resetBoxes[i].ShowBox(VecUtil.ToVector3(zone.Center),
+                                       VecUtil.ToVector3(zone.Size, Vector3.one * 4f),
+                                       VecUtil.ToRotation(zone.Rot),
                                        new Color(1f, 0.25f, 0.25f, 0.9f));
             }
 
@@ -810,13 +831,23 @@ namespace FIHMapEditor
             var spawn = Spawn == null ? null
                 : new SpawnPointData { Pos = (float[])Spawn.Pos?.Clone(), Yaw = Spawn.Yaw };
             var goal = Goal == null ? null
-                : new GoalZoneData { Center = (float[])Goal.Center?.Clone(), Size = (float[])Goal.Size?.Clone() };
+                : new GoalZoneData
+                {
+                    Center = (float[])Goal.Center?.Clone(),
+                    Size = (float[])Goal.Size?.Clone(),
+                    Rot = (float[])Goal.Rot?.Clone(),
+                };
             var cps = new List<CheckpointData>();
             foreach (var c in Checkpoints)
                 cps.Add(new CheckpointData { Pos = (float[])c.Pos?.Clone(), Yaw = c.Yaw, Radius = c.Radius });
             var zones = new List<ResetZoneData>();
             foreach (var z in ResetZones)
-                zones.Add(new ResetZoneData { Center = (float[])z.Center?.Clone(), Size = (float[])z.Size?.Clone() });
+                zones.Add(new ResetZoneData
+                {
+                    Center = (float[])z.Center?.Clone(),
+                    Size = (float[])z.Size?.Clone(),
+                    Rot = (float[])z.Rot?.Clone(),
+                });
 
             return () =>
             {
@@ -1144,8 +1175,9 @@ namespace FIHMapEditor
             float markerDist = worldDist;
             if (Goal?.Center != null)
             {
-                var b = new Bounds(VecUtil.ToVector3(Goal.Center), VecUtil.ToVector3(Goal.Size, Vector3.one * 4f));
-                if (SelectionSystem.RayIntersectsAABB(ray.Value, b, out float d) && d < markerDist)
+                if (SelectionSystem.RayIntersectsOBB(ray.Value, VecUtil.ToVector3(Goal.Center),
+                        VecUtil.ToVector3(Goal.Size, Vector3.one * 4f), VecUtil.ToRotation(Goal.Rot),
+                        out float d) && d < markerDist)
                     { marker = "goal"; markerIndex = 0; markerDist = d; }
             }
             if (Spawn?.Pos != null)
@@ -1167,8 +1199,9 @@ namespace FIHMapEditor
             {
                 var zone = ResetZones[i];
                 if (zone?.Center == null) continue;
-                var b = new Bounds(VecUtil.ToVector3(zone.Center), VecUtil.ToVector3(zone.Size, Vector3.one * 4f));
-                if (SelectionSystem.RayIntersectsAABB(ray.Value, b, out float d) && d < markerDist)
+                if (SelectionSystem.RayIntersectsOBB(ray.Value, VecUtil.ToVector3(zone.Center),
+                        VecUtil.ToVector3(zone.Size, Vector3.one * 4f), VecUtil.ToRotation(zone.Rot),
+                        out float d) && d < markerDist)
                     { marker = "reset"; markerIndex = i; markerDist = d; }
             }
             foreach (var p in PlacedManager.Placed)
@@ -1300,6 +1333,7 @@ namespace FIHMapEditor
                     if (!Catalog.HasScanned) Catalog.Scan();
                     if (_workingSnapshot == null) NewMap(silent: true);
                     Fly.Enter();
+                    Multiplayer.OnEnteredEditor();   // apply a map queued during Play
                     var k = EditorConfig.Settings;
                     ShowToast($"EDITOR — {k.ToggleCursorKey}: free cursor, {k.MapsHubKey}: maps, {k.TogglePlayKey}: Play mode, {k.ToggleEditorKey}: close");
                 }
@@ -1308,7 +1342,7 @@ namespace FIHMapEditor
                     RefreshSnapshot();
                     PlayMode.Enter(Spawn, Goal, BaseMode == MapBaseMode.Blank, MapName,
                         Checkpoints, ResetZones);
-                    ShowToast($"PLAY — {EditorConfig.Settings.RestartRunKey}: retry (last coin), Shift+{EditorConfig.Settings.RestartRunKey}: full restart, {EditorConfig.Settings.TogglePlayKey}: editor");
+                    ShowToast($"PLAY — {EditorConfig.Settings.RestartRunKey} / pad X: retry (last coin), Shift+{EditorConfig.Settings.RestartRunKey} / LB+X: full restart, {EditorConfig.Settings.TogglePlayKey}: editor");
                 }
 
                 MapEditorPlugin.Logger.LogInfo($"[MODE] {old} → {newMode}");
@@ -1370,6 +1404,7 @@ namespace FIHMapEditor
             Dirty = true;
             if (_autosaveDirtySince < 0) _autosaveDirtySince = Time.unscaledTime;
             RefreshSnapshot();
+            Multiplayer?.NotifyDirty();
         }
 
         private void RefreshSnapshot()
@@ -1501,6 +1536,20 @@ namespace FIHMapEditor
                 ShowToast($"ERROR loading \"{fileName}\": {ex.Message}");
             }
         }
+
+        // Co-edit: a peer's map arrives over Steam P2P. Applying wipes selection/undo
+        // (ApplyMapFile already does), which is the accepted cost of last-writer-wins.
+        public void ApplyRemoteMap(MapFile map, string senderName)
+        {
+            if (!InGameScene || map == null) return;
+            ApplyMapFile(map, resetDirty: false);
+            Dirty = true; // remote content isn't saved locally yet
+            if (_autosaveDirtySince < 0) _autosaveDirtySince = Time.unscaledTime;
+            ShowToast($"Co-edit: map updated by {senderName} — {LoadReport}");
+        }
+
+        // Whether the working map has anything worth sending to a joining peer.
+        public bool HasMapContent() => HasWorkingContent();
 
         private void ApplyMapFile(MapFile map, bool resetDirty)
         {
