@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using Steamworks;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
@@ -18,6 +19,10 @@ namespace FIHMapEditor
 
         // Working map state (the in-memory truth while editing)
         public string MapName = "Untitled";
+        public string MapId;                        // stable leaderboard key (see MapFile.MapId)
+        public bool Editable = true;                // false = play-only when others load it
+        public string AuthorName;                   // stamped on upload
+        public long AuthorSteamId;
         public string CurrentFileName;              // null until saved / loaded
         public MapBaseMode BaseMode { get; private set; } = MapBaseMode.Overlay;
         public SpawnPointData Spawn;
@@ -53,6 +58,16 @@ namespace FIHMapEditor
         public UndoSystem Undo { get; private set; }
         public MechanicsController Mechanics { get; private set; }
         public MultiplayerSync Multiplayer { get; private set; }
+        public LeaderboardService Leaderboard { get; private set; }
+        public OnlineMapService OnlineMaps { get; private set; }
+
+        // Play-only map: the editor is locked when a non-editable online map is loaded.
+        public bool ReadOnly { get; private set; }
+
+        // Actions posted from network callback threads to run on the Unity main thread.
+        private readonly System.Collections.Concurrent.ConcurrentQueue<Action> _mainThread
+            = new System.Collections.Concurrent.ConcurrentQueue<Action>();
+        public void RunOnMainThread(Action a) { if (a != null) _mainThread.Enqueue(a); }
 
         // In-flight undo capture: filled when a transform edit / marker drag begins,
         // pushed onto the stack when it ends (only if something actually changed).
@@ -140,12 +155,47 @@ namespace FIHMapEditor
             Undo = new UndoSystem();
             Mechanics = new MechanicsController(Finder, PlacedManager, Input, Fly);
             Multiplayer = new MultiplayerSync(this);
+            Leaderboard = new LeaderboardService();
+            OnlineMaps = new OnlineMapService();
+
+            // Every finished run offers to upload (HudRenderer draws the prompt); veto
+            // immediately if there's nothing sensible to upload to.
+            PlayMode.OnRunFinished = () =>
+            {
+                if (!CanUploadTimes) PlayMode.DismissUploadPrompt();
+            };
+            PlayMode.OnUploadConfirmed = seconds =>
+            {
+                var (sid, name) = SteamIdentity();
+                Leaderboard.SubmitTime(MapId, name, sid, seconds);
+                Leaderboard.FetchBoard(MapId, force: true);
+            };
 
             _menu = new EditorMenuRenderer(this);
             _mapsHub = new MapsHubRenderer(this);
             _hud = new HudRenderer(this);
 
             MapEditorPlugin.Logger.LogInfo("EditorController initialized");
+        }
+
+        // Whether a finished run is even worth offering to upload.
+        public bool CanUploadTimes
+            => Leaderboard.Configured && EditorConfig.Settings.SubmitTimesOnline && SteamIdentity().steamId != 0;
+
+        // Local Steam identity for leaderboard uploads/highlighting. Falls back to
+        // (0, "player") when Steam is unavailable — a 0 id is never uploaded.
+        public (long steamId, string name) SteamIdentity()
+        {
+            try
+            {
+                long sid = (long)SteamUser.GetSteamID().m_SteamID;
+                string name = SteamFriends.GetPersonaName();
+                return (sid, string.IsNullOrEmpty(name) ? "player" : name);
+            }
+            catch
+            {
+                return (0, "player");
+            }
         }
 
         public void ShowToast(string message, float seconds = 3f)
@@ -168,6 +218,13 @@ namespace FIHMapEditor
         {
             try
             {
+                // Run any work network callbacks handed back to the main thread.
+                while (_mainThread.TryDequeue(out var action))
+                {
+                    try { action(); }
+                    catch (Exception ex) { MapEditorPlugin.Logger.LogError($"[MAIN] posted action error: {ex}"); }
+                }
+
                 TrackScene();
                 if (!InGameScene) return;
 
@@ -217,6 +274,8 @@ namespace FIHMapEditor
                         break;
                 }
 
+                UpdatePlayPromptCursor();
+
                 // Keep level edits pinned against game systems that keep resetting them
                 // (network sync, pooled visibility). Never fight the user's own drag.
                 if (Mode != EditorMode.Off)
@@ -244,6 +303,12 @@ namespace FIHMapEditor
                 if (Mode == EditorMode.Editor && CursorFree)
                 {
                     // The game re-locks the cursor aggressively; force it free every pass.
+                    Cursor.lockState = CursorLockMode.None;
+                    Cursor.visible = true;
+                }
+                else if (Mode == EditorMode.Play && PlayMode.UploadPrompt == UploadPromptState.Offered)
+                {
+                    // The post-run upload prompt needs a visible, clickable cursor too.
                     Cursor.lockState = CursorLockMode.None;
                     Cursor.visible = true;
                 }
@@ -292,7 +357,9 @@ namespace FIHMapEditor
             Mechanics.ResetState();
             Multiplayer.OnSceneLeft();
             PlayMode.Exit();
+            UpdatePlayPromptCursor(); // release devices if the upload prompt had them
             Finder.ClearCache();
+            PlayerRepair.Reset();
             PlacedManager.OnSceneChanged();
             BlankCanvas.OnSceneChanged();
             LevelEdits.OnSceneChanged();
@@ -1007,7 +1074,9 @@ namespace FIHMapEditor
                 string path = m.IsPlaced ? m.Placed.SourcePath : ObjectCatalog.BuildPath(m.Raw.transform);
                 string name = m.IsPlaced ? m.Placed.SourceName : m.Raw.name;
                 TintColor tint = m.IsPlaced ? m.Placed.Tint : TintColor.None;
+                // A duplicate is a new independent object: fresh Uid, no inherited group.
                 var restore = m.IsPlaced ? m.Placed.ToData() : null;
+                if (restore != null) { restore.Uid = null; restore.GroupId = null; }
 
                 var t = source.transform;
                 var copy = PlacedManager.Spawn(source, path, name, t.position + offset, t.rotation, t.localScale, tint, restore);
@@ -1036,6 +1105,128 @@ namespace FIHMapEditor
             SelectionSys.SetMulti(newMembers);
             SetDirty();
             ShowToast($"Duplicated {copies.Count} objects");
+        }
+
+        // ──────────────────────────────────────────────────────────── grouping ──
+
+        // Turns the current multi-selection into a persistent group: selecting any
+        // member later (world click or LIST row) reselects the whole set.
+        public void GroupSelected()
+        {
+            if (ReadOnlyBlock()) return;
+            var members = new List<PlacedObject>();
+            foreach (var m in SelectionSys.IsMulti ? SelectionSys.Multi : new List<Selection> { SelectionSys.Current })
+                if (m.IsPlaced && m.Placed.Root != null) members.Add(m.Placed);
+            if (members.Count < 2)
+            {
+                ShowToast("Select 2+ objects (Ctrl+Click) to group them");
+                return;
+            }
+
+            var prevIds = new Dictionary<PlacedObject, string>();
+            foreach (var p in members) prevIds[p] = p.GroupId;
+
+            string groupId = Guid.NewGuid().ToString("N");
+            foreach (var p in members) p.GroupId = groupId;
+
+            Undo.Push($"group {members.Count} objects", () =>
+            {
+                foreach (var kv in prevIds)
+                    if (kv.Key.Root != null) kv.Key.GroupId = kv.Value;
+                SetDirty();
+            });
+
+            SetDirty();
+            ShowToast($"Grouped {members.Count} objects — click any of them to reselect the group");
+        }
+
+        public void UngroupSelected()
+        {
+            if (ReadOnlyBlock()) return;
+            var members = new List<PlacedObject>();
+            foreach (var m in SelectionSys.IsMulti ? SelectionSys.Multi : new List<Selection> { SelectionSys.Current })
+                if (m.IsPlaced && m.Placed.Root != null && m.Placed.GroupId != null) members.Add(m.Placed);
+            if (members.Count == 0) return;
+
+            var prevIds = new Dictionary<PlacedObject, string>();
+            foreach (var p in members) prevIds[p] = p.GroupId;
+            foreach (var p in members) p.GroupId = null;
+
+            Undo.Push($"ungroup {members.Count} objects", () =>
+            {
+                foreach (var kv in prevIds)
+                    if (kv.Key.Root != null) kv.Key.GroupId = kv.Value;
+                SetDirty();
+            });
+
+            SetDirty();
+            ShowToast($"Ungrouped {members.Count} objects");
+        }
+
+        // ────────────────────────────────────────────────────────────── color ──
+
+        private IEnumerable<PlacedObject> ColorTargets()
+        {
+            if (SelectionSys.IsMulti)
+            {
+                foreach (var m in SelectionSys.Multi)
+                    if (m.IsPlaced && m.Placed.Root != null) yield return m.Placed;
+            }
+            else if (SelectionSys.Current.IsPlaced && SelectionSys.Current.Placed.Root != null)
+            {
+                yield return SelectionSys.Current.Placed;
+            }
+        }
+
+        private void PushColorUndo(List<PlacedObject> targets)
+        {
+            var prev = new List<(PlacedObject p, TintColor tint, float[] custom)>();
+            foreach (var p in targets) prev.Add((p, p.Tint, (float[])p.CustomColor?.Clone()));
+            Undo.Push($"color change ({targets.Count})", () =>
+            {
+                foreach (var (p, tint, custom) in prev)
+                {
+                    if (p.Root == null) continue;
+                    if (custom != null) PlacedManager.ApplyCustomColor(p, new Color(custom[0], custom[1], custom[2]));
+                    else PlacedManager.ApplyTint(p, tint);
+                }
+                SetDirty();
+            });
+        }
+
+        public void TintSelected(TintColor tint)
+        {
+            if (ReadOnlyBlock()) return;
+            var targets = new List<PlacedObject>(ColorTargets());
+            if (targets.Count == 0) return;
+            PushColorUndo(targets);
+            foreach (var p in targets) PlacedManager.ApplyTint(p, tint);
+            SetDirty();
+        }
+
+        public void SetCustomColorSelected(Color color)
+        {
+            if (ReadOnlyBlock()) return;
+            var targets = new List<PlacedObject>(ColorTargets());
+            if (targets.Count == 0)
+            {
+                ShowToast("Select an object first");
+                return;
+            }
+            PushColorUndo(targets);
+            foreach (var p in targets) PlacedManager.ApplyCustomColor(p, color);
+            SetDirty();
+            ShowToast($"Color applied to {targets.Count} object(s)");
+        }
+
+        public void ClearColorSelected()
+        {
+            if (ReadOnlyBlock()) return;
+            var targets = new List<PlacedObject>(ColorTargets());
+            if (targets.Count == 0) return;
+            PushColorUndo(targets);
+            foreach (var p in targets) PlacedManager.ClearColor(p);
+            SetDirty();
         }
 
         // Cannon targets live on PlacedObjects, not the marker lists, so they need
@@ -1124,8 +1315,8 @@ namespace FIHMapEditor
             bool ctrlClick = Input.IsCtrlHeld();
 
             // Gizmo handles win over selection picking — on clones, level objects and
-            // marker proxies alike.
-            var gizmoTarget = GizmoTarget();
+            // marker proxies alike. Skipped on play-only maps (no editing gizmo).
+            var gizmoTarget = ReadOnly ? null : GizmoTarget();
             if (!ctrlClick && gizmoTarget != null && Gizmo.TryBeginDrag(ray.Value, gizmoTarget, Camera.main))
             {
                 if (SelectionSys.IsMulti)
@@ -1242,6 +1433,9 @@ namespace FIHMapEditor
 
         private void HandleEditKeys()
         {
+            // Play-only map: no keyboard editing at all (undo/save/etc. are gated too).
+            if (ReadOnly) return;
+
             var sel = SelectionSys.Current;
 
             // Gizmo mode hotkeys (1/2/3, like Unity's W/E/R but free of fly-key conflicts)
@@ -1340,7 +1534,8 @@ namespace FIHMapEditor
                 else if (newMode == EditorMode.Play)
                 {
                     RefreshSnapshot();
-                    PlayMode.Enter(Spawn, Goal, BaseMode == MapBaseMode.Blank, MapName,
+                    if (string.IsNullOrEmpty(MapId)) MapId = Guid.NewGuid().ToString("N");
+                    PlayMode.Enter(Spawn, Goal, BaseMode == MapBaseMode.Blank, MapName, MapId,
                         Checkpoints, ResetZones);
                     ShowToast($"PLAY — {EditorConfig.Settings.RestartRunKey} / pad X: retry (last coin), Shift+{EditorConfig.Settings.RestartRunKey} / LB+X: full restart, {EditorConfig.Settings.TogglePlayKey}: editor");
                 }
@@ -1397,7 +1592,61 @@ namespace FIHMapEditor
             MapEditorPlugin.Logger.LogInfo($"[CURSOR] free={free}");
         }
 
+        // Independent of SetCursorFree/CursorFree (an Editor-mode concept): Play mode
+        // never otherwise touches cursor lock, but the post-run upload prompt needs a
+        // clickable cursor for its buttons. Self-corrects every frame, so leaving Play
+        // (or the prompt closing) while it's active restores the game's own cursor
+        // control on the very next Update().
+        private bool _playPromptCursorFree;
+
+        private void UpdatePlayPromptCursor()
+        {
+            bool wantFree = Mode == EditorMode.Play && PlayMode.UploadPrompt == UploadPromptState.Offered;
+            if (wantFree == _playPromptCursorFree) return;
+            _playPromptCursorFree = wantFree;
+
+            try
+            {
+                if (wantFree)
+                {
+                    if (UnityEngine.InputSystem.Keyboard.current != null)
+                        UnityEngine.InputSystem.InputSystem.DisableDevice(UnityEngine.InputSystem.Keyboard.current);
+                    if (UnityEngine.InputSystem.Mouse.current != null)
+                        UnityEngine.InputSystem.InputSystem.DisableDevice(UnityEngine.InputSystem.Mouse.current);
+                    Cursor.lockState = CursorLockMode.None;
+                    Cursor.visible = true;
+                }
+                else
+                {
+                    if (UnityEngine.InputSystem.Keyboard.current != null)
+                        UnityEngine.InputSystem.InputSystem.EnableDevice(UnityEngine.InputSystem.Keyboard.current);
+                    if (UnityEngine.InputSystem.Mouse.current != null)
+                        UnityEngine.InputSystem.InputSystem.EnableDevice(UnityEngine.InputSystem.Mouse.current);
+                    Cursor.lockState = CursorLockMode.Locked;
+                    Cursor.visible = false;
+                }
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[PLAY] Upload-prompt cursor toggle error: {ex.Message}");
+            }
+        }
+
         // ───────────────────────────────────────────────────────── map lifecycle ──
+
+        private float _readOnlyToastAt = -99f;
+        // Returns true (and nags, throttled) when the current map is play-only, so edit
+        // operations can early-return. Selection/teleport/play stay allowed.
+        public bool ReadOnlyBlock()
+        {
+            if (!ReadOnly) return false;
+            if (Time.unscaledTime - _readOnlyToastAt > 2f)
+            {
+                _readOnlyToastAt = Time.unscaledTime;
+                ShowToast("This map is play-only — the creator locked editing");
+            }
+            return true;
+        }
 
         public void SetDirty()
         {
@@ -1417,6 +1666,10 @@ namespace FIHMapEditor
             return new MapFile
             {
                 FormatVersion = MapFile.CURRENT_FORMAT_VERSION,
+                MapId = MapId,
+                Editable = Editable,
+                AuthorName = AuthorName,
+                AuthorSteamId = AuthorSteamId,
                 Name = MapName,
                 BaseMode = BaseMode,
                 GameScene = _lastSceneName,
@@ -1456,6 +1709,7 @@ namespace FIHMapEditor
         // Ctrl+S: overwrite the current file, or create one from the map name.
         public void QuickSave()
         {
+            if (ReadOnlyBlock()) return;
             if (!SaveOverwrite())
                 SaveAsNew(MapName);
         }
@@ -1467,6 +1721,11 @@ namespace FIHMapEditor
             SelectionSys.Deselect();
             BlankCanvas.Restore();
             MapName = "Untitled";
+            MapId = System.Guid.NewGuid().ToString("N");
+            Editable = true;
+            AuthorName = null;
+            AuthorSteamId = 0;
+            ReadOnly = false;
             CurrentFileName = null;
             BaseMode = MapBaseMode.Overlay;
             Spawn = null;
@@ -1504,6 +1763,7 @@ namespace FIHMapEditor
 
         public bool SaveAsNew(string name)
         {
+            if (ReadOnlyBlock()) return false;
             if (string.IsNullOrWhiteSpace(name)) name = MapName;
             MapName = name.Trim();
             string fileName = MapSerializer.SanitizeFileName(MapName);
@@ -1537,19 +1797,238 @@ namespace FIHMapEditor
             }
         }
 
-        // Co-edit: a peer's map arrives over Steam P2P. Applying wipes selection/undo
-        // (ApplyMapFile already does), which is the accepted cost of last-writer-wins.
-        public void ApplyRemoteMap(MapFile map, string senderName)
+        // ─────────────────────────────────────────────────────── online maps ──
+
+        // Whether the local player owns this online map (has its secret token).
+        public bool OwnsOnlineMap(string mapId)
+            => !string.IsNullOrEmpty(mapId) && EditorConfig.Settings.OwnerTokens.ContainsKey(mapId);
+
+        // Upload the current working map to the community library. Stamps author from
+        // Steam, mints an owner token on first upload (kept locally). editable=false
+        // marks it play-only for everyone else.
+        public void UploadCurrentMap(bool editable)
         {
-            if (!InGameScene || map == null) return;
-            ApplyMapFile(map, resetDirty: false);
-            Dirty = true; // remote content isn't saved locally yet
-            if (_autosaveDirtySince < 0) _autosaveDirtySince = Time.unscaledTime;
-            ShowToast($"Co-edit: map updated by {senderName} — {LoadReport}");
+            if (!OnlineMaps.Configured) { ShowToast("Online maps not configured"); return; }
+            if (!HasWorkingContent()) { ShowToast("Nothing to upload — the map is empty"); return; }
+            if (string.IsNullOrEmpty(MapId)) MapId = Guid.NewGuid().ToString("N");
+
+            var (sid, name) = SteamIdentity();
+            AuthorName = name;
+            AuthorSteamId = sid;
+            Editable = editable;
+
+            // Reuse our token if we've uploaded this map before, else mint one.
+            if (!EditorConfig.Settings.OwnerTokens.TryGetValue(MapId, out string token))
+            {
+                token = Guid.NewGuid().ToString("N");
+                EditorConfig.Settings.OwnerTokens[MapId] = token;
+                EditorConfig.Save();
+            }
+
+            RefreshSnapshot();
+            var map = _workingSnapshot;
+            ShowToast("Uploading map…");
+            OnlineMaps.Upload(map, token, result => RunOnMainThread(() =>
+            {
+                if (result == "inserted" || result == "updated")
+                    ShowToast($"Map uploaded ({(editable ? "editable" : "play-only")}) — \"{MapName}\"");
+                else if (result == "forbidden")
+                    ShowToast("Upload rejected: this map id belongs to someone else");
+                else
+                    ShowToast($"Upload failed: {result}");
+            }));
+        }
+
+        // Download an online map and load it. If it's play-only and we don't own it,
+        // ApplyMapFile sets ReadOnly.
+        public void DownloadAndLoadMap(string mapId)
+        {
+            if (!OnlineMaps.Configured) { ShowToast("Online maps not configured"); return; }
+            ShowToast("Downloading map…");
+            OnlineMaps.Download(mapId,
+                onLoaded: map => RunOnMainThread(() =>
+                {
+                    try
+                    {
+                        ApplyMapFile(map, resetDirty: true);
+                        CurrentFileName = null;   // an online map isn't a local file yet
+                        ShowToast($"Loaded \"{MapName}\"{(ReadOnly ? " (play-only)" : "")} — {LoadReport}");
+                    }
+                    catch (Exception ex)
+                    {
+                        ShowToast($"Load error: {ex.Message}");
+                    }
+                }),
+                onError: err => RunOnMainThread(() => ShowToast($"Download failed: {err}")));
+        }
+
+        // Delete one of your own online maps (owner-token gated server-side).
+        public void DeleteOnlineMap(string mapId)
+        {
+            if (!EditorConfig.Settings.OwnerTokens.TryGetValue(mapId, out string token))
+            {
+                ShowToast("You can only delete maps you uploaded");
+                return;
+            }
+            OnlineMaps.Delete(mapId, token, result => RunOnMainThread(() =>
+            {
+                if (result == "deleted")
+                {
+                    EditorConfig.Settings.OwnerTokens.Remove(mapId);
+                    EditorConfig.Save();
+                    ShowToast("Online map deleted");
+                    OnlineMaps.RefreshList(force: true);
+                }
+                else ShowToast($"Delete failed: {result}");
+            }));
         }
 
         // Whether the working map has anything worth sending to a joining peer.
         public bool HasMapContent() => HasWorkingContent();
+
+        // ───────────────────────────────────────────── remote sync (multiplayer) ──
+        // Applied by MultiplayerSync when an incoming op wins its per-key
+        // last-writer-wins check. Each mutates exactly one unit directly — no wipe,
+        // no full rebuild — so co-editing with several people never stutters and
+        // never rolls back a newer edit that happened to arrive out of order.
+
+        public void ApplyRemoteObjectUpsert(MapObjectData data)
+        {
+            if (string.IsNullOrEmpty(data?.Uid)) return;
+            try
+            {
+                var existing = PlacedManager.FindByUid(data.Uid);
+                if (existing != null && existing.Root != null)
+                {
+                    var t = existing.Root.transform;
+                    t.position = VecUtil.ToVector3(data.Pos, t.position);
+                    t.eulerAngles = VecUtil.ToVector3(data.Rot, t.eulerAngles);
+                    t.localScale = VecUtil.ToVector3(data.Scale, t.localScale);
+                    existing.GroupId = data.GroupId;
+                    if (data.CustomColor != null && data.CustomColor.Length >= 3)
+                        PlacedManager.ApplyCustomColor(existing, new Color(data.CustomColor[0], data.CustomColor[1], data.CustomColor[2]));
+                    else
+                        PlacedManager.ApplyTint(existing, data.Tint);
+                    if (data.BoostForce.HasValue) existing.BoostForce = data.BoostForce.Value;
+                    if (data.CannonTimer.HasValue) existing.CannonTimer = data.CannonTimer.Value;
+                    if (data.CannonTarget != null) existing.CannonTarget = (float[])data.CannonTarget.Clone();
+                    existing.CannonLaunchPos = data.CannonLaunchPos != null ? (float[])data.CannonLaunchPos.Clone() : null;
+                }
+                else
+                {
+                    if (!Catalog.HasScanned) Catalog.Scan();
+                    var source = Catalog.ResolveSource(data.Source, data.SourceName);
+                    if (source == null)
+                    {
+                        MapEditorPlugin.Logger.LogWarning($"[COOP] Remote object source not found: {data.SourceName}");
+                        return;
+                    }
+                    PlacedManager.Spawn(source, data.Source, data.SourceName,
+                        VecUtil.ToVector3(data.Pos), Quaternion.Euler(VecUtil.ToVector3(data.Rot)),
+                        VecUtil.ToVector3(data.Scale, Vector3.one), data.Tint, restore: data);
+                }
+                SetDirty();
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[COOP] ApplyRemoteObjectUpsert error: {ex.Message}");
+            }
+        }
+
+        public void ApplyRemoteObjectDelete(string uid)
+        {
+            var p = PlacedManager.FindByUid(uid);
+            if (p == null) return;
+            if (SelectionSys.Current.Placed == p) SelectionSys.Deselect();
+            PlacedManager.Delete(p);
+            SelectionSys.PruneMulti();
+            SetDirty();
+        }
+
+        public void ApplyRemoteCheckpointUpsert(CheckpointData data)
+        {
+            if (string.IsNullOrEmpty(data?.Uid)) return;
+            int idx = Checkpoints.FindIndex(c => c.Uid == data.Uid);
+            if (idx >= 0) Checkpoints[idx] = data; else Checkpoints.Add(data);
+            SetDirty();
+        }
+
+        public void ApplyRemoteCheckpointDelete(string uid)
+        {
+            int idx = Checkpoints.FindIndex(c => c.Uid == uid);
+            if (idx < 0) return;
+            if (SelectionSys.Current.Marker == "checkpoint" && SelectionSys.Current.MarkerIndex == idx)
+                SelectionSys.Deselect();
+            Checkpoints.RemoveAt(idx);
+            SetDirty();
+        }
+
+        public void ApplyRemoteResetZoneUpsert(ResetZoneData data)
+        {
+            if (string.IsNullOrEmpty(data?.Uid)) return;
+            int idx = ResetZones.FindIndex(z => z.Uid == data.Uid);
+            if (idx >= 0) ResetZones[idx] = data; else ResetZones.Add(data);
+            SetDirty();
+        }
+
+        public void ApplyRemoteResetZoneDelete(string uid)
+        {
+            int idx = ResetZones.FindIndex(z => z.Uid == uid);
+            if (idx < 0) return;
+            if (SelectionSys.Current.Marker == "reset" && SelectionSys.Current.MarkerIndex == idx)
+                SelectionSys.Deselect();
+            ResetZones.RemoveAt(idx);
+            SetDirty();
+        }
+
+        public void ApplyRemoteLevelEditUpsert(LevelEditData data)
+        {
+            if (data == null) return;
+            if (!Catalog.HasScanned) Catalog.Scan();
+            LevelEdits.Apply(new List<LevelEditData> { data }, Catalog, out _, out _);
+            SetDirty();
+        }
+
+        public void ApplyRemoteLevelEditRevert(string path)
+        {
+            var go = Catalog.ResolveSource(path, null);
+            if (go == null) return;
+            var record = LevelEdits.Find(go);
+            if (record == null) return;
+            if (SelectionSys.Current.IsRaw && SelectionSys.Current.Raw == go) SelectionSys.Deselect();
+            LevelEdits.Revert(record);
+            SetDirty();
+        }
+
+        public void ApplyRemoteSpawn(SpawnPointData data)
+        {
+            Spawn = data;
+            if (SelectionSys.Current.Marker == "spawn") SelectionSys.Deselect();
+            SetDirty();
+        }
+
+        public void ApplyRemoteGoal(GoalZoneData data)
+        {
+            Goal = data;
+            if (SelectionSys.Current.Marker == "goal") SelectionSys.Deselect();
+            SetDirty();
+        }
+
+        public void ApplyRemoteBaseMode(MapBaseMode mode)
+        {
+            if (mode == BaseMode) return;
+            BaseMode = mode;
+            if (mode == MapBaseMode.Blank) BlankCanvas.Apply();
+            else BlankCanvas.Restore();
+            SetDirty();
+        }
+
+        public void ApplyRemoteMapName(string name)
+        {
+            if (string.IsNullOrEmpty(name) || name == MapName) return;
+            MapName = name;
+            SetDirty();
+        }
 
         private void ApplyMapFile(MapFile map, bool resetDirty)
         {
@@ -1562,10 +2041,21 @@ namespace FIHMapEditor
             ClearPendingUndo();
 
             MapName = map.Name ?? "Untitled";
+            // Adopt the file's / sender's id so shared maps key the same leaderboard.
+            MapId = string.IsNullOrEmpty(map.MapId) ? System.Guid.NewGuid().ToString("N") : map.MapId;
+            Editable = map.Editable;
+            AuthorName = map.AuthorName;
+            AuthorSteamId = map.AuthorSteamId;
+            // Play-only maps lock the editor — unless you're the author (you hold its
+            // owner token), so you can still update your own non-editable uploads.
+            ReadOnly = !map.Editable && !EditorConfig.Settings.OwnerTokens.ContainsKey(MapId);
             Spawn = map.Spawn;
             Goal = map.Goal;
             Checkpoints = map.Checkpoints != null ? new List<CheckpointData>(map.Checkpoints) : new List<CheckpointData>();
             ResetZones = map.ResetZones != null ? new List<ResetZoneData>(map.ResetZones) : new List<ResetZoneData>();
+            // Backfill stable ids on maps saved before multiplayer sync/grouping existed.
+            foreach (var cp in Checkpoints) cp.Uid ??= Guid.NewGuid().ToString("N");
+            foreach (var z in ResetZones) z.Uid ??= Guid.NewGuid().ToString("N");
             BaseMode = map.BaseMode;
 
             if (BaseMode == MapBaseMode.Blank) BlankCanvas.Apply();
@@ -1617,6 +2107,7 @@ namespace FIHMapEditor
 
         public void PlaceEntryAt(CatalogEntry entry, Vector3 point, bool floatingPlacement = false)
         {
+            if (ReadOnlyBlock()) return;
             var source = Catalog.GetLiveSource(entry);
             if (source == null)
             {
@@ -1654,6 +2145,7 @@ namespace FIHMapEditor
 
         public void DuplicateSelected()
         {
+            if (ReadOnlyBlock()) return;
             if (SelectionSys.IsMulti)
             {
                 MultiDuplicate();
@@ -1688,7 +2180,9 @@ namespace FIHMapEditor
 
             var t = sel.Target.transform;
             Vector3 offset = Vector3.up * 0.5f + CameraAxisForward() * 1.5f;
+            // A duplicate is a new independent object: fresh Uid, no inherited group.
             var restore = sel.IsPlaced ? sel.Placed.ToData() : null;
+            if (restore != null) { restore.Uid = null; restore.GroupId = null; }
             var placed = PlacedManager.Spawn(source, sourcePath, sourceName,
                 t.position + offset, t.rotation, scale, tint, restore);
             if (placed != null)
@@ -1716,6 +2210,7 @@ namespace FIHMapEditor
         // gizmo-only. Pair every use with EndTransformEdit().
         private Transform BeginTransformEdit()
         {
+            if (ReadOnlyBlock()) return null;
             var sel = SelectionSys.Current;
             if (!sel.IsValid) return null;
             if (sel.IsMarker)
@@ -1817,6 +2312,7 @@ namespace FIHMapEditor
         // size and 2 = twice as big regardless of previous tweaking.
         public void SetScaleFactorSelected(float factor)
         {
+            if (ReadOnlyBlock()) return;
             factor = Mathf.Max(0.05f, factor);
             var sel = SelectionSys.Current;
             if (sel.IsPlaced)
@@ -1834,6 +2330,7 @@ namespace FIHMapEditor
 
         public void ResetSelected()
         {
+            if (ReadOnlyBlock()) return;
             var sel = SelectionSys.Current;
             if (sel.IsPlaced)
             {
@@ -1905,6 +2402,7 @@ namespace FIHMapEditor
 
         public void MultiClone(int count, Vector3 direction, bool stairs)
         {
+            if (ReadOnlyBlock()) return;
             var sel = SelectionSys.Current;
             if (!sel.IsValid || sel.IsMarker || sel.Target == null) return;
 
@@ -1923,7 +2421,9 @@ namespace FIHMapEditor
             var t = sourceGo.transform;
             PlacedObject last = null;
             var spawnedList = new List<PlacedObject>();
+            // Each copy is independent: fresh Uid per spawn, no inherited group.
             var restore = sel.IsPlaced ? sel.Placed.ToData() : null;
+            if (restore != null) { restore.Uid = null; restore.GroupId = null; }
             for (int i = 1; i <= count; i++)
             {
                 Vector3 shift = direction * stepAlong * i + Vector3.up * stepUp * i;
@@ -1957,6 +2457,7 @@ namespace FIHMapEditor
 
         public void DeleteSelected()
         {
+            if (ReadOnlyBlock()) return;
             if (SelectionSys.IsMulti)
             {
                 MultiDelete();
@@ -2074,6 +2575,7 @@ namespace FIHMapEditor
 
         public void WipeCustomObjects()
         {
+            if (ReadOnlyBlock()) return;
             int n = PlacedManager.Count;
             var datas = PlacedManager.Snapshot();
             PlacedManager.WipeAll();
@@ -2116,11 +2618,47 @@ namespace FIHMapEditor
 
         public void BringSelectedHere()
         {
-            var t = BeginTransformEdit();
-            if (t == null) return;
             var cam = Finder.FindCameraTransform();
             if (cam == null) return;
-            t.position = cam.position + cam.forward * 6f;
+            Vector3 dest = cam.position + cam.forward * 6f;
+
+            // Marker circles (cannon landing / launch, aimed pad landing) aren't real
+            // transforms — write the world point straight into the placed object's data.
+            var sel = SelectionSys.Current;
+            if (sel.IsMarker)
+            {
+                switch (sel.Marker)
+                {
+                    case "cannontarget":
+                    {
+                        var pc = PlacedManager.FindById(sel.MarkerIndex);
+                        if (pc?.CannonTarget == null) return;
+                        Undo.Push($"bring landing of #{pc.Id:000}", CaptureCannonTargetState(pc));
+                        pc.CannonTarget = VecUtil.ToArray(dest);
+                        SetDirty();
+                        ShowToast("Landing point brought here");
+                        return;
+                    }
+                    case "cannonlaunch":
+                    {
+                        var lc = PlacedManager.FindById(sel.MarkerIndex);
+                        if (lc == null || lc.Mechanic != MechanicType.Cannon || lc.Root == null) return;
+                        lc.CannonLaunchPos ??= VecUtil.ToArray(MechanicsController.GetLaunchPos(lc));
+                        Undo.Push($"bring launch of #{lc.Id:000}", CaptureCannonLaunchState(lc));
+                        lc.CannonLaunchPos = VecUtil.ToArray(dest);
+                        SetDirty();
+                        ShowToast("Launch point brought here");
+                        return;
+                    }
+                    default:
+                        ShowToast("Bring works on objects and cannon/pad circles");
+                        return;
+                }
+            }
+
+            var t = BeginTransformEdit();
+            if (t == null) return;
+            t.position = dest;
             EndTransformEdit();
         }
 
@@ -2147,6 +2685,7 @@ namespace FIHMapEditor
 
         public void SetSpawnHere()
         {
+            if (ReadOnlyBlock()) return;
             var t = Finder.FindPlayerTransform();
             var cam = Finder.FindCameraTransform();
             if (t == null) return;
@@ -2170,6 +2709,7 @@ namespace FIHMapEditor
 
         public void SetGoalHere()
         {
+            if (ReadOnlyBlock()) return;
             var t = Finder.FindPlayerTransform();
             if (t == null) return;
             Undo.Push("goal change", CaptureMarkersState());
@@ -2193,12 +2733,14 @@ namespace FIHMapEditor
 
         public void AddCheckpointHere()
         {
+            if (ReadOnlyBlock()) return;
             var t = Finder.FindPlayerTransform();
             var cam = Finder.FindCameraTransform();
             if (t == null) return;
             Undo.Push("checkpoint add", CaptureMarkersState());
             Checkpoints.Add(new CheckpointData
             {
+                Uid = Guid.NewGuid().ToString("N"),
                 Pos = VecUtil.ToArray(t.position),
                 Yaw = cam != null ? cam.eulerAngles.y : t.eulerAngles.y,
                 Radius = 1.5f,
@@ -2210,11 +2752,13 @@ namespace FIHMapEditor
 
         public void AddResetZoneHere()
         {
+            if (ReadOnlyBlock()) return;
             var t = Finder.FindPlayerTransform();
             if (t == null) return;
             Undo.Push("reset-trigger add", CaptureMarkersState());
             ResetZones.Add(new ResetZoneData
             {
+                Uid = Guid.NewGuid().ToString("N"),
                 Center = VecUtil.ToArray(t.position + Vector3.up * 1f),
                 Size = new float[] { 4f, 4f, 4f },
             });
@@ -2225,6 +2769,7 @@ namespace FIHMapEditor
 
         public void AdjustGoalSize(float delta)
         {
+            if (ReadOnlyBlock()) return;
             if (Goal == null) return;
             Undo.Push("goal resize", CaptureMarkersState());
             var size = VecUtil.ToVector3(Goal.Size, Vector3.one * 4f) + Vector3.one * delta;
@@ -2239,6 +2784,7 @@ namespace FIHMapEditor
         // but with no starting platform and no spawn changes — a truly empty void.
         public void WipeLevelGeometry()
         {
+            if (ReadOnlyBlock()) return;
             if (BaseMode == MapBaseMode.Blank)
             {
                 ShowToast("Level is already hidden (Blank canvas)");
@@ -2253,6 +2799,7 @@ namespace FIHMapEditor
 
         public void SetBaseMode(MapBaseMode mode)
         {
+            if (ReadOnlyBlock()) return;
             if (mode == BaseMode) return;
             BaseMode = mode;
 

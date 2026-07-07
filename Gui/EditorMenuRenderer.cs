@@ -12,10 +12,10 @@ namespace FIHMapEditor
         private readonly GUI.WindowFunction _windowDelegate;
 
         private const float W = 680f;
-        private const float H = 700f;
+        private const float H = 790f;
         private const int WINDOW_ID = 51601;
 
-        private enum Tab { Catalog, Select, Tools, List, Map, Keys }
+        private enum Tab { Catalog, Select, Tools, List, Map, Keys, Times }
         private Tab _tab = Tab.Catalog;
 
         // KEYS tab: id of the action currently listening for a key, or null.
@@ -35,6 +35,11 @@ namespace FIHMapEditor
         private int _listTop = 0;
         private const int LIST_ROWS = 16;
 
+        // Times (leaderboard) tab state
+        private int _timesTop = 0;
+        private const int TIMES_ROWS = 15;
+        private string _timesFetchedFor = null;   // MapId we've auto-fetched for
+
         // Multi-clone state
         private int _mcCount = 5;
         private Vector3 _mcDir = new Vector3(1, 0, 0);
@@ -44,6 +49,7 @@ namespace FIHMapEditor
         // Select tab state: numeric text boxes for rotation degrees and scale
         private string _rotField = "45";
         private string _scaleField = "0.5";
+        private string _colorHexField = "FFFFFF";
 
         // Map tab state
         private string _nameField = null;     // lazily initialised from controller
@@ -72,7 +78,7 @@ namespace FIHMapEditor
 
         // The menu is always on screen in editor mode; world clicks on it are ignored.
         public bool ContainsMouse()
-            => _c.Mode == EditorMode.Editor && _win.WindowRect.Contains(GuiWindowHelper.MouseGuiPosition());
+            => _c.Mode == EditorMode.Editor && _win.ContainsMouse();
 
         public EditorMenuRenderer(EditorController controller)
         {
@@ -103,9 +109,19 @@ namespace FIHMapEditor
             _win.Visible = true;
             _win.BeginFrame();
 
+            // Scale the whole window (text + layout) around its own top-left corner, so
+            // it grows/shrinks in place instead of drifting. GuiWindowHelper's hit tests
+            // compensate the mouse by the same transform — see CompensatedMouse().
+            var prevMatrix = GUI.matrix;
+            float scale = EditorConfig.UiScale;
+            if (!Mathf.Approximately(scale, 1f))
+                GUIUtility.ScaleAroundPivot(Vector2.one * scale, _win.WindowRect.position);
+
             GUI.backgroundColor = new Color(0.13f, 0.13f, 0.16f, 0.97f);
             _win.WindowRect = GUI.Window(WINDOW_ID, _win.WindowRect, _windowDelegate, "FIH CUSTOM MAP EDITOR");
             GUI.backgroundColor = Color.white;
+
+            GUI.matrix = prevMatrix;
         }
 
         private void WindowFunction(int id)
@@ -133,6 +149,7 @@ namespace FIHMapEditor
                 case Tab.List: DrawListTab(); break;
                 case Tab.Map: DrawMapTab(); break;
                 case Tab.Keys: DrawKeysTab(); break;
+                case Tab.Times: DrawTimesTab(); break;
             }
 
             DrawFooter();
@@ -161,7 +178,7 @@ namespace FIHMapEditor
         private void DrawTabs()
         {
             float y = 58;
-            string[] names = { "CATALOG", "SELECT", "TOOLS", "LIST", "MAP", "KEYS" };
+            string[] names = { "CATALOG", "SELECT", "TOOLS", "LIST", "MAP", "KEYS", "TIMES" };
             float w = (W - 30) / names.Length;
             for (int i = 0; i < names.Length; i++)
             {
@@ -414,8 +431,23 @@ namespace FIHMapEditor
             y += 30;
 
             if (_win.Button(new Rect(15, y, 160, 24), "TP Player Onto It")) _c.TpPlayerOntoSelected();
-            if (_win.Button(new Rect(180, y, 160, 24), "Bring Object Here")) _c.BringSelectedHere();
-            y += 34;
+            string bringLabel = sel.Marker == "cannontarget" ? "Bring Landing Here"
+                : sel.Marker == "cannonlaunch" ? "Bring Launch Here"
+                : "Bring Object Here";
+            if (_win.Button(new Rect(180, y, 160, 24), bringLabel)) _c.BringSelectedHere();
+
+            // Grouping: Ctrl+Click several objects, then Group — click any of them later
+            // to reselect the whole set. Ungroup shows whenever the selection includes a
+            // grouped member (single click on one member, or the whole group already selected).
+            bool canGroup = _c.SelectionSys.IsMulti;
+            bool canUngroup = (sel.IsPlaced && sel.Placed.GroupId != null) || AnyGroupedInMulti();
+            if (canGroup && _win.Button(new Rect(345, y, 155, 24), $"Group ({_c.SelectionSys.Multi.Count})"))
+                _c.GroupSelected();
+            if (canUngroup && _win.Button(new Rect(505, y, 155, 24), "Ungroup"))
+                _c.UngroupSelected();
+            y += 30;
+
+            DrawColorRow(sel, ref y);
 
             // Multi-clone
             GUI.Label(new Rect(15, y, 200, 20), "Multi-Clone Array:", _styleTitle);
@@ -602,12 +634,15 @@ namespace FIHMapEditor
 
         private void DrawPlacedRow(PlacedObject p, float ry)
         {
-            bool isSelected = _c.SelectionSys.Current.Placed == p;
+            bool isSelected = _c.SelectionSys.Current.Placed == p
+                || (_c.SelectionSys.IsMulti && _c.SelectionSys.Multi.Exists(m => m.Placed == p));
             var pos = p.Root.transform.position;
+            string groupTag = p.GroupId != null ? $"[G{ShortGroupTag(p.GroupId)}] " : "";
 
             if (isSelected) GUI.backgroundColor = new Color(0.2f, 0.75f, 0.35f);
+            else if (p.GroupId != null) GUI.backgroundColor = new Color(0.35f, 0.5f, 0.75f);
             if (_win.Button(new Rect(15, ry, 470, 24),
-                $"#{p.Id:000}  {Truncate(p.Root.name, 30)}  ({pos.x:0.#}, {pos.y:0.#}, {pos.z:0.#})"))
+                $"{groupTag}#{p.Id:000}  {Truncate(p.Root.name, 26)}  ({pos.x:0.#}, {pos.y:0.#}, {pos.z:0.#})"))
             {
                 _c.SelectionSys.Select(p);
             }
@@ -695,6 +730,68 @@ namespace FIHMapEditor
                 "Maps are .fihmap.json files — share them by copying the file.\n" +
                 "To play someone else's map: copy it into the Maps folder and load it\n" +
                 "from the Maps Hub.", _styleSmall);
+        }
+
+        private bool AnyGroupedInMulti()
+        {
+            if (!_c.SelectionSys.IsMulti) return false;
+            foreach (var m in _c.SelectionSys.Multi)
+                if (m.IsPlaced && m.Placed.GroupId != null) return true;
+            return false;
+        }
+
+        // Color: quick presets (reusing the classic tint enum so old maps still show the
+        // same colors) plus a hex field for anything else. Works on multi-selection too.
+        private void DrawColorRow(Selection sel, ref float y)
+        {
+            bool hasTarget = sel.IsPlaced || _c.SelectionSys.IsMulti;
+            GUI.Label(new Rect(15, y + 3, 60, 20), "Color:", _styleSmall);
+
+            (string, TintColor)[] presets =
+            {
+                ("Red", TintColor.Red), ("Blue", TintColor.Blue),
+                ("Green", TintColor.Green), ("Yellow", TintColor.Yellow),
+            };
+            float px = 80;
+            foreach (var (label, tint) in presets)
+            {
+                if (_win.Button(new Rect(px, y, 62, 24), label) && hasTarget) _c.TintSelected(tint);
+                px += 66;
+            }
+            if (_win.Button(new Rect(px, y, 62, 24), "Clear") && hasTarget) _c.ClearColorSelected();
+            px += 68;
+
+            GUI.Label(new Rect(px, y + 3, 30, 20), "Hex:", _styleSmall);
+            px += 32;
+            _colorHexField = _win.TextField(new Rect(px, y, 80, 24), "colorhex", _colorHexField);
+            px += 86;
+            if (TryParseHexColor(_colorHexField, out var previewColor))
+            {
+                var prevBg = GUI.backgroundColor;
+                GUI.backgroundColor = previewColor;
+                GUI.Box(new Rect(px, y, 24, 24), "");
+                GUI.backgroundColor = prevBg;
+            }
+            px += 30;
+            if (_win.Button(new Rect(px, y, 60, 24), "Apply") && hasTarget)
+            {
+                if (TryParseHexColor(_colorHexField, out var custom)) _c.SetCustomColorSelected(custom);
+                else _c.ShowToast("Hex color must look like FF8800 or #FF8800");
+            }
+            y += 30;
+        }
+
+        private static bool TryParseHexColor(string hex, out Color color)
+        {
+            color = Color.white;
+            if (string.IsNullOrWhiteSpace(hex)) return false;
+            hex = hex.Trim().TrimStart('#');
+            if (hex.Length != 6) return false;
+            if (!byte.TryParse(hex.Substring(0, 2), System.Globalization.NumberStyles.HexNumber, null, out byte r)) return false;
+            if (!byte.TryParse(hex.Substring(2, 2), System.Globalization.NumberStyles.HexNumber, null, out byte g)) return false;
+            if (!byte.TryParse(hex.Substring(4, 2), System.Globalization.NumberStyles.HexNumber, null, out byte b)) return false;
+            color = new Color(r / 255f, g / 255f, b / 255f);
+            return true;
         }
 
         // Boost pad / cannon tuning row, shown only when the selection has a mechanic.
@@ -877,10 +974,28 @@ namespace FIHMapEditor
             }
             y += 32;
 
+            // UI scale: menus and HUD too small/large on some resolutions — same fix as
+            // the trainer's HUD Scale control, just applied to the whole editor UI.
+            GUI.Label(new Rect(15, y + 4, 80, 20), "UI scale:", _styleSmall);
+            if (_win.Button(new Rect(95, y, 32, 22), "-")) AdjustUiScale(-0.1f);
+            GUI.Label(new Rect(133, y + 4, 60, 20), $"{EditorConfig.Settings.GuiScale:0.00}x", _styleSmall);
+            if (_win.Button(new Rect(197, y, 32, 22), "+")) AdjustUiScale(0.1f);
+            if (_win.Button(new Rect(237, y, 60, 22), "Reset")) SetUiScale(1f);
+            y += 32;
+
             GUI.Label(new Rect(15, y, W - 30, 60),
                 "Click a key to change it, then press the new one. Saved instantly.\n" +
                 "Edit keys (arrows, PgUp/PgDn, [ ], +/-, Del, Ctrl+D) are fixed.",
                 _styleSmall);
+        }
+
+        private void AdjustUiScale(float delta) => SetUiScale(EditorConfig.Settings.GuiScale + delta);
+
+        private void SetUiScale(float value)
+        {
+            value = Mathf.Round(Mathf.Clamp(value, 0.5f, 2f) * 100f) / 100f;
+            EditorConfig.Settings.GuiScale = value;
+            EditorConfig.Save();
         }
 
         private void DrawBindRow(string bindId, string label, float labelX, float btnX, float btnW, ref float y)
@@ -942,6 +1057,87 @@ namespace FIHMapEditor
             e.Use();
         }
 
+        // ──────────────────────────────────────────────────────────── TIMES ──
+
+        private void DrawTimesTab()
+        {
+            float y = ContentY;
+            var lb = _c.Leaderboard;
+            string mapId = _c.MapId;
+
+            // Auto-fetch once per map when the tab is first shown for it.
+            if (lb.Configured && !string.IsNullOrEmpty(mapId) && _timesFetchedFor != mapId)
+            {
+                _timesFetchedFor = mapId;
+                _timesTop = 0;
+                lb.FetchBoard(mapId);
+            }
+
+            GUI.Label(new Rect(15, y, 470, 22),
+                $"Leaderboard — \"{Truncate(_c.MapName, 22)}\"", _styleTitle);
+            if (lb.Configured && _win.Button(new Rect(500, y - 2, 140, 24), "Refresh"))
+            {
+                _timesTop = 0;
+                lb.FetchBoard(mapId, force: true);
+            }
+            y += 28;
+
+            if (!lb.Configured)
+            {
+                GUI.Label(new Rect(15, y + 6, W - 30, 40),
+                    "Global leaderboard not configured.\nSet SupabaseUrl / SupabaseAnonKey in the mod config to enable it.",
+                    _styleSmall);
+                return;
+            }
+
+            var entries = lb.GetEntries(mapId);
+            long self = _c.SteamIdentity().steamId;
+
+            // Column header
+            GUI.Label(new Rect(20, y, 50, 20), "#", _styleSmall);
+            GUI.Label(new Rect(70, y, 380, 20), "Player", _styleSmall);
+            GUI.Label(new Rect(470, y, 150, 20), "Time", _styleSmall);
+            y += 22;
+
+            var listRect = new Rect(10, y, W - 20, TIMES_ROWS * 26 + 4);
+            GUI.Box(listRect, "");
+
+            float scroll = _win.ScrollDeltaOver(listRect);
+            if (scroll != 0)
+                _timesTop = Mathf.Clamp(_timesTop + (scroll < 0 ? 3 : -3), 0, Mathf.Max(0, entries.Count - TIMES_ROWS));
+            _timesTop = Mathf.Clamp(_timesTop, 0, Mathf.Max(0, entries.Count - TIMES_ROWS));
+
+            if (lb.IsLoading(mapId) && entries.Count == 0)
+                GUI.Label(new Rect(25, y + 10, 400, 22), "Loading…", _styleRow);
+            else if (lb.GetError(mapId) != null && entries.Count == 0)
+                GUI.Label(new Rect(25, y + 10, 560, 22), $"Couldn't load times: {lb.GetError(mapId)}", _styleRow);
+            else if (entries.Count == 0)
+                GUI.Label(new Rect(25, y + 10, 500, 22),
+                    lb.EverLoaded(mapId) ? "No times yet — reach the goal in Play mode." : "…", _styleRow);
+
+            float ry = y + 4;
+            for (int i = _timesTop; i < entries.Count && i < _timesTop + TIMES_ROWS; i++)
+            {
+                var e = entries[i];
+                bool isSelf = self != 0 && e.SteamId == self;
+                if (isSelf)
+                {
+                    GUI.backgroundColor = new Color(0.2f, 0.75f, 0.35f);
+                    GUI.Box(new Rect(14, ry - 1, W - 28, 24), "");
+                    GUI.backgroundColor = Color.white;
+                }
+                GUI.Label(new Rect(20, ry, 50, 22), $"#{i + 1}", _styleRow);
+                GUI.Label(new Rect(70, ry, 390, 22), Truncate(e.PlayerName ?? "player", 30), _styleRow);
+                GUI.Label(new Rect(470, ry, 160, 22), PlayModeController.FormatTime(e.TimeSeconds), _styleRow);
+                ry += 26;
+            }
+
+            y += TIMES_ROWS * 26 + 10;
+            GUI.Label(new Rect(15, y, W - 30, 40),
+                $"{entries.Count} player(s) ranked  |  best time per player, synced globally.\n" +
+                "Reach the goal to submit your time.", _styleSmall);
+        }
+
         // ──────────────────────────────────────────────────────────── footer ──
 
         private void DrawFooter()
@@ -956,6 +1152,10 @@ namespace FIHMapEditor
         }
 
         private static string FmtVec(float[] v) => v == null ? "?" : $"({v[0]:0.#}, {v[1]:0.#}, {v[2]:0.#})";
+
+        // A short, stable tag from a GUID so different groups read as visibly distinct
+        // in the LIST without printing the whole id.
+        private static string ShortGroupTag(string groupId) => groupId.Substring(0, 4).ToUpperInvariant();
 
         // Accepts both "1.5" and "1,5"; falls back when the box is empty or mid-edit.
         private static float ParseFloat(string s, float fallback)

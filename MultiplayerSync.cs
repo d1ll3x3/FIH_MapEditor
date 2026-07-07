@@ -2,27 +2,42 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
 using Steamworks;
 using UnityEngine;
 
 namespace FIHMapEditor
 {
-    // Co-edit over Steam P2P: every modded player broadcasts the full map (debounced)
-    // when they edit; receivers apply it — last writer wins. Rides the classic
+    // Co-edit over Steam P2P: every modded player's edits sync automatically to every
+    // other modded player in the lobby — no menu toggle. Rides the classic
     // SteamNetworking P2P API on our own channel, fully independent from the game's
     // FishySteamworks traffic. The game's SteamManager already initialized SteamAPI;
     // we must never call SteamAPI.Init/Shutdown ourselves.
+    //
+    // Protocol: per-KEY last-writer-wins (a "key" is one object/checkpoint/reset zone/
+    // level edit/spawn/goal/base-mode/map-name — see BuildCurrentSnapshotJson). Every
+    // change is diffed against the last-sent snapshot and sent as a small batch of ops,
+    // each carrying a monotonically increasing per-key revision + the sender's SteamID
+    // as a tie-breaker. Applying an op mutates ONLY that one unit directly (move an
+    // existing GameObject, spawn/delete one clone...) — never a full map rebuild — so:
+    //   - three or more people editing DIFFERENT objects never conflict (different keys)
+    //   - a stale/out-of-order op can never roll back a newer edit (rev comparison)
+    //   - steady-state editing never stutters (only the changed unit is touched)
+    // A brand-new peer's full state is served on request as one batch of upserts, using
+    // the exact same op format and the real (rev, editor) each key was last set to.
     //
     // Session handshake without callbacks: both sides beacon HELLO to every lobby
     // member — mutual SendP2PPacket implicitly accepts the P2P session.
     public class MultiplayerSync
     {
         private const int CHANNEL = 42;
-        private static readonly byte[] MAGIC = { (byte)'F', (byte)'I', (byte)'H', (byte)'1' };
+        private static readonly byte[] MAGIC = { (byte)'F', (byte)'I', (byte)'H', (byte)'2' };
         private const byte MSG_HELLO = 1;
-        private const byte MSG_MAP = 2;
+        private const byte MSG_OPS = 2;
         private const byte MSG_REQUEST = 3;
 
         private const float HELLO_INTERVAL = 3f;
@@ -35,15 +50,33 @@ namespace FIHMapEditor
             public ulong Id;
             public string Name = "?";
             public float LastHello;
-            public int LastAppliedRevision;
         }
 
-        private class MapEnvelope
+        // One change to one syncable unit. Payload is that unit's own JSON (or null for
+        // a delete/clear) — a small amount of double-encoding for a lot of protocol
+        // simplicity (one envelope shape for every kind of change).
+        private class SyncOp
         {
+            public string Key { get; set; }
+            public int Kind { get; set; }
             public int Rev { get; set; }
-            public string Sender { get; set; }
-            public MapFile Map { get; set; }
+            public ulong Editor { get; set; }
+            public string Payload { get; set; }
         }
+
+        // Kinds
+        private const int K_OBJ_UPSERT = 0, K_OBJ_DELETE = 1;
+        private const int K_CP_UPSERT = 2, K_CP_DELETE = 3;
+        private const int K_RZ_UPSERT = 4, K_RZ_DELETE = 5;
+        private const int K_LVL_UPSERT = 6, K_LVL_REVERT = 7;
+        private const int K_SPAWN = 8, K_SPAWN_CLEAR = 9;
+        private const int K_GOAL = 10, K_GOAL_CLEAR = 11;
+        private const int K_BASEMODE = 12, K_MAPNAME = 13;
+
+        private static readonly JsonSerializerOptions JsonOpts = new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() },
+        };
 
         private readonly EditorController _c;
         private readonly Dictionary<ulong, Peer> _peers = new Dictionary<ulong, Peer>();
@@ -56,11 +89,17 @@ namespace FIHMapEditor
         private float _nextHelloAt;
         private float _nextLobbyRefreshAt;
         private float _broadcastAt = -1f;         // pending debounced broadcast, -1 = none
-        private int _revision;
         private bool _applyingRemote;
 
-        // Map received while in Play mode — applied on returning to the editor.
-        private MapEnvelope _queuedRemote;
+        // Per-key LWW state: the (revision, editor SteamID) currently applied, and the
+        // JSON we last sent/accepted for it (used both to diff local changes and to
+        // seed a new peer's full state without re-deriving fresh revisions).
+        private readonly Dictionary<string, (int rev, ulong editor)> _appliedRevs = new Dictionary<string, (int, ulong)>();
+        private Dictionary<string, string> _lastSentJson = new Dictionary<string, string>();
+
+        // Ops received while the local player is in the middle of a run — applied once
+        // they return to the editor, so a sync never disturbs an active Play session.
+        private readonly List<SyncOp> _queuedOps = new List<SyncOp>();
 
         // Lobby lookup via Il2Cpp reflection (type name may move between game versions),
         // cached with cooldown (GameObjectFinder pattern).
@@ -69,6 +108,7 @@ namespace FIHMapEditor
         private float _lobbySearchCooldown;
         private ulong _selfId;
         private readonly List<ulong> _lobbyMembers = new List<ulong>();
+        private int _lastLoggedMemberCount = -1;
 
         public MultiplayerSync(EditorController controller)
         {
@@ -99,27 +139,29 @@ namespace FIHMapEditor
             }
         }
 
-        // Local edit happened: schedule a debounced broadcast.
+        // Local edit happened: schedule a debounced diff+broadcast.
         public void NotifyDirty()
         {
             if (!Enabled || _applyingRemote) return;
             _broadcastAt = Time.unscaledTime + BROADCAST_DEBOUNCE;
         }
 
+        // Flush anything that arrived while we were away from the editor (Play mode /
+        // scene reload), in arrival order — the per-op revision check makes the result
+        // the same regardless of order, so this is just "catch up now".
         public void OnEnteredEditor()
         {
-            if (_queuedRemote != null)
-            {
-                var env = _queuedRemote;
-                _queuedRemote = null;
-                ApplyEnvelope(env);
-            }
+            if (_queuedOps.Count == 0) return;
+            var ops = new List<SyncOp>(_queuedOps);
+            _queuedOps.Clear();
+            _applyingRemote = true;
+            try { foreach (var op in ops) ApplyVisual(op); }
+            finally { _applyingRemote = false; }
         }
 
         public void OnSceneLeft()
         {
             _broadcastAt = -1f;
-            _queuedRemote = null;
             _lobby = null;
             _lastLoggedMemberCount = -1;
         }
@@ -146,7 +188,7 @@ namespace FIHMapEditor
                 if (_broadcastAt > 0 && Time.unscaledTime >= _broadcastAt)
                 {
                     _broadcastAt = -1f;
-                    BroadcastMap();
+                    BroadcastPendingDiff();
                 }
             }
             catch (Exception ex)
@@ -155,16 +197,16 @@ namespace FIHMapEditor
             }
         }
 
+        // "Send map now" button: force an immediate diff+broadcast instead of waiting
+        // for the debounce.
         public void ForceBroadcast()
         {
             if (!Enabled) return;
             _broadcastAt = -1f;
-            BroadcastMap();
+            BroadcastPendingDiff();
         }
 
         // ───────────────────────────────────────────────────────────── discovery ──
-
-        private int _lastLoggedMemberCount = -1;
 
         private void RefreshLobbyMembers()
         {
@@ -270,6 +312,105 @@ namespace FIHMapEditor
             }
         }
 
+        // ────────────────────────────────────────────────────────────── snapshot ──
+
+        // One JSON entry per syncable unit, keyed so different objects/markers never
+        // collide and can be diffed/applied independently.
+        private Dictionary<string, string> BuildCurrentSnapshotJson()
+        {
+            var map = _c.BuildMapFile();
+            var snap = new Dictionary<string, string>();
+
+            foreach (var obj in map.Objects)
+                if (!string.IsNullOrEmpty(obj.Uid))
+                    snap["obj:" + obj.Uid] = JsonSerializer.Serialize(obj, JsonOpts);
+            foreach (var cp in map.Checkpoints)
+                if (!string.IsNullOrEmpty(cp.Uid))
+                    snap["cp:" + cp.Uid] = JsonSerializer.Serialize(cp, JsonOpts);
+            foreach (var z in map.ResetZones)
+                if (!string.IsNullOrEmpty(z.Uid))
+                    snap["rz:" + z.Uid] = JsonSerializer.Serialize(z, JsonOpts);
+            foreach (var le in map.LevelEdits)
+                if (!string.IsNullOrEmpty(le.Path))
+                    snap["lvl:" + le.Path] = JsonSerializer.Serialize(le, JsonOpts);
+            if (map.Spawn != null) snap["spawn"] = JsonSerializer.Serialize(map.Spawn, JsonOpts);
+            if (map.Goal != null) snap["goal"] = JsonSerializer.Serialize(map.Goal, JsonOpts);
+            snap["basemode"] = JsonSerializer.Serialize(map.BaseMode.ToString());
+            snap["mapname"] = JsonSerializer.Serialize(map.Name ?? "");
+            return snap;
+        }
+
+        private static int KindForUpsert(string key)
+        {
+            if (key.StartsWith("obj:")) return K_OBJ_UPSERT;
+            if (key.StartsWith("cp:")) return K_CP_UPSERT;
+            if (key.StartsWith("rz:")) return K_RZ_UPSERT;
+            if (key.StartsWith("lvl:")) return K_LVL_UPSERT;
+            if (key == "spawn") return K_SPAWN;
+            if (key == "goal") return K_GOAL;
+            if (key == "basemode") return K_BASEMODE;
+            if (key == "mapname") return K_MAPNAME;
+            return -1;
+        }
+
+        private static int KindForDelete(string key)
+        {
+            if (key.StartsWith("obj:")) return K_OBJ_DELETE;
+            if (key.StartsWith("cp:")) return K_CP_DELETE;
+            if (key.StartsWith("rz:")) return K_RZ_DELETE;
+            if (key.StartsWith("lvl:")) return K_LVL_REVERT;
+            if (key == "spawn") return K_SPAWN_CLEAR;
+            if (key == "goal") return K_GOAL_CLEAR;
+            return -1; // basemode/mapname are never absent
+        }
+
+        // Diffs the live map against what we last sent, bumping this session's own
+        // per-key revision for anything that changed. Pure bookkeeping — callers decide
+        // whether/where to send the resulting ops.
+        private List<SyncOp> ComputeDiff()
+        {
+            var current = BuildCurrentSnapshotJson();
+            var ops = new List<SyncOp>();
+
+            foreach (var kv in current)
+            {
+                if (_lastSentJson.TryGetValue(kv.Key, out var prev) && prev == kv.Value) continue;
+                int rev = (_appliedRevs.TryGetValue(kv.Key, out var cur) ? cur.rev : 0) + 1;
+                _appliedRevs[kv.Key] = (rev, _selfId);
+                ops.Add(new SyncOp { Key = kv.Key, Kind = KindForUpsert(kv.Key), Rev = rev, Editor = _selfId, Payload = kv.Value });
+            }
+            foreach (var key in _lastSentJson.Keys)
+            {
+                if (current.ContainsKey(key)) continue;
+                int kind = KindForDelete(key);
+                if (kind < 0) continue;
+                int rev = (_appliedRevs.TryGetValue(key, out var cur) ? cur.rev : 0) + 1;
+                _appliedRevs[key] = (rev, _selfId);
+                ops.Add(new SyncOp { Key = key, Kind = kind, Rev = rev, Editor = _selfId, Payload = null });
+            }
+
+            _lastSentJson = current;
+            return ops;
+        }
+
+        // Everything currently live, as upserts — the exact same op format as a normal
+        // diff, so a joining peer's application code path is identical either way.
+        private List<SyncOp> ComputeFullSeed()
+        {
+            var pending = ComputeDiff();
+            var ops = new List<SyncOp>(pending);
+            var seen = new HashSet<string>();
+            foreach (var op in pending) seen.Add(op.Key);
+
+            foreach (var kv in _lastSentJson)
+            {
+                if (seen.Contains(kv.Key)) continue;
+                if (!_appliedRevs.TryGetValue(kv.Key, out var rev)) continue;
+                ops.Add(new SyncOp { Key = kv.Key, Kind = KindForUpsert(kv.Key), Rev = rev.rev, Editor = rev.editor, Payload = kv.Value });
+            }
+            return ops;
+        }
+
         // ─────────────────────────────────────────────────────────────── sending ──
 
         private void SendHello()
@@ -281,46 +422,39 @@ namespace FIHMapEditor
                 SendTo(id, MSG_HELLO, payload);
         }
 
-        private void BroadcastMap()
+        private void BroadcastPendingDiff()
         {
-            var fresh = FreshPeers();
-            if (fresh.Count == 0) return;
+            var ops = ComputeDiff();
+            if (ops.Count == 0) return;
 
+            var fresh = FreshPeers();
+            if (fresh.Count == 0) return; // still tracked locally; a future REQUEST will pick it up
+
+            SendOps(fresh.Select(p => p.Id), ops);
+            LastSyncInfo = $"sent {ops.Count} change(s) to {fresh.Count} peer(s)";
+            MapEditorPlugin.Logger.LogInfo($"[COOP] {LastSyncInfo}");
+        }
+
+        private void SendOps(IEnumerable<ulong> targets, List<SyncOp> ops)
+        {
             byte[] payload;
             try
             {
-                payload = BuildMapPayload();
+                string json = JsonSerializer.Serialize(ops, JsonOpts);
+                payload = Gzip(Encoding.UTF8.GetBytes(json));
             }
             catch (Exception ex)
             {
-                MapEditorPlugin.Logger.LogWarning($"[COOP] Map serialize error: {ex.Message}");
+                MapEditorPlugin.Logger.LogWarning($"[COOP] Ops serialize error: {ex.Message}");
                 return;
             }
             if (payload.Length > MAX_PACKET)
             {
-                _c.ShowToast($"Co-edit: map too large to sync ({payload.Length / 1024} KB)");
+                _c.ShowToast($"Co-edit: sync batch too large ({payload.Length / 1024} KB) — some changes may not sync");
                 return;
             }
-
-            foreach (var peer in fresh)
-                SendTo(peer.Id, MSG_MAP, payload);
-
-            LastSyncInfo = $"sent rev {_revision} to {fresh.Count} peer(s) ({payload.Length / 1024} KB)";
-            MapEditorPlugin.Logger.LogInfo($"[COOP] {LastSyncInfo}");
-        }
-
-        private byte[] BuildMapPayload()
-        {
-            _revision++;
-            string sender = "player";
-            try { sender = SteamFriends.GetPersonaName(); } catch { }
-            var envelope = new MapEnvelope { Rev = _revision, Sender = sender, Map = _c.BuildMapFile() };
-            string json = System.Text.Json.JsonSerializer.Serialize(envelope,
-                new System.Text.Json.JsonSerializerOptions
-                {
-                    Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },
-                });
-            return Gzip(Encoding.UTF8.GetBytes(json));
+            foreach (var id in targets)
+                SendTo(id, MSG_OPS, payload);
         }
 
         private List<Peer> FreshPeers()
@@ -399,38 +533,37 @@ namespace FIHMapEditor
                         {
                             MapEditorPlugin.Logger.LogInfo($"[COOP] Modded peer joined: {peer.Name} ({senderId})");
                             _c.ShowToast($"Co-edit: {peer.Name} is here with the mod");
-                            // Late joiner: ask them for their map state too — whichever
-                            // side has content will answer.
+                            // Late joiner: ask them for their current state too — whoever
+                            // has content answers (possibly both, harmlessly).
                             SendTo(senderId, MSG_REQUEST, Array.Empty<byte>());
                         }
                         break;
                     }
 
-                    case MSG_MAP:
+                    case MSG_OPS:
                     {
                         var json = Encoding.UTF8.GetString(Gunzip(payload));
-                        var envelope = System.Text.Json.JsonSerializer.Deserialize<MapEnvelope>(json,
-                            new System.Text.Json.JsonSerializerOptions
+                        var ops = JsonSerializer.Deserialize<List<SyncOp>>(json, JsonOpts);
+                        if (ops == null) break;
+
+                        bool deferVisuals = _c.Mode == EditorMode.Play;
+                        _applyingRemote = true;
+                        int accepted = 0;
+                        try
+                        {
+                            foreach (var op in ops)
                             {
-                                Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },
-                            });
-                        if (envelope?.Map == null) break;
+                                if (!TryAcceptOp(op)) continue;
+                                accepted++;
+                                if (deferVisuals) _queuedOps.Add(op);
+                                else ApplyVisual(op);
+                            }
+                        }
+                        finally { _applyingRemote = false; }
 
-                        if (_peers.TryGetValue(senderId, out var mapPeer))
-                        {
-                            if (envelope.Rev <= mapPeer.LastAppliedRevision) break;   // stale
-                            mapPeer.LastAppliedRevision = envelope.Rev;
-                        }
-
-                        if (_c.Mode == EditorMode.Play)
-                        {
-                            _queuedRemote = envelope;
-                            _c.ShowToast($"Co-edit: map update from {envelope.Sender} (applies after Play)");
-                        }
-                        else
-                        {
-                            ApplyEnvelope(envelope);
-                        }
+                        if (accepted > 0)
+                            LastSyncInfo = $"received {accepted} change(s)"
+                                + (deferVisuals ? " (applying after Play)" : "");
                         break;
                     }
 
@@ -438,8 +571,8 @@ namespace FIHMapEditor
                     {
                         if (_c.HasMapContent())
                         {
-                            var payload2 = BuildMapPayload();
-                            if (payload2.Length <= MAX_PACKET) SendTo(senderId, MSG_MAP, payload2);
+                            var seed = ComputeFullSeed();
+                            if (seed.Count > 0) SendOps(new[] { senderId }, seed);
                         }
                         break;
                     }
@@ -451,19 +584,55 @@ namespace FIHMapEditor
             }
         }
 
-        private void ApplyEnvelope(MapEnvelope envelope)
+        // Per-key LWW check: does this op beat what we currently have for its key? If so,
+        // records the new state immediately (so a re-check — e.g. a duplicate resend —
+        // never double-applies) and returns true. Purely bookkeeping; ApplyVisual does
+        // the actual game-state mutation, separately, so a deferred-to-Play-end op can
+        // be visually applied later without re-running (and failing) this check.
+        private bool TryAcceptOp(SyncOp op)
         {
-            _applyingRemote = true;
+            var local = _appliedRevs.TryGetValue(op.Key, out var cur) ? cur : (rev: 0, editor: 0UL);
+            bool wins = op.Rev > local.rev || (op.Rev == local.rev && op.Editor > local.editor);
+            if (!wins) return false;
+
+            _appliedRevs[op.Key] = (op.Rev, op.Editor);
+            if (op.Payload != null) _lastSentJson[op.Key] = op.Payload;
+            else _lastSentJson.Remove(op.Key);
+            return true;
+        }
+
+        private void ApplyVisual(SyncOp op)
+        {
             try
             {
-                _c.ApplyRemoteMap(envelope.Map, envelope.Sender);
-                LastSyncInfo = $"applied rev {envelope.Rev} from {envelope.Sender}";
+                switch (op.Kind)
+                {
+                    case K_OBJ_UPSERT: _c.ApplyRemoteObjectUpsert(Deserialize<MapObjectData>(op.Payload)); break;
+                    case K_OBJ_DELETE: _c.ApplyRemoteObjectDelete(op.Key.Substring(4)); break;
+                    case K_CP_UPSERT: _c.ApplyRemoteCheckpointUpsert(Deserialize<CheckpointData>(op.Payload)); break;
+                    case K_CP_DELETE: _c.ApplyRemoteCheckpointDelete(op.Key.Substring(3)); break;
+                    case K_RZ_UPSERT: _c.ApplyRemoteResetZoneUpsert(Deserialize<ResetZoneData>(op.Payload)); break;
+                    case K_RZ_DELETE: _c.ApplyRemoteResetZoneDelete(op.Key.Substring(3)); break;
+                    case K_LVL_UPSERT: _c.ApplyRemoteLevelEditUpsert(Deserialize<LevelEditData>(op.Payload)); break;
+                    case K_LVL_REVERT: _c.ApplyRemoteLevelEditRevert(op.Key.Substring(4)); break;
+                    case K_SPAWN: _c.ApplyRemoteSpawn(Deserialize<SpawnPointData>(op.Payload)); break;
+                    case K_SPAWN_CLEAR: _c.ApplyRemoteSpawn(null); break;
+                    case K_GOAL: _c.ApplyRemoteGoal(Deserialize<GoalZoneData>(op.Payload)); break;
+                    case K_GOAL_CLEAR: _c.ApplyRemoteGoal(null); break;
+                    case K_BASEMODE:
+                        _c.ApplyRemoteBaseMode(Enum.Parse<MapBaseMode>(Deserialize<string>(op.Payload)));
+                        break;
+                    case K_MAPNAME: _c.ApplyRemoteMapName(Deserialize<string>(op.Payload)); break;
+                }
             }
-            finally
+            catch (Exception ex)
             {
-                _applyingRemote = false;
+                MapEditorPlugin.Logger.LogWarning($"[COOP] Apply op error (kind {op.Kind}, key {op.Key}): {ex.Message}");
             }
         }
+
+        private static T Deserialize<T>(string json)
+            => json == null ? default : JsonSerializer.Deserialize<T>(json, JsonOpts);
 
         // ──────────────────────────────────────────────────────────────── gzip ──
 

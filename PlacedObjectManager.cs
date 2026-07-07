@@ -8,10 +8,15 @@ namespace FIHMapEditor
     public class PlacedObject
     {
         public int Id;
+        // Stable across the object's lifetime — survives duplicate/undo/save-load and is
+        // the identity used by grouping and by multiplayer sync.
+        public string Uid = System.Guid.NewGuid().ToString("N");
+        public string GroupId;            // objects sharing this move/rotate/scale/delete together
         public GameObject Root;
         public string SourcePath;
         public string SourceName;
         public TintColor Tint = TintColor.None;
+        public float[] CustomColor;       // RGB 0..1; overrides Tint when set
         public Vector3 OriginalScale = Vector3.one;
         public bool HasCollider = true;   // false → selectable only via bounds picking
 
@@ -32,12 +37,15 @@ namespace FIHMapEditor
             var t = Root.transform;
             return new MapObjectData
             {
+                Uid = Uid,
+                GroupId = GroupId,
                 Source = SourcePath,
                 SourceName = SourceName,
                 Pos = VecUtil.ToArray(t.position),
                 Rot = VecUtil.ToArray(t.eulerAngles),
                 Scale = VecUtil.ToArray(t.localScale),
                 Tint = Tint,
+                CustomColor = (float[])CustomColor?.Clone(),
                 Mechanic = Mechanic,
                 BoostForce = Mechanic == MechanicType.BoostPad ? BoostForce : (float?)null,
                 CannonTimer = Mechanic == MechanicType.Cannon ? CannonTimer : (float?)null,
@@ -157,10 +165,20 @@ namespace FIHMapEditor
                     MapEditorPlugin.Logger.LogInfo(
                         $"[MECH] '{clone.name}' is a {placed.Mechanic} (force={placed.BoostForce:0.#}, timer={placed.CannonTimer:0.##}s)");
 
+                // Uid/GroupId round-trip through restore so a re-spawn (undo, remote
+                // upsert, save/load) keeps the SAME identity instead of minting a new one.
+                if (restore != null)
+                {
+                    if (!string.IsNullOrEmpty(restore.Uid)) placed.Uid = restore.Uid;
+                    placed.GroupId = restore.GroupId;
+                }
+
                 _placed.Add(placed);
                 _byRootId[clone.GetInstanceID()] = placed;
 
-                if (tint != TintColor.None)
+                if (restore?.CustomColor != null && restore.CustomColor.Length >= 3)
+                    ApplyCustomColor(placed, new Color(restore.CustomColor[0], restore.CustomColor[1], restore.CustomColor[2]));
+                else if (tint != TintColor.None)
                     ApplyTint(placed, tint);
 
                 return placed;
@@ -176,6 +194,14 @@ namespace FIHMapEditor
         {
             foreach (var p in _placed)
                 if (p.Id == id) return p;
+            return null;
+        }
+
+        public PlacedObject FindByUid(string uid)
+        {
+            if (string.IsNullOrEmpty(uid)) return null;
+            foreach (var p in _placed)
+                if (p.Uid == uid) return p;
             return null;
         }
 
@@ -245,12 +271,45 @@ namespace FIHMapEditor
 
         public void ApplyTint(PlacedObject placed, TintColor tint)
         {
+            placed.CustomColor = null; // a preset overrides any custom color
+            Color? color = tint switch
+            {
+                TintColor.None => null,
+                TintColor.Red => new Color(1f, 0.35f, 0.35f),
+                TintColor.Blue => new Color(0.4f, 0.55f, 1f),
+                TintColor.Green => new Color(0.4f, 1f, 0.45f),
+                TintColor.Yellow => new Color(1f, 0.95f, 0.35f),
+                _ => null,
+            };
+            ApplyColorInternal(placed, color);
+            placed.Tint = tint;
+        }
+
+        // Arbitrary color (hex/RGB picker). Setting a custom color clears the enum
+        // preset — the two are mutually exclusive views of the same override.
+        public void ApplyCustomColor(PlacedObject placed, Color color)
+        {
+            placed.Tint = TintColor.None;
+            placed.CustomColor = new[] { color.r, color.g, color.b };
+            ApplyColorInternal(placed, color);
+        }
+
+        public void ClearColor(PlacedObject placed)
+        {
+            placed.Tint = TintColor.None;
+            placed.CustomColor = null;
+            ApplyColorInternal(placed, null);
+        }
+
+        // Shared apply: null clears back to the captured original color.
+        private void ApplyColorInternal(PlacedObject placed, Color? color)
+        {
             if (placed?.Root == null) return;
             try
             {
                 var renderers = placed.Root.GetComponentsInChildren<Renderer>(true);
 
-                if (tint == TintColor.None)
+                if (color == null)
                 {
                     if (placed.OriginalColors != null)
                     {
@@ -261,18 +320,8 @@ namespace FIHMapEditor
                             SetRendererColor(r, original);
                         }
                     }
-                    placed.Tint = TintColor.None;
                     return;
                 }
-
-                Color color = tint switch
-                {
-                    TintColor.Red => new Color(1f, 0.35f, 0.35f),
-                    TintColor.Blue => new Color(0.4f, 0.55f, 1f),
-                    TintColor.Green => new Color(0.4f, 1f, 0.45f),
-                    TintColor.Yellow => new Color(1f, 0.95f, 0.35f),
-                    _ => Color.white,
-                };
 
                 placed.OriginalColors ??= new Dictionary<int, Color>();
                 foreach (var r in renderers)
@@ -285,13 +334,12 @@ namespace FIHMapEditor
                         if (TryGetRendererColor(r, out var original))
                             placed.OriginalColors[r.GetInstanceID()] = original;
                     }
-                    SetRendererColor(r, color);
+                    SetRendererColor(r, color.Value);
                 }
-                placed.Tint = tint;
             }
             catch (Exception ex)
             {
-                MapEditorPlugin.Logger.LogWarning($"[TINT] Error applying tint: {ex.Message}");
+                MapEditorPlugin.Logger.LogWarning($"[TINT] Error applying color: {ex.Message}");
             }
         }
 

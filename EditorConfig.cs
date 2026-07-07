@@ -45,6 +45,8 @@ namespace FIHMapEditor
         public float FlySpeedBoost { get; set; } = 3.0f;
         public float NudgeStep { get; set; } = 0.25f;
         public float AutosaveIntervalSeconds { get; set; } = 30f;
+        // Scales the menu window and the HUD together — for high/low-DPI displays where
+        // the fixed-pixel layout reads too small or too large. Adjustable from KEYS.
         public float GuiScale { get; set; } = 1.0f;
 
         // Best run time per map name, in seconds (kept out of the shared map files).
@@ -52,6 +54,18 @@ namespace FIHMapEditor
 
         // Starred catalog entries (by display name) — survive rescans and sessions.
         public List<string> FavoriteObjects { get; set; } = new List<string>();
+
+        // Global leaderboard backend. Empty = use the values baked into
+        // LeaderboardService (the shared backend everyone points at); set these to
+        // override with your own Supabase project for testing.
+        public string SupabaseUrl { get; set; } = "";
+        public string SupabaseAnonKey { get; set; } = "";
+        // Upload your own times to the global board. Off = view-only (privacy).
+        public bool SubmitTimesOnline { get; set; } = true;
+
+        // Secret owner tokens for maps you've uploaded (map_id -> token). Lets you
+        // update/delete your own online maps; losing it just means re-uploading as new.
+        public Dictionary<string, string> OwnerTokens { get; set; } = new Dictionary<string, string>();
     }
 
     public static class EditorConfig
@@ -59,6 +73,10 @@ namespace FIHMapEditor
         private static string ConfigFilePath => Path.Combine(Paths.ConfigPath, "com.flippingishard.mapeditor.json");
 
         public static EditorSettings Settings { get; set; } = new EditorSettings();
+
+        // Clamped read used by every GUI scale site — the raw setting is trusted to be
+        // in range (SetUiScale clamps on write), this just guards a hand-edited config.
+        public static float UiScale => Mathf.Clamp(Settings.GuiScale, 0.5f, 2f);
 
         public static void Load()
         {
@@ -72,14 +90,23 @@ namespace FIHMapEditor
 
                     if (Settings.Version < EditorSettings.CURRENT_VERSION)
                     {
-                        // Regenerate keybinds/settings but never lose best times or favorites.
+                        // Regenerate keybinds/settings but never lose best times,
+                        // favorites or the user's leaderboard backend override.
                         var bestTimes = Settings.BestTimes;
                         var favorites = Settings.FavoriteObjects;
+                        var supaUrl = Settings.SupabaseUrl;
+                        var supaKey = Settings.SupabaseAnonKey;
+                        var submit = Settings.SubmitTimesOnline;
+                        var ownerTokens = Settings.OwnerTokens;
                         Settings = new EditorSettings
                         {
                             Version = EditorSettings.CURRENT_VERSION,
                             BestTimes = bestTimes ?? new Dictionary<string, double>(),
                             FavoriteObjects = favorites ?? new List<string>(),
+                            SupabaseUrl = supaUrl ?? "",
+                            SupabaseAnonKey = supaKey ?? "",
+                            SubmitTimesOnline = submit,
+                            OwnerTokens = ownerTokens ?? new Dictionary<string, string>(),
                         };
                         Save();
                         MapEditorPlugin.Logger.LogInfo($"Config migrated to v{EditorSettings.CURRENT_VERSION}.");

@@ -27,6 +27,9 @@ namespace FIHMapEditor
     // Coin-style checkpoint: touching its sphere makes it the active respawn point.
     public class CheckpointData
     {
+        // Stable identity for multiplayer sync (per-item last-writer-wins); missing on
+        // old files — backfilled on load.
+        public string Uid { get; set; }
         public float[] Pos { get; set; }      // respawn position (player feet)
         public float Yaw { get; set; }        // respawn facing
         public float Radius { get; set; } = 1.5f;
@@ -36,6 +39,7 @@ namespace FIHMapEditor
     // (or the spawn when none is active). Only visible in the editor.
     public class ResetZoneData
     {
+        public string Uid { get; set; }
         public float[] Center { get; set; }
         public float[] Size { get; set; }
         public float[] Rot { get; set; }   // euler angles; null = axis-aligned (v5)
@@ -57,6 +61,12 @@ namespace FIHMapEditor
 
     public class MapObjectData
     {
+        // Stable identity for multiplayer sync and for grouping. Missing on old files —
+        // backfilled on load.
+        public string Uid { get; set; }
+        // Objects sharing a GroupId are selected/edited together; null = ungrouped.
+        public string GroupId { get; set; }
+
         // Stable hierarchy path of the scene object this was cloned from (see ObjectCatalog).
         public string Source { get; set; }
         // Redundant leaf name, used as a load fallback and for human readability.
@@ -65,6 +75,8 @@ namespace FIHMapEditor
         public float[] Rot { get; set; }   // euler angles
         public float[] Scale { get; set; }
         public TintColor Tint { get; set; } = TintColor.None;
+        // Arbitrary RGB (0..1), set via the color picker; overrides Tint when present.
+        public float[] CustomColor { get; set; }
 
         // Mechanics (v4). Null/None on plain scenery and on older files.
         public MechanicType Mechanic { get; set; } = MechanicType.None;
@@ -77,12 +89,23 @@ namespace FIHMapEditor
     public class MapFile
     {
         // v2: added LevelEdits. v3: added Checkpoints + ResetZones. v4: mechanics
-        // fields on objects. v5: goal/reset-zone rotation. Older files load fine —
-        // missing fields stay at defaults.
-        public const int CURRENT_FORMAT_VERSION = 5;
+        // fields on objects. v5: goal/reset-zone rotation. v6: stable MapId (leaderboard
+        // key). v7: stable Uid + GroupId on objects (grouping, multiplayer sync) and Uid
+        // on checkpoints/reset zones; CustomColor. Older files load fine — missing
+        // fields stay at defaults and Uids are backfilled on load.
+        public const int CURRENT_FORMAT_VERSION = 7;
 
         public int FormatVersion { get; set; } = CURRENT_FORMAT_VERSION;
+        // Stable per-map identity for the leaderboard and the online map library. Minted
+        // on creation, kept through save/load/sync; legacy maps get one minted on load.
+        public string MapId { get; set; }
         public string Name { get; set; } = "Untitled";
+
+        // Online sharing metadata. Editable=false means "play only" — the editor locks
+        // when this map is loaded. Author is stamped on upload. All optional/back-compat.
+        public bool Editable { get; set; } = true;
+        public string AuthorName { get; set; }
+        public long AuthorSteamId { get; set; }
         public MapBaseMode BaseMode { get; set; } = MapBaseMode.Overlay;
         public string GameScene { get; set; } = "";
         public SpawnPointData Spawn { get; set; }

@@ -41,6 +41,10 @@ again to move the camera).
 in Play mode `X`/`Square` retries from the last coin and `LB+X` / `L1+Square` does a
 full restart.
 
+**UI scale**: if the menu or HUD reads too small (or too large) on your resolution, the
+**KEYS** tab has a **UI scale** `-`/`+` control (0.5×–2×, like the trainer's HUD Scale)
+that resizes the whole menu and HUD together.
+
 ## Modes
 
 - **Editor**: fly freely, scan the scene and the game files into the object catalog
@@ -65,6 +69,14 @@ full restart.
   to change the starting view. Goal and reset-trigger boxes can also be **rotated**
   (gizmo Rotate mode) and detection respects the rotation. Reset triggers fire the
   instant the player's body touches them. `Del` removes the selected marker.
+- **Grouping**: `Ctrl+Click` several placed objects to multi-select them, then hit
+  **Group** in the SELECT tab. Grouped objects move/rotate/scale/duplicate/delete
+  together, and clicking any single member — in the world or in the LIST tab —
+  reselects the whole group from then on. **Ungroup** breaks it apart again. Groups
+  are saved in the map file and synced in co-edit like any other object property.
+- **Color**: the SELECT tab has Red/Blue/Green/Yellow presets plus a hex field (e.g.
+  `FF8800`) for any color, with a live preview swatch. Works on a single object or a
+  whole multi-selection at once; **Clear** removes the tint.
 - **Play**: if the map has a spawn you appear there; the timer starts on your first
   movement and stops when you enter the goal zone. Best time per map is saved locally.
 
@@ -103,14 +115,176 @@ kept in the Maps Hub (`⟲ AUTOSAVE` and `⟲ AUTOSAVE (older)`).
 
 If another player joins your game with the mod installed, you build together —
 **automatically, nothing to enable**. Modded players in the lobby find each other on
-their own; edits sync over Steam a moment after you stop editing (the last change
-wins) and late joiners receive the current map right away. The HUD banner and the
-TOOLS tab show the sync status, and a **Send map now** button forces an immediate
+their own; edits sync over Steam a moment after you stop editing. The HUD banner and
+the TOOLS tab show the sync status, and a **Send map now** button forces an immediate
 sync. Updates received while someone is in Play mode apply when they return to the
 editor. The sync rides its own Steam P2P channel — it does not touch the game's own
 networking.
 
-## Sharing maps
+Sync is per-object, not a whole-map snapshot: editing your own object never touches
+anyone else's, so two, three or more people can build in different corners of the map
+at once without stutter and without a slower edit rolling back a newer one. Each
+object, checkpoint, reset trigger, level edit, spawn and goal is its own
+independently-versioned unit — the newest edit to a given thing always wins, and a
+stale update that arrives late is simply ignored instead of undoing someone else's work.
+
+## Global leaderboard (TIMES tab)
+
+Every map has a stable id, and reaching the goal in Play mode offers to upload your run
+to a shared online leaderboard — a small confirmation panel appears with **Upload** /
+**Skip**. If the run isn't a new personal best it warns you first (**Yes, upload** /
+**Cancel**), since uploading overwrites your existing time for that map. The **TIMES**
+tab shows the ranking for the current map — one row per player, fastest first, your own
+row highlighted — pulled live from the backend, so you see everyone's times even if you
+never played together (speedrun.com style). Only your best time per map is kept.
+
+The player auto-repairs on every restart (fixes a broken phone), so a botched attempt
+never leaves you stuck.
+
+### Enabling / hosting the leaderboard
+
+The leaderboard needs a small free backend that every copy of the mod points at. It
+uses [Supabase](https://supabase.com) (free tier):
+
+1. Create a Supabase project. In the SQL editor, run:
+
+   ```sql
+   create table public.times (
+     map_id       text        not null,
+     steam_id     int8        not null,
+     player_name  text        not null,
+     time_seconds float8      not null,
+     updated_at   timestamptz not null default now(),
+     primary key (map_id, steam_id)
+   );
+
+   alter table public.times enable row level security;
+
+   -- Anyone may read the board.
+   create policy "read times" on public.times for select using (true);
+
+   -- Writes go only through the RPC below, which keeps the best time per player.
+   create or replace function public.submit_time(
+     p_map_id text, p_steam_id int8, p_name text, p_seconds float8)
+   returns void language plpgsql security definer as $$
+   begin
+     insert into public.times (map_id, steam_id, player_name, time_seconds, updated_at)
+     values (p_map_id, p_steam_id, p_name, p_seconds, now())
+     on conflict (map_id, steam_id) do update
+       set time_seconds = excluded.time_seconds,
+           player_name  = excluded.player_name,
+           updated_at   = now()
+       where excluded.time_seconds < public.times.time_seconds;
+   end; $$;
+
+   grant execute on function public.submit_time to anon;
+   ```
+
+   And, for the online map library, the `maps` table plus its RPCs:
+
+   ```sql
+   create table public.maps (
+     map_id          text        primary key,
+     name            text        not null,
+     author_steam_id int8        not null default 0,
+     author_name     text        not null default 'player',
+     editable        bool        not null default true,
+     object_count    int         not null default 0,
+     data            text        not null,       -- map JSON, gzip+base64
+     owner_token     text        not null,       -- secret: update/delete your own map
+     downloads       int8        not null default 0,
+     created_at      timestamptz not null default now(),
+     updated_at      timestamptz not null default now()
+   );
+
+   alter table public.maps enable row level security;
+   revoke select on public.maps from anon;
+   grant select (map_id, name, author_steam_id, author_name, editable,
+                 object_count, data, downloads, created_at, updated_at)
+     on public.maps to anon;
+   create policy "read maps" on public.maps for select using (true);
+
+   create or replace function public.upload_map(
+     p_map_id text, p_name text, p_author_steam_id int8, p_author_name text,
+     p_editable bool, p_object_count int, p_data text, p_owner_token text)
+   returns text language plpgsql security definer as $$
+   declare existing_token text;
+   begin
+     select owner_token into existing_token from public.maps where map_id = p_map_id;
+     if existing_token is null then
+       insert into public.maps (map_id, name, author_steam_id, author_name,
+                                editable, object_count, data, owner_token)
+       values (p_map_id, p_name, p_author_steam_id, p_author_name,
+               p_editable, p_object_count, p_data, p_owner_token);
+       return 'inserted';
+     elsif existing_token = p_owner_token then
+       update public.maps set
+         name = p_name, author_name = p_author_name, author_steam_id = p_author_steam_id,
+         editable = p_editable, object_count = p_object_count, data = p_data,
+         updated_at = now()
+       where map_id = p_map_id;
+       return 'updated';
+     else
+       return 'forbidden';
+     end if;
+   end; $$;
+   grant execute on function public.upload_map to anon;
+
+   create or replace function public.fetch_map(p_map_id text)
+   returns text language plpgsql security definer as $$
+   declare d text;
+   begin
+     update public.maps set downloads = downloads + 1 where map_id = p_map_id
+       returning data into d;
+     return d;
+   end; $$;
+   grant execute on function public.fetch_map to anon;
+
+   create or replace function public.delete_map(p_map_id text, p_owner_token text)
+   returns text language plpgsql security definer as $$
+   declare existing_token text;
+   begin
+     select owner_token into existing_token from public.maps where map_id = p_map_id;
+     if existing_token is null then return 'not_found';
+     elsif existing_token = p_owner_token then
+       delete from public.maps where map_id = p_map_id; return 'deleted';
+     else return 'forbidden';
+     end if;
+   end; $$;
+   grant execute on function public.delete_map to anon;
+   ```
+
+2. Put your project URL and **anon** key into the mod: bake them into `Supabase.cs`
+   (`BAKED_URL` / `BAKED_ANON_KEY`) before building — so every user shares one global
+   board and map library — or set `SupabaseUrl` / `SupabaseAnonKey` in
+   `BepInEx/config/com.flippingishard.mapeditor.json` for a personal/test backend.
+   Set `SubmitTimesOnline` to `false` to browse without uploading your times.
+
+Times are reported by the client, so they are trust-based (no video moderation like real
+speedrun.com); the RPC only accepts improvements and the anon key can do nothing else.
+
+## Online map library (Maps Hub → Online)
+
+The Maps Hub (`F7`) has a **Local ⇄ Online** switch. In **Online** you browse maps the
+whole community has uploaded to the shared backend, **download** them (one click loads
+the map), and **publish** your current map with the upload row. When uploading you
+choose whether others can **edit** it or only **play** it:
+
+- **Play-only** maps load with the editor locked — you can enter Play and race them, but
+  not move/delete objects or save them as your own (the HUD shows `🔒 PLAY-ONLY`). This
+  is respected by the mod but, since the map data is downloaded, it's a trust-based
+  restriction, not encryption.
+- Editing someone else's **editable** map and uploading it creates a **new** map under
+  your name — the original is never overwritten.
+
+Only you can update or delete your own uploads: the first time you publish a map, the
+mod stores a secret owner token locally. Deleting the mod config loses it (you'd re-upload
+as a new map).
+
+The online library uses the same Supabase backend as the leaderboard (see below) — run
+the same setup once and both work.
+
+## Sharing maps (files)
 
 A map is a single `.fihmap.json` file. Send it to someone, they drop it into their
 `Maps` folder and load it from the Maps Hub (`F7`). Objects are re-created by cloning

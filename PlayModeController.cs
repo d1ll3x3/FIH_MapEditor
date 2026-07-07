@@ -5,6 +5,7 @@ using UnityEngine;
 namespace FIHMapEditor
 {
     public enum TimerState { Idle, Armed, Running, Finished }
+    public enum UploadPromptState { None, Offered }
 
     // Play-mode runtime: teleport to the map spawn, run timer, goal detection by
     // bounds polling (no trigger callbacks — unreliable under IL2CPP), fall respawn.
@@ -19,11 +20,36 @@ namespace FIHMapEditor
         public bool NewBest { get; private set; }
 
         private double _startTime;
+        private double _pausedAccum;      // total seconds spent in the pause menu this run
+        private double _pauseEnteredAt;
+        private bool _wasPaused;
+        private bool _pauseUnavailable;   // EHS.GameManager.IsPauseMenuShown missing → treat as never paused
         private Vector3 _spawnPos;
         private float _spawnYaw;
         private bool _hasSpawn;
         private GoalZoneData _goal;
         private string _mapName = "";
+        private string _mapId = "";
+
+        // Post-run leaderboard upload: every finished run offers to upload, whether or
+        // not it's a new best. OnRunFinished fires first so the owner can veto (backend
+        // not configured, uploads disabled, no Steam identity) by calling
+        // DismissUploadPrompt(); OnUploadConfirmed fires only when the player says yes.
+        public UploadPromptState UploadPrompt { get; private set; } = UploadPromptState.None;
+        public double PendingUploadSeconds { get; private set; }
+        public bool PendingUploadIsNewBest { get; private set; }
+        public Action OnRunFinished;
+        public Action<double> OnUploadConfirmed;
+
+        public void ConfirmUpload()
+        {
+            if (UploadPrompt != UploadPromptState.Offered) return;
+            UploadPrompt = UploadPromptState.None;
+            try { OnUploadConfirmed?.Invoke(PendingUploadSeconds); }
+            catch (Exception ex) { MapEditorPlugin.Logger.LogWarning($"[TIMES] OnUploadConfirmed error: {ex.Message}"); }
+        }
+
+        public void DismissUploadPrompt() => UploadPrompt = UploadPromptState.None;
 
         // Checkpoints / reset triggers
         private List<CheckpointData> _checkpoints = new List<CheckpointData>();
@@ -42,10 +68,11 @@ namespace FIHMapEditor
         }
 
         public void Enter(SpawnPointData spawn, GoalZoneData goal, bool blankMode, string mapName,
-                          List<CheckpointData> checkpoints = null, List<ResetZoneData> resetZones = null)
+                          string mapId, List<CheckpointData> checkpoints = null, List<ResetZoneData> resetZones = null)
         {
             _goal = goal;   // blankMode no longer changes play behaviour; kept for signature stability
             _mapName = mapName ?? "";
+            _mapId = mapId ?? "";
             _hasSpawn = spawn?.Pos != null;
             _checkpoints = checkpoints ?? new List<CheckpointData>();
             _resetZones = resetZones ?? new List<ResetZoneData>();
@@ -74,11 +101,15 @@ namespace FIHMapEditor
                 Timer = TimerState.Armed;
             }
             ElapsedSeconds = 0;
+            _pausedAccum = 0;
+            _wasPaused = false;
+            UploadPrompt = UploadPromptState.None;
         }
 
         public void Exit()
         {
             Timer = TimerState.Idle;
+            UploadPrompt = UploadPromptState.None;
             _goalBeacon.Hide();
             foreach (var ring in _checkpointRings) ring.Hide();
         }
@@ -89,8 +120,11 @@ namespace FIHMapEditor
             TeleportToSpawn();
             Timer = TimerState.Armed;
             ElapsedSeconds = 0;
+            _pausedAccum = 0;
+            _wasPaused = false;
             GoalReachedThisRun = false;
             NewBest = false;
+            UploadPrompt = UploadPromptState.None;
         }
 
         // R key: retry from the last collected coin, keeping the run timer going.
@@ -123,11 +157,19 @@ namespace FIHMapEditor
 
             DrawCheckpointRings();
 
+            // Track the pause menu so the run timer (and goal/checkpoint/reset checks)
+            // freeze while it's open, instead of counting menu-browsing time.
+            bool paused = IsGamePaused();
+            if (paused && !_wasPaused) _pauseEnteredAt = Time.unscaledTimeAsDouble;
+            else if (!paused && _wasPaused) _pausedAccum += Time.unscaledTimeAsDouble - _pauseEnteredAt;
+            _wasPaused = paused;
+
             switch (Timer)
             {
                 case TimerState.Armed:
                     // Start on the first real displacement (robust vs. physics settling).
-                    if (Vector3.Distance(pos, _spawnPos) > 0.05f)
+                    // The pause menu can't be open yet with no input taken, but guard anyway.
+                    if (!paused && Vector3.Distance(pos, _spawnPos) > 0.05f)
                     {
                         Timer = TimerState.Running;
                         _startTime = Time.unscaledTimeAsDouble;
@@ -135,7 +177,9 @@ namespace FIHMapEditor
                     break;
 
                 case TimerState.Running:
-                    ElapsedSeconds = Time.unscaledTimeAsDouble - _startTime;
+                    if (paused) break; // frozen: don't advance elapsed or check the goal
+
+                    ElapsedSeconds = Time.unscaledTimeAsDouble - _startTime - _pausedAccum;
 
                     if (_goal?.Center != null && VecUtil.ObbContains(pos,
                             VecUtil.ToVector3(_goal.Center),
@@ -150,12 +194,30 @@ namespace FIHMapEditor
                     break;
             }
 
-            if (Timer != TimerState.Finished)
+            if (Timer != TimerState.Finished && !paused)
             {
                 UpdateCheckpoints(pos);
                 UpdateResetZones(pos);
                 // No automatic fall respawn: falling forever is the player's business.
                 // Map makers who want one place a reset trigger where they need it.
+            }
+        }
+
+        // EHS.GameManager.IsPauseMenuShown is a public static bool in the referenced
+        // Assembly-CSharp.dll — direct compile-time access, guarded in case a future
+        // game build renames or removes it.
+        private bool IsGamePaused()
+        {
+            if (_pauseUnavailable) return false;
+            try
+            {
+                return EHS.GameManager.IsPauseMenuShown;
+            }
+            catch (Exception ex)
+            {
+                _pauseUnavailable = true;
+                MapEditorPlugin.Logger.LogWarning($"[PLAY] Pause detection unavailable: {ex.Message}");
+                return false;
             }
         }
 
@@ -244,12 +306,27 @@ namespace FIHMapEditor
             if (string.IsNullOrEmpty(_mapName)) return;
             try
             {
-                if (BestTime == null || ElapsedSeconds < BestTime.Value)
+                // BestTime still holds the PRE-this-run value here — used below for the
+                // "will overwrite X" message when this run doesn't beat it.
+                bool isNewBest = BestTime == null || ElapsedSeconds < BestTime.Value;
+                if (isNewBest)
                 {
                     NewBest = true;
                     BestTime = ElapsedSeconds;
                     EditorConfig.Settings.BestTimes[_mapName] = ElapsedSeconds;
                     EditorConfig.Save();
+                }
+
+                // Every finished run offers to upload — not just new bests. The owner
+                // (EditorController) may veto immediately via DismissUploadPrompt() if
+                // uploads aren't configured/enabled for this session.
+                if (!string.IsNullOrEmpty(_mapId))
+                {
+                    PendingUploadSeconds = ElapsedSeconds;
+                    PendingUploadIsNewBest = isNewBest;
+                    UploadPrompt = UploadPromptState.Offered;
+                    try { OnRunFinished?.Invoke(); }
+                    catch (Exception ex) { MapEditorPlugin.Logger.LogWarning($"[TIMES] OnRunFinished error: {ex.Message}"); }
                 }
             }
             catch (Exception ex)
@@ -293,6 +370,18 @@ namespace FIHMapEditor
             catch (Exception ex)
             {
                 MapEditorPlugin.Logger.LogError($"[PLAY] Teleport error: {ex}");
+            }
+
+            // Always auto-repair on any teleport/respawn — self-gated to a no-op when the
+            // phone is intact. Independent try/catch so a repair failure never aborts play.
+            try
+            {
+                var player = _finder.FindPlayer();
+                if (player != null) PlayerRepair.Repair(player);
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[PLAY] Auto-repair error: {ex.Message}");
             }
         }
 

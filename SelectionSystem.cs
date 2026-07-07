@@ -48,8 +48,23 @@ namespace FIHMapEditor
             _catalog = catalog;
         }
 
+        // Group-aware: selecting any member of a persistent group brings in every other
+        // member as a multi-selection, so a click always reselects the whole group.
         public void Select(PlacedObject placed)
         {
+            if (placed?.GroupId != null)
+            {
+                var members = new List<Selection>();
+                foreach (var p in _placedManager.Placed)
+                    if (p.GroupId == placed.GroupId) members.Add(new Selection { Placed = p });
+                if (members.Count > 1)
+                {
+                    Multi.Clear();
+                    Multi.AddRange(members);
+                    Current = new Selection { Placed = placed };
+                    return;
+                }
+            }
             Multi.Clear();
             Current = new Selection { Placed = placed };
         }
@@ -215,7 +230,7 @@ namespace FIHMapEditor
                 var placed = _placedManager.FromTransform(bestTransform);
                 if (placed != null)
                 {
-                    Current = new Selection { Placed = placed };
+                    Select(placed); // group-aware
                     return true;
                 }
 

@@ -52,6 +52,10 @@ namespace FIHMapEditor
             map.LevelEdits ??= new List<LevelEditData>();
             map.Checkpoints ??= new List<CheckpointData>();
             map.ResetZones ??= new List<ResetZoneData>();
+            // Legacy maps (pre-v6) carry no MapId — mint and keep one so the leaderboard
+            // has a stable key from now on.
+            if (string.IsNullOrEmpty(map.MapId))
+                map.MapId = System.Guid.NewGuid().ToString("N");
             return map;
         }
 
