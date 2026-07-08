@@ -904,13 +904,16 @@ namespace FIHMapEditor
                     Size = (float[])Goal.Size?.Clone(),
                     Rot = (float[])Goal.Rot?.Clone(),
                 };
+            // Uid must survive the round-trip: losing it makes multiplayer sync see the
+            // marker as deleted and broadcast DELETEs to every peer after a Ctrl+Z.
             var cps = new List<CheckpointData>();
             foreach (var c in Checkpoints)
-                cps.Add(new CheckpointData { Pos = (float[])c.Pos?.Clone(), Yaw = c.Yaw, Radius = c.Radius });
+                cps.Add(new CheckpointData { Uid = c.Uid, Pos = (float[])c.Pos?.Clone(), Yaw = c.Yaw, Radius = c.Radius });
             var zones = new List<ResetZoneData>();
             foreach (var z in ResetZones)
                 zones.Add(new ResetZoneData
                 {
+                    Uid = z.Uid,
                     Center = (float[])z.Center?.Clone(),
                     Size = (float[])z.Size?.Clone(),
                     Rot = (float[])z.Rot?.Clone(),
@@ -1957,8 +1960,13 @@ namespace FIHMapEditor
         {
             int idx = Checkpoints.FindIndex(c => c.Uid == uid);
             if (idx < 0) return;
-            if (SelectionSys.Current.Marker == "checkpoint" && SelectionSys.Current.MarkerIndex == idx)
-                SelectionSys.Deselect();
+            if (SelectionSys.Current.Marker == "checkpoint")
+            {
+                if (SelectionSys.Current.MarkerIndex == idx) SelectionSys.Deselect();
+                // A removal below the selected index shifts the list — keep pointing at
+                // the same checkpoint, not whatever slid into the old slot.
+                else if (SelectionSys.Current.MarkerIndex > idx) SelectionSys.Current.MarkerIndex--;
+            }
             Checkpoints.RemoveAt(idx);
             SetDirty();
         }
@@ -1975,8 +1983,11 @@ namespace FIHMapEditor
         {
             int idx = ResetZones.FindIndex(z => z.Uid == uid);
             if (idx < 0) return;
-            if (SelectionSys.Current.Marker == "reset" && SelectionSys.Current.MarkerIndex == idx)
-                SelectionSys.Deselect();
+            if (SelectionSys.Current.Marker == "reset")
+            {
+                if (SelectionSys.Current.MarkerIndex == idx) SelectionSys.Deselect();
+                else if (SelectionSys.Current.MarkerIndex > idx) SelectionSys.Current.MarkerIndex--;
+            }
             ResetZones.RemoveAt(idx);
             SetDirty();
         }
@@ -2312,39 +2323,42 @@ namespace FIHMapEditor
         // size and 2 = twice as big regardless of previous tweaking.
         public void SetScaleFactorSelected(float factor)
         {
-            if (ReadOnlyBlock()) return;
             factor = Mathf.Max(0.05f, factor);
             var sel = SelectionSys.Current;
-            if (sel.IsPlaced)
-            {
-                sel.Placed.Root.transform.localScale = sel.Placed.OriginalScale * factor;
-                SetDirty();
-            }
-            else if (sel.IsRaw)
-            {
-                var record = LevelEdits.CaptureOriginal(sel.Raw);
-                sel.Raw.transform.localScale = record.OrigScale * factor;
-                EndTransformEdit();
-            }
+            var t = BeginTransformEdit();   // arms Ctrl+Z and captures raw originals
+            if (t == null) return;
+            Vector3 baseScale = sel.IsPlaced
+                ? sel.Placed.OriginalScale
+                : LevelEdits.Find(sel.Raw)?.OrigScale ?? t.localScale;
+            t.localScale = baseScale * factor;
+            EndTransformEdit();
         }
 
         public void ResetSelected()
         {
-            if (ReadOnlyBlock()) return;
             var sel = SelectionSys.Current;
             if (sel.IsPlaced)
             {
-                var t = sel.Placed.Root.transform;
+                var t = BeginTransformEdit();
+                if (t == null) return;
                 t.rotation = Quaternion.identity;
                 t.localScale = sel.Placed.OriginalScale;
-                SetDirty();
+                EndTransformEdit();
             }
             else if (sel.IsRaw)
             {
                 // Level object: back to exactly how the game placed it.
                 var record = LevelEdits.Find(sel.Raw);
-                if (record != null) LevelEdits.RevertTransform(record);
-                SetDirty();
+                if (record == null) return;   // never edited — nothing to reset
+                Vector3 origPos = record.OrigPos;
+                Quaternion origRot = record.OrigRot;
+                Vector3 origScale = record.OrigScale;
+                var t = BeginTransformEdit();
+                if (t == null) return;
+                t.position = origPos;
+                t.rotation = origRot;
+                t.localScale = origScale;
+                EndTransformEdit();   // RecordTransform sees it pristine and prunes the record
             }
         }
 
@@ -2525,30 +2539,7 @@ namespace FIHMapEditor
 
             if (sel.IsPlaced)
             {
-                var name = sel.Placed.Root.name;
-                var data = sel.Placed.ToData();
-                PlacedManager.Delete(sel.Placed);
-                SelectionSys.Deselect();
-
-                Undo.Push($"delete of {name}", () =>
-                {
-                    var src = Catalog.ResolveSource(data.Source, data.SourceName);
-                    if (src == null)
-                    {
-                        ShowToast($"Undo failed: source \"{data.SourceName}\" not found");
-                        return;
-                    }
-                    var respawned = PlacedManager.Spawn(src, data.Source, data.SourceName,
-                        VecUtil.ToVector3(data.Pos),
-                        Quaternion.Euler(VecUtil.ToVector3(data.Rot)),
-                        VecUtil.ToVector3(data.Scale, Vector3.one),
-                        data.Tint, restore: data);
-                    if (respawned != null) SelectionSys.Select(respawned);
-                    SetDirty();
-                });
-
-                SetDirty();
-                ShowToast($"Deleted: {name}");
+                DeletePlacedSingle(sel.Placed);
                 return;
             }
 
@@ -2571,6 +2562,41 @@ namespace FIHMapEditor
 
             SetDirty();
             ShowToast($"Level object hidden: {rawName} (revert from LIST)");
+        }
+
+        // Delete exactly ONE placed object, no group expansion — the LIST tab's per-row
+        // X button must remove that row only, even when the object belongs to a group
+        // (Select() would pull in every member and MultiDelete the lot).
+        public void DeletePlacedSingle(PlacedObject placed)
+        {
+            if (ReadOnlyBlock()) return;
+            if (placed?.Root == null) return;
+
+            var name = placed.Root.name;
+            var data = placed.ToData();
+            if (SelectionSys.Current.Placed == placed) SelectionSys.Deselect();
+            PlacedManager.Delete(placed);
+            SelectionSys.PruneMulti();
+
+            Undo.Push($"delete of {name}", () =>
+            {
+                var src = Catalog.ResolveSource(data.Source, data.SourceName);
+                if (src == null)
+                {
+                    ShowToast($"Undo failed: source \"{data.SourceName}\" not found");
+                    return;
+                }
+                var respawned = PlacedManager.Spawn(src, data.Source, data.SourceName,
+                    VecUtil.ToVector3(data.Pos),
+                    Quaternion.Euler(VecUtil.ToVector3(data.Rot)),
+                    VecUtil.ToVector3(data.Scale, Vector3.one),
+                    data.Tint, restore: data);
+                if (respawned != null) SelectionSys.Select(respawned);
+                SetDirty();
+            });
+
+            SetDirty();
+            ShowToast($"Deleted: {name}");
         }
 
         public void WipeCustomObjects()

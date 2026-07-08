@@ -7,7 +7,7 @@ using System;
 
 namespace FIHMapEditor
 {
-    [BepInPlugin("com.flippingishard.mapeditor", "FIH Custom Map Editor", "0.8.0")]
+    [BepInPlugin("com.flippingishard.mapeditor", "FIH Custom Map Editor", "0.8.1")]
     public class MapEditorPlugin : BasePlugin
     {
         internal static ManualLogSource Logger { get; private set; }

@@ -15,7 +15,6 @@ namespace FIHMapEditor
 
         public TimerState Timer { get; private set; } = TimerState.Idle;
         public double ElapsedSeconds { get; private set; }
-        public bool GoalReachedThisRun { get; private set; }
         public double? BestTime { get; private set; }
         public bool NewBest { get; private set; }
 
@@ -77,7 +76,6 @@ namespace FIHMapEditor
             _checkpoints = checkpoints ?? new List<CheckpointData>();
             _resetZones = resetZones ?? new List<ResetZoneData>();
             ActiveCheckpoint = -1;
-            GoalReachedThisRun = false;
             NewBest = false;
 
             BestTime = null;
@@ -122,7 +120,6 @@ namespace FIHMapEditor
             ElapsedSeconds = 0;
             _pausedAccum = 0;
             _wasPaused = false;
-            GoalReachedThisRun = false;
             NewBest = false;
             UploadPrompt = UploadPromptState.None;
         }
@@ -187,7 +184,6 @@ namespace FIHMapEditor
                             VecUtil.ToRotation(_goal.Rot)))
                     {
                         Timer = TimerState.Finished;
-                        GoalReachedThisRun = true;
                         _goalBeacon.Hide();
                         SaveBestTime();
                     }

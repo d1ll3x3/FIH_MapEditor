@@ -51,11 +51,14 @@ namespace FIHMapEditor
         private string _scaleField = "0.5";
         private string _colorHexField = "FFFFFF";
 
-        // Map tab state
-        private string _nameField = null;     // lazily initialised from controller
+        // Map tab state: the Name box mirrors the working map. Re-seeded whenever the
+        // controller's MapName changes underneath us (load, New map, remote rename) —
+        // a stale field would silently rename the newly loaded map on the next SAVE.
+        private string _nameField = null;
+        private string _nameFieldSeededFrom = null;
 
-        // Mechanics row state: numeric boxes re-seeded when the selection changes.
-        private string _mechForceField, _mechTimerField;
+        // Mechanics row state: numeric box re-seeded when the selection changes.
+        private string _mechTimerField;
         private int _mechFieldsForId = -1;
 
         // KEYS tab fly tuning fields (lazy-seeded from config).
@@ -292,15 +295,25 @@ namespace FIHMapEditor
                 _styleSmall);
         }
 
+        // Filtering the whole catalog is O(entries × favorites) — too much to redo on
+        // every OnGUI event (IMGUI runs Layout + Repaint + input passes per frame), so
+        // the result is cached and only rebuilt when an input to the filter changes.
+        private List<CatalogEntry> _filteredCache;
+        private string _filteredCacheKey;
+
         private List<CatalogEntry> FilteredEntries()
         {
+            string f = _filter.Trim().ToLowerInvariant();
+            string key = $"{f}|{_category}|{_solidOnly}|{_favsOnly}|{_c.Catalog.ScanVersion}|{EditorConfig.Settings.FavoriteObjects.Count}";
+            if (_filteredCache != null && _filteredCacheKey == key) return _filteredCache;
+
             // Favorites always float to the top; alphabetical order within each group.
+            var favSet = new HashSet<string>(EditorConfig.Settings.FavoriteObjects);
             var favs = new List<CatalogEntry>();
             var rest = new List<CatalogEntry>();
-            string f = _filter.Trim().ToLowerInvariant();
             foreach (var e in _c.Catalog.Entries)
             {
-                bool fav = IsFavorite(e.DisplayName);
+                bool fav = favSet.Contains(e.DisplayName);
                 if (_favsOnly && !fav) continue;
                 if (_category != "" && e.Category != _category) continue;
                 if (_solidOnly && !e.HasCollider) continue;
@@ -308,6 +321,8 @@ namespace FIHMapEditor
                 (fav ? favs : rest).Add(e);
             }
             favs.AddRange(rest);
+            _filteredCache = favs;
+            _filteredCacheKey = key;
             return favs;
         }
 
@@ -654,11 +669,10 @@ namespace FIHMapEditor
                 _c.TpPlayerOntoSelected();
             }
             GUI.backgroundColor = new Color(0.8f, 0.35f, 0.3f);
+            // Direct single delete: Select() would expand a group and X would then wipe
+            // every member — the row's X must only ever remove that one object.
             if (_win.Button(new Rect(580, ry, 60, 24), "X"))
-            {
-                _c.SelectionSys.Select(p);
-                _c.DeleteSelected();
-            }
+                _c.DeletePlacedSingle(p);
             GUI.backgroundColor = Color.white;
         }
 
@@ -686,7 +700,11 @@ namespace FIHMapEditor
         private void DrawMapTab()
         {
             float y = ContentY;
-            _nameField ??= _c.MapName;
+            if (_nameField == null || (_c.MapName != _nameFieldSeededFrom && !_win.HasFocusedTextField))
+            {
+                _nameField = _c.MapName;
+                _nameFieldSeededFrom = _c.MapName;
+            }
 
             GUI.Label(new Rect(15, y + 3, 60, 20), "Name:", _styleSmall);
             _nameField = _win.TextField(new Rect(80, y, 300, 24), "mapname", _nameField);
@@ -699,13 +717,13 @@ namespace FIHMapEditor
                 _c.MapName = _nameField.Trim().Length > 0 ? _nameField.Trim() : _c.MapName;
                 if (canOverwrite) _c.SaveOverwrite();
                 else _c.SaveAsNew(_nameField);
-                _nameField = _c.MapName;
+                _nameField = _nameFieldSeededFrom = _c.MapName;
             }
             GUI.backgroundColor = new Color(0.3f, 0.6f, 0.9f);
             if (_win.Button(new Rect(205, y, 180, 30), "SAVE AS NEW"))
             {
                 _c.SaveAsNew(_nameField);
-                _nameField = _c.MapName;
+                _nameField = _nameFieldSeededFrom = _c.MapName;
             }
             GUI.backgroundColor = Color.white;
             y += 40;
@@ -804,7 +822,6 @@ namespace FIHMapEditor
             if (_mechFieldsForId != placed.Id)
             {
                 _mechFieldsForId = placed.Id;
-                _mechForceField = placed.BoostForce.ToString("0.#");
                 _mechTimerField = placed.CannonTimer.ToString("0.##");
             }
 

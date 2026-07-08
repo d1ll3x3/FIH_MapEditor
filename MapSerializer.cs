@@ -24,7 +24,9 @@ namespace FIHMapEditor
 
         public static string MapsDir => Path.Combine(Paths.PluginPath, "FIHMapEditor", "Maps");
 
-        private static JsonSerializerOptions Options => new JsonSerializerOptions
+        // One shared instance: System.Text.Json caches its reflection metadata PER
+        // options object, so recreating it per call would re-derive everything each time.
+        private static readonly JsonSerializerOptions Options = new JsonSerializerOptions
         {
             WriteIndented = true,
             Converters = { new JsonStringEnumConverter() }
@@ -41,7 +43,7 @@ namespace FIHMapEditor
 
         public static string PathFor(string fileName) => Path.Combine(MapsDir, fileName + EXTENSION);
 
-        // In-memory (de)serialization for the multiplayer sync channel.
+        // In-memory (de)serialization for the online map library (upload/download).
         public static string ToJson(MapFile map) => JsonSerializer.Serialize(map, Options);
 
         public static MapFile FromJson(string json)

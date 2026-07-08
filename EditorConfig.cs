@@ -125,15 +125,25 @@ namespace FIHMapEditor
             }
         }
 
+        // Resets keybinds and tuning values only. User DATA must survive — especially
+        // OwnerTokens: losing those permanently orphans the user's uploaded online maps.
         public static void ResetToDefaults()
         {
             var bestTimes = Settings.BestTimes;
             var favorites = Settings.FavoriteObjects;
+            var supaUrl = Settings.SupabaseUrl;
+            var supaKey = Settings.SupabaseAnonKey;
+            var submit = Settings.SubmitTimesOnline;
+            var ownerTokens = Settings.OwnerTokens;
             Settings = new EditorSettings
             {
                 Version = EditorSettings.CURRENT_VERSION,
                 BestTimes = bestTimes ?? new Dictionary<string, double>(),
                 FavoriteObjects = favorites ?? new List<string>(),
+                SupabaseUrl = supaUrl ?? "",
+                SupabaseAnonKey = supaKey ?? "",
+                SubmitTimesOnline = submit,
+                OwnerTokens = ownerTokens ?? new Dictionary<string, string>(),
             };
             Save();
         }

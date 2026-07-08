@@ -14,7 +14,6 @@ namespace FIHMapEditor
         public string Category;
         public Vector3 BoundsSize;
         public GameObject Source;     // live reference; re-resolved by path when destroyed
-        public int InstanceCount;     // how many identical objects the scan found
         public bool HasCollider;      // false = pure decoration (SM meshes, VFX...)
     }
 
@@ -41,6 +40,8 @@ namespace FIHMapEditor
         public List<string> Categories { get; } = new List<string>();
         public List<DecorPickable> ColliderlessRoots { get; } = new List<DecorPickable>();
         public bool HasScanned { get; private set; }
+        // Bumped on every Scan()/Clear() so GUI-side caches of Entries can invalidate.
+        public int ScanVersion { get; private set; }
 
         private readonly GameObjectFinder _finder;
 
@@ -58,6 +59,7 @@ namespace FIHMapEditor
             Categories.Clear();
             ColliderlessRoots.Clear();
             HasScanned = false;
+            ScanVersion++;
         }
 
         public void Scan()
@@ -65,6 +67,7 @@ namespace FIHMapEditor
             Entries.Clear();
             Categories.Clear();
             ColliderlessRoots.Clear();
+            ScanVersion++;
 
             try
             {
@@ -92,11 +95,7 @@ namespace FIHMapEditor
                     string meshName = FirstMeshName(root.gameObject);
                     string key = display + "|" + meshName;
 
-                    if (seen.TryGetValue(key, out var existing))
-                    {
-                        existing.InstanceCount++;
-                        continue;
-                    }
+                    if (seen.ContainsKey(key)) continue;
 
                     var entry = new CatalogEntry
                     {
@@ -104,7 +103,6 @@ namespace FIHMapEditor
                         SourcePath = BuildPath(root),
                         Source = root.gameObject,
                         BoundsSize = bounds.size,
-                        InstanceCount = 1,
                         Category = Categorize(display, bounds.size),
                         HasCollider = true,
                     };
@@ -136,11 +134,7 @@ namespace FIHMapEditor
 
                     string display = CleanName(root.name);
                     string key = display + "|" + FirstMeshName(root.gameObject);
-                    if (seen.TryGetValue(key, out var existing))
-                    {
-                        existing.InstanceCount++;
-                        continue;
-                    }
+                    if (seen.ContainsKey(key)) continue;
 
                     seen[key] = new CatalogEntry
                     {
@@ -148,7 +142,6 @@ namespace FIHMapEditor
                         SourcePath = BuildPath(root),
                         Source = root.gameObject,
                         BoundsSize = bounds.size,
-                        InstanceCount = 1,
                         Category = hasCollider ? Categorize(display, bounds.size) : "Decor",
                         HasCollider = hasCollider,
                     };
@@ -229,7 +222,6 @@ namespace FIHMapEditor
                         SourcePath = BuildPath(t),
                         Source = go,
                         BoundsSize = bounds.size,
-                        InstanceCount = 1,
                         Category = "Hidden",
                         HasCollider = go.GetComponentInChildren<Collider>(true) != null,
                     };
@@ -288,7 +280,6 @@ namespace FIHMapEditor
                         SourcePath = BuildPath(root),
                         Source = root.gameObject,
                         BoundsSize = bounds.size,
-                        InstanceCount = 1,
                         Category = "Mechanics",
                         HasCollider = root.GetComponentInChildren<Collider>(true) != null,
                     };
@@ -337,7 +328,6 @@ namespace FIHMapEditor
                         SourcePath = ASSET_PREFIX + go.name,
                         Source = go,
                         BoundsSize = bounds.size,
-                        InstanceCount = 1,
                         Category = ASSET_CATEGORY,
                         HasCollider = go.GetComponentInChildren<Collider>(true) != null,
                     };

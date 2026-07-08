@@ -12,11 +12,6 @@ namespace FIHMapEditor
         public const float DEFAULT_BOOST_FORCE = 30f;
         public const float DEFAULT_CANNON_TIMER = 1.5f;
 
-        public static MechanicType DetectTypeOnly(GameObject root)
-        {
-            return Detect(root, out _, out _);
-        }
-
         // Subtree-only check (no ancestor climbing): used by the catalog so ONLY the
         // full assemblies get the Mechanics category, not every neighboring piece.
         public static MechanicType DetectTypeInSubtree(GameObject root)
@@ -165,6 +160,23 @@ namespace FIHMapEditor
 
         private readonly Dictionary<int, float> _cooldowns = new Dictionary<int, float>();
 
+        // ComputeColliderBounds walks the clone's whole component tree — too costly to
+        // redo per placed mechanic per frame. Cached against the transform's state and
+        // recomputed only when the object actually moved/rotated/scaled.
+        private readonly Dictionary<int, (Vector3 pos, Quaternion rot, Vector3 scale, Bounds bounds)> _boundsCache
+            = new Dictionary<int, (Vector3, Quaternion, Vector3, Bounds)>();
+
+        private Bounds GetColliderBounds(PlacedObject p)
+        {
+            var t = p.Root.transform;
+            if (_boundsCache.TryGetValue(p.Id, out var c)
+                && c.pos == t.position && c.rot == t.rotation && c.scale == t.localScale)
+                return c.bounds;
+            var bounds = ComputeColliderBounds(p.Root);
+            _boundsCache[p.Id] = (t.position, t.rotation, t.localScale, bounds);
+            return bounds;
+        }
+
         private const float INTERACT_RANGE = 3.5f;
         private const float PAD_COOLDOWN = 0.4f;
         private const float CANNON_COOLDOWN = 1f;
@@ -199,6 +211,7 @@ namespace FIHMapEditor
             _activeCannon = null;
             InteractPrompt = null;
             _cooldowns.Clear();
+            _boundsCache.Clear();
         }
 
         public void Update(EditorMode mode, bool acceptInput, bool textFieldFocused)
@@ -242,7 +255,7 @@ namespace FIHMapEditor
             {
                 if (p.Mechanic != MechanicType.BoostPad || p.Root == null) continue;
 
-                var bounds = ComputeColliderBounds(p.Root);
+                var bounds = GetColliderBounds(p);
                 if (bounds.size == Vector3.zero) continue;
                 bounds.Expand(0.6f);
                 if (!bounds.Contains(pos)) continue;
@@ -282,7 +295,7 @@ namespace FIHMapEditor
             foreach (var p in _placed.Placed)
             {
                 if (p.Mechanic != MechanicType.Cannon || p.Root == null) continue;
-                var bounds = ComputeColliderBounds(p.Root);
+                var bounds = GetColliderBounds(p);
                 float d = Vector3.Distance(bounds.center, playerPos);
                 if (d < nearestDist)
                 {

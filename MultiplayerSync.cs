@@ -83,7 +83,6 @@ namespace FIHMapEditor
 
         // Always on: discovery is idle-cheap in singleplayer, and syncing must never
         // depend on someone remembering a menu toggle.
-        public bool Enabled => true;
         public string LastSyncInfo { get; private set; } = "";
 
         private float _nextHelloAt;
@@ -142,7 +141,7 @@ namespace FIHMapEditor
         // Local edit happened: schedule a debounced diff+broadcast.
         public void NotifyDirty()
         {
-            if (!Enabled || _applyingRemote) return;
+            if (_applyingRemote) return;
             _broadcastAt = Time.unscaledTime + BROADCAST_DEBOUNCE;
         }
 
@@ -168,7 +167,6 @@ namespace FIHMapEditor
 
         public void Update()
         {
-            if (!Enabled) return;
             try
             {
                 if (Time.unscaledTime >= _nextLobbyRefreshAt)
@@ -201,7 +199,6 @@ namespace FIHMapEditor
         // for the debounce.
         public void ForceBroadcast()
         {
-            if (!Enabled) return;
             _broadcastAt = -1f;
             BroadcastPendingDiff();
         }
@@ -369,6 +366,12 @@ namespace FIHMapEditor
         // whether/where to send the resulting ops.
         private List<SyncOp> ComputeDiff()
         {
+            // Normally set during lobby discovery, but a diff can run before the lobby
+            // is found (a peer's HELLO can arrive first) — ops stamped with Editor=0
+            // would lose every same-rev tie-break, so resolve the id here too.
+            if (_selfId == 0)
+                try { _selfId = SteamUser.GetSteamID().m_SteamID; } catch { }
+
             var current = BuildCurrentSnapshotJson();
             var ops = new List<SyncOp>();
 
