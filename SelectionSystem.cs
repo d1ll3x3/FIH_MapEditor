@@ -145,8 +145,10 @@ namespace FIHMapEditor
         // was there. unlockOriginals lets clicks resolve original scene geometry too;
         // pickInvisible additionally lets clicks land on triggers and renderless
         // colliders (kill zones, invisible walls) instead of passing through to what
-        // the user actually sees.
-        public bool PickAtMouse(bool unlockOriginals, bool pickInvisible, out Vector3 hitPoint)
+        // the user actually sees. additive (Ctrl+Click) only replaces Current — it must
+        // NOT clear Multi (CtrlMerge builds on it right after) nor expand groups.
+        public bool PickAtMouse(bool unlockOriginals, bool pickInvisible, out Vector3 hitPoint,
+                                bool additive = false)
         {
             hitPoint = Vector3.zero;
             try
@@ -230,7 +232,8 @@ namespace FIHMapEditor
                 var placed = _placedManager.FromTransform(bestTransform);
                 if (placed != null)
                 {
-                    Select(placed); // group-aware
+                    if (additive) Current = new Selection { Placed = placed };
+                    else Select(placed); // group-aware
                     return true;
                 }
 
@@ -238,7 +241,9 @@ namespace FIHMapEditor
                 {
                     // Resolve to the same logical root the catalog scan would pick.
                     var root = ClimbToLogicalRoot(bestTransform);
+                    if (!additive) Multi.Clear();
                     Current = new Selection { Raw = root.gameObject };
+                    LogRawPickDebug(bestTransform, root);
                     return true;
                 }
 
@@ -336,11 +341,47 @@ namespace FIHMapEditor
             return true;
         }
 
+        // Hierarchy dump on every raw (level-object) pick: which node the ray hit, what
+        // root the climb resolved, and what lives around it. This is the evidence trail
+        // for objects whose visuals and colliders the game keeps in separate branches.
+        private static void LogRawPickDebug(Transform hit, Transform root)
+        {
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine($"[SELECT] raw pick hit='{ObjectCatalog.BuildPath(hit)}' root='{ObjectCatalog.BuildPath(root)}'");
+                var p = root.parent;
+                if (p != null)
+                {
+                    sb.AppendLine($"[SELECT] climb into parent '{p.name}'? {CanClimbInto(p, null)} — children ({p.childCount}):");
+                    for (int i = 0; i < p.childCount && i < 24; i++)
+                        sb.AppendLine($"    - {p.GetChild(i).name} {DescribeNode(p.GetChild(i))}");
+                }
+                sb.AppendLine($"[SELECT] root children ({root.childCount}):");
+                for (int i = 0; i < root.childCount && i < 24; i++)
+                    sb.AppendLine($"    - {root.GetChild(i).name} {DescribeNode(root.GetChild(i))}");
+                MapEditorPlugin.Logger.LogInfo(sb.ToString());
+            }
+            catch { }
+        }
+
+        private static string DescribeNode(Transform t)
+        {
+            try
+            {
+                int r = t.GetComponentsInChildren<Renderer>(true).Length;
+                int c = t.GetComponentsInChildren<Collider>(true).Length;
+                bool rb = t.GetComponentInChildren<Rigidbody>(true) != null;
+                return $"[renderers:{r} colliders:{c}{(rb ? " rigidbody" : "")}{(t.gameObject.activeInHierarchy ? "" : " INACTIVE")}]";
+            }
+            catch { return "[?]"; }
+        }
+
         // Public: the invisible-collider visualizer groups colliders by the same root.
         public static Transform ClimbToLogicalRoot(Transform t)
         {
             var root = t;
-            var cache = new System.Collections.Generic.Dictionary<int, int>();
+            var cache = new Dictionary<int, int>();
             while (root.parent != null)
             {
                 var p = root.parent;
@@ -349,19 +390,65 @@ namespace FIHMapEditor
                     root = p;
                     continue;
                 }
-                int renderableChildren = 0;
-                for (int i = 0; i < p.childCount; i++)
-                {
-                    var child = p.GetChild(i);
-                    if (child.GetComponentInChildren<Renderer>(true) != null ||
-                        child.GetComponentInChildren<Collider>(true) != null)
-                        renderableChildren++;
-                    if (renderableChildren > 1) break;
-                }
-                if (renderableChildren == 1) { root = p; continue; }
+                if (CanClimbInto(p, cache)) { root = p; continue; }
                 break;
             }
             return root;
+        }
+
+        // Whether `p` is still part of the SAME logical object as its children — i.e.
+        // the root climb should continue through it. Shared by selection picking and
+        // the catalog scan so both always agree on what "one object" means.
+        // Cache stores 1 = climb, 0 = stop, keyed by transform instance id.
+        public static bool CanClimbInto(Transform p, Dictionary<int, int> verdictCache)
+        {
+            int id = p.GetInstanceID();
+            if (verdictCache != null && verdictCache.TryGetValue(id, out int v)) return v == 1;
+            bool climb = ComputeCanClimbInto(p);
+            if (verdictCache != null) verdictCache[id] = climb ? 1 : 0;
+            return climb;
+        }
+
+        private static bool ComputeCanClimbInto(Transform p)
+        {
+            // An LODGroup's children (LOD0/LOD1/... plus collision nodes) are by
+            // definition one object — grabbing a single LOD would tear it apart.
+            try { if (p.GetComponent<LODGroup>() != null) return true; } catch { }
+
+            int rendererBranches = 0;
+            int colliderOnlyBranches = 0;
+            bool rendererBranchesAllLod = true;
+            for (int i = 0; i < p.childCount; i++)
+            {
+                var child = p.GetChild(i);
+                if (child.GetComponentInChildren<Renderer>(true) != null)
+                {
+                    rendererBranches++;
+                    if (child.name.IndexOf("LOD", StringComparison.OrdinalIgnoreCase) < 0)
+                        rendererBranchesAllLod = false;
+                }
+                else if (child.GetComponentInChildren<Collider>(true) != null)
+                {
+                    colliderOnlyBranches++;
+                }
+            }
+
+            // Several distinct visible children = a container (level chunk, prop group)
+            // — unless they're just LOD variants of one mesh (no LODGroup component).
+            if (rendererBranches > 1 && !rendererBranchesAllLod) return false;
+
+            // Pure wrapper: a single renderable branch and nothing else. Always climb.
+            if (colliderOnlyBranches == 0 && rendererBranches == 1) return true;
+            if (colliderOnlyBranches == 0 && rendererBranches == 0) return false; // empty node
+
+            // Visual + collision split (the game keeps SM_* meshes and their collision
+            // nodes as siblings) or a collider-only group: one object, but guard against
+            // chunk-scale containers ("one house + the whole area's invisible walls").
+            var bounds = ObjectCatalog.ComputeBounds(p.gameObject);
+            if (bounds.size == Vector3.zero)
+                bounds = MechanicsController.ComputeColliderBounds(p.gameObject);
+            if (bounds.size == Vector3.zero) return false;
+            return bounds.size.x <= 60f && bounds.size.y <= 60f && bounds.size.z <= 60f;
         }
     }
 }

@@ -1344,7 +1344,8 @@ namespace FIHMapEditor
             }
 
             var previousSelection = SelectionSys.Current;
-            bool hit = SelectionSys.PickAtMouse(UnlockOriginals, PickInvisible, out Vector3 hitPoint);
+            bool hit = SelectionSys.PickAtMouse(UnlockOriginals, PickInvisible, out Vector3 hitPoint,
+                additive: ctrlClick);
 
             if (ctrlClick)
             {

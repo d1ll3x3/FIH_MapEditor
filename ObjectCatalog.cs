@@ -88,8 +88,20 @@ namespace FIHMapEditor
                     if (!visitedRoots.Add(root.GetInstanceID())) continue;
                     if (!IsValidCandidate(root, playerRoot)) continue;
 
+                    // Nothing gets skipped for being invisible anymore: an object whose
+                    // renderers are disabled still measures via its meshes, and a pure
+                    // collider object (invisible wall, volume) measures via its
+                    // colliders and lands in the "Invisible" category.
+                    bool invisible = false;
                     var bounds = ComputeBounds(root.gameObject);
-                    if (bounds.size == Vector3.zero) continue; // no renderers → invisible, skip
+                    if (bounds.size == Vector3.zero)
+                        bounds = ComputeAssetBounds(root.gameObject);
+                    if (bounds.size == Vector3.zero)
+                    {
+                        bounds = MechanicsController.ComputeColliderBounds(root.gameObject);
+                        if (bounds.size == Vector3.zero) continue; // truly nothing measurable
+                        invisible = true;
+                    }
 
                     string display = CleanName(root.name);
                     string meshName = FirstMeshName(root.gameObject);
@@ -103,7 +115,7 @@ namespace FIHMapEditor
                         SourcePath = BuildPath(root),
                         Source = root.gameObject,
                         BoundsSize = bounds.size,
-                        Category = Categorize(display, bounds.size),
+                        Category = invisible ? "Invisible" : Categorize(display, bounds.size),
                         HasCollider = true,
                     };
                     seen[key] = entry;
@@ -418,9 +430,9 @@ namespace FIHMapEditor
             return null;
         }
 
-        // Climb from a collider to the object's logical root: keep climbing while the parent
-        // is a pure wrapper (no renderer/collider of its own, exactly one renderable branch).
-        // Containers with many renderable children stop the climb.
+        // Climb from a collider to the object's logical root. The climb rule lives in
+        // SelectionSystem.CanClimbInto so the catalog and click-selection always agree
+        // on what "one object" means (LOD sets and SM_*/collision splits included).
         private Transform FindCandidateRoot(Transform t, Dictionary<int, int> wrapperCache)
         {
             var root = t;
@@ -432,7 +444,7 @@ namespace FIHMapEditor
                     root = p;
                     continue;
                 }
-                if (CountRenderableChildren(p, wrapperCache) == 1)
+                if (SelectionSystem.CanClimbInto(p, wrapperCache))
                 {
                     root = p;
                     continue;
@@ -440,24 +452,6 @@ namespace FIHMapEditor
                 break;
             }
             return root;
-        }
-
-        private int CountRenderableChildren(Transform p, Dictionary<int, int> cache)
-        {
-            int id = p.GetInstanceID();
-            if (cache.TryGetValue(id, out int cached)) return cached;
-
-            int count = 0;
-            for (int i = 0; i < p.childCount; i++)
-            {
-                var child = p.GetChild(i);
-                if (child.GetComponentInChildren<Renderer>(true) != null ||
-                    child.GetComponentInChildren<Collider>(true) != null)
-                    count++;
-                if (count > 1) break;
-            }
-            cache[id] = count;
-            return count;
         }
 
         private bool IsValidCandidate(Transform root, Transform playerRoot, bool requireActive = true)
