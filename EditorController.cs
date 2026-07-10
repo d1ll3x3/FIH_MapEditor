@@ -269,8 +269,12 @@ namespace FIHMapEditor
                         Mechanics.Update(Mode, acceptInput, AnyTextFieldFocused());
                         if (acceptInput && Input.WasKeyPressed("restart", EditorConfig.Settings.RestartRunKey))
                         {
-                            if (Input.IsShiftHeld()) PlayMode.RestartRun();   // full restart
-                            else PlayMode.QuickRestart();                     // last coin
+                            // Keyboard Shift ONLY: a held gamepad face button (used by
+                            // game actions) must never turn a checkpoint retry into an
+                            // accidental full restart ("it sent me back to the start").
+                            MapEditorPlugin.Logger.LogInfo("[PLAY] Retry via keyboard");
+                            if (Input.IsShiftKeyHeld()) PlayMode.RestartRun();   // full restart
+                            else PlayMode.QuickRestart();                        // last coin
                         }
                         // Gamepad: X/Square = retry from last coin, LB+X / L1+Square = full
                         // restart (the trainer's combo pattern).
@@ -279,6 +283,7 @@ namespace FIHMapEditor
                             var gp = UnityEngine.InputSystem.Gamepad.current;
                             if (gp != null && gp[UnityEngine.InputSystem.LowLevel.GamepadButton.West].wasPressedThisFrame)
                             {
+                                MapEditorPlugin.Logger.LogInfo("[PLAY] Retry via gamepad");
                                 if (gp[UnityEngine.InputSystem.LowLevel.GamepadButton.LeftShoulder].isPressed)
                                     PlayMode.RestartRun();
                                 else

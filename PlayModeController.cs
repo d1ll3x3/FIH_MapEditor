@@ -101,6 +101,7 @@ namespace FIHMapEditor
             ElapsedSeconds = 0;
             _pausedAccum = 0;
             _wasPaused = false;
+            _warnedZoneLoop = false;
             UploadPrompt = UploadPromptState.None;
         }
 
@@ -137,6 +138,11 @@ namespace FIHMapEditor
             RestartRun();
         }
 
+        // Diagnostics: distinguish OUR teleports from the game moving the player on
+        // its own (the "keeps restarting me" reports need to know which one it is).
+        private Vector3 _lastPos;
+        private bool _movedByUs;
+
         public void Update()
         {
             if (Timer == TimerState.Idle) return;
@@ -144,6 +150,12 @@ namespace FIHMapEditor
             var playerT = _finder.FindPlayerTransform();
             if (playerT == null) return;
             Vector3 pos = playerT.position;
+
+            if (!_movedByUs && (pos - _lastPos).sqrMagnitude > 100f && _lastPos != Vector3.zero)
+                MapEditorPlugin.Logger.LogWarning(
+                    $"[PLAY] EXTERNAL teleport (not the mod): {_lastPos} -> {pos} (timer={Timer}, activeCp={ActiveCheckpoint})");
+            _lastPos = pos;
+            _movedByUs = false;
 
             // Show a subtle beacon at the goal so the player can find it.
             if (_goal?.Center != null && Timer != TimerState.Finished)
@@ -219,11 +231,13 @@ namespace FIHMapEditor
 
         private void UpdateCheckpoints(Vector3 playerPos)
         {
-            // Forward-only progression: grazing an EARLIER checkpoint must never move
-            // the respawn backwards (courses that loop near old rings silently reset
-            // players "to the start" otherwise — the classic checkpoint-bug report).
-            for (int i = ActiveCheckpoint + 1; i < _checkpoints.Count; i++)
+            // Last-touched wins, whatever the creation order — coins and boxes added at
+            // different times must stay interchangeable mid-course. (An index-ordered
+            // "forward-only" rule broke mixing: a box created last deactivated every
+            // earlier-made coin the moment it was touched.)
+            for (int i = 0; i < _checkpoints.Count; i++)
             {
+                if (i == ActiveCheckpoint) continue;
                 var cp = _checkpoints[i];
                 if (cp?.Pos == null) continue;
                 bool touched;
@@ -252,22 +266,43 @@ namespace FIHMapEditor
         private void UpdateResetZones(Vector3 playerPos)
         {
             if (Time.unscaledTime < _resetCooldownUntil) return;
+            Vector3? dest = null;   // respawn destination, computed on first touch only
             foreach (var zone in _resetZones)
             {
                 if (zone?.Center == null) continue;
+                Vector3 c = VecUtil.ToVector3(zone.Center);
+                Vector3 s = VecUtil.ToVector3(zone.Size, Vector3.one * 4f);
+                var r = VecUtil.ToRotation(zone.Rot);
                 // Instant: fires the moment the player's BODY grazes the (possibly
                 // rotated) box, not once the pivot is deep inside it.
-                if (VecUtil.PlayerTouchesObb(playerPos,
-                        VecUtil.ToVector3(zone.Center),
-                        VecUtil.ToVector3(zone.Size, Vector3.one * 4f),
-                        VecUtil.ToRotation(zone.Rot)))
+                if (!VecUtil.PlayerTouchesObb(playerPos, c, s, r)) continue;
+
+                // A zone that CONTAINS the respawn destination can only teleport-loop
+                // forever (join a co-edit session and press Play while standing on an
+                // invisible zone with no spawn set → endless resets). Ignore it.
+                dest ??= ActiveCheckpoint >= 0 && ActiveCheckpoint < _checkpoints.Count
+                         && _checkpoints[ActiveCheckpoint]?.Pos != null
+                    ? CheckpointRespawnPos(_checkpoints[ActiveCheckpoint])
+                    : _spawnPos;
+                if (VecUtil.PlayerTouchesObb(dest.Value, c, s, r))
                 {
-                    RespawnAtCheckpoint();
-                    _resetCooldownUntil = Time.unscaledTime + 0.5f;
-                    return;
+                    if (!_warnedZoneLoop)
+                    {
+                        _warnedZoneLoop = true;
+                        MapEditorPlugin.Logger.LogWarning(
+                            "[PLAY] A reset trigger overlaps the respawn point — ignoring it to avoid a teleport loop.");
+                    }
+                    continue;
                 }
+
+                MapEditorPlugin.Logger.LogInfo(
+                    $"[PLAY] Reset trigger fired at player={playerPos} zone(center={c}, size={s}) activeCp={ActiveCheckpoint}");
+                RespawnAtCheckpoint();
+                _resetCooldownUntil = Time.unscaledTime + 0.5f;
+                return;
             }
         }
+        private bool _warnedZoneLoop;
 
         // Back to the last checkpoint — or the spawn when none is active. The timer
         // keeps running: a reset is a mid-run punishment, not a restart.
@@ -277,12 +312,62 @@ namespace FIHMapEditor
                 && _checkpoints[ActiveCheckpoint]?.Pos != null)
             {
                 var cp = _checkpoints[ActiveCheckpoint];
-                TeleportTo(VecUtil.ToVector3(cp.Pos), cp.Yaw);
+                TeleportTo(CheckpointRespawnPos(cp), cp.Yaw);
             }
             else
             {
                 TeleportTo(_spawnPos, _spawnYaw);
             }
+        }
+
+        // Both shapes respawn the player STANDING ON THE FLOOR under the checkpoint,
+        // not at the raw stored point (a coin placed while flying would otherwise
+        // respawn you mid-air; a box stores its center, mid-box). Scan down from the
+        // marker's center; when no floor is in range, fall back to the stored point
+        // (coin) or the box's bottom face.
+        private Vector3 CheckpointRespawnPos(CheckpointData cp)
+        {
+            Vector3 center;
+            float scanDepth;
+            Vector3 fallback;
+            if (cp.Size == null)
+            {
+                center = VecUtil.ToVector3(cp.Pos) + Vector3.up * 1f;   // the ring's center
+                scanDepth = Mathf.Max(0.5f, cp.Radius) + 4f;
+                fallback = VecUtil.ToVector3(cp.Pos);
+            }
+            else
+            {
+                center = VecUtil.ToVector3(cp.Pos);
+                Vector3 size = VecUtil.ToVector3(cp.Size, Vector3.one * 4f);
+                var rot = VecUtil.ToRotation(cp.Rot);
+                // World-Y half-height of the oriented box (projection of each local axis).
+                float halfY = 0.5f * (Mathf.Abs((rot * Vector3.right).y) * size.x
+                                    + Mathf.Abs((rot * Vector3.up).y) * size.y
+                                    + Mathf.Abs((rot * Vector3.forward).y) * size.z);
+                scanDepth = halfY + 3f;
+                fallback = center + Vector3.down * Mathf.Max(0f, halfY - 0.1f);
+            }
+
+            try
+            {
+                var playerRoot = _finder.FindPlayer()?.transform?.root;
+                var hits = Physics.RaycastAll(new Ray(center, Vector3.down), scanDepth);
+                float best = float.MaxValue;
+                Vector3 floor = Vector3.zero;
+                bool found = false;
+                foreach (var h in hits)
+                {
+                    if (h.collider == null || h.collider.isTrigger) continue;
+                    var t = h.collider.transform;
+                    if (playerRoot != null && t.root == playerRoot) continue;
+                    if (t.name.StartsWith("FIH_Line") || t.name.StartsWith("FIH_Gizmo")) continue;
+                    if (h.distance < best) { best = h.distance; floor = h.point; found = true; }
+                }
+                if (found) return floor + Vector3.up * 0.05f;
+            }
+            catch { }
+            return fallback;
         }
 
         // Reset zones themselves stay invisible in play mode — only the coin rings show.
@@ -355,6 +440,9 @@ namespace FIHMapEditor
 
         private void TeleportTo(Vector3 position, float yaw)
         {
+            _movedByUs = true;
+            _lastPos = position;
+            MapEditorPlugin.Logger.LogInfo($"[PLAY] Mod teleport -> {position} (timer={Timer}, activeCp={ActiveCheckpoint})");
             try
             {
                 var playerT = _finder.FindPlayerTransform();

@@ -53,6 +53,9 @@ namespace FIHMapEditor
         public bool IsCtrlHeld() => KeyHeld(KeyCode.LeftControl) || KeyHeld(KeyCode.RightControl);
         public bool IsShiftHeld() => KeyHeld(KeyCode.LeftShift) || KeyHeld(KeyCode.RightShift)
             || (Gamepad.current?[UnityEngine.InputSystem.LowLevel.GamepadButton.East].isPressed == true);
+        // Keyboard only — for combos where a held gamepad face button (game actions
+        // use those) must NOT silently upgrade them, e.g. R vs Shift+R full restart.
+        public bool IsShiftKeyHeld() => KeyHeld(KeyCode.LeftShift) || KeyHeld(KeyCode.RightShift);
 
         // Fly mode movement — configurable keyboard binds + gamepad left stick / triggers
         public bool IsFlyForward() => KeyHeld(EditorConfig.Settings.FlyForwardKey) || GetLeftStickY() > STICK_DEADZONE;
