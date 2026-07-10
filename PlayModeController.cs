@@ -219,14 +219,29 @@ namespace FIHMapEditor
 
         private void UpdateCheckpoints(Vector3 playerPos)
         {
-            for (int i = 0; i < _checkpoints.Count; i++)
+            // Forward-only progression: grazing an EARLIER checkpoint must never move
+            // the respawn backwards (courses that loop near old rings silently reset
+            // players "to the start" otherwise — the classic checkpoint-bug report).
+            for (int i = ActiveCheckpoint + 1; i < _checkpoints.Count; i++)
             {
-                if (i == ActiveCheckpoint) continue;
                 var cp = _checkpoints[i];
                 if (cp?.Pos == null) continue;
-                float r = Mathf.Max(0.5f, cp.Radius);
-                Vector3 center = VecUtil.ToVector3(cp.Pos) + Vector3.up * 1f;
-                if ((playerPos - center).sqrMagnitude <= r * r)
+                bool touched;
+                if (cp.Size != null)
+                {
+                    // Box checkpoint (goal-style): fires when the body grazes the box.
+                    touched = VecUtil.PlayerTouchesObb(playerPos,
+                        VecUtil.ToVector3(cp.Pos),
+                        VecUtil.ToVector3(cp.Size, Vector3.one * 4f),
+                        VecUtil.ToRotation(cp.Rot));
+                }
+                else
+                {
+                    float r = Mathf.Max(0.5f, cp.Radius);
+                    Vector3 center = VecUtil.ToVector3(cp.Pos) + Vector3.up * 1f;
+                    touched = (playerPos - center).sqrMagnitude <= r * r;
+                }
+                if (touched)
                 {
                     ActiveCheckpoint = i;
                     break;
@@ -284,11 +299,16 @@ namespace FIHMapEditor
                     continue;
                 }
                 var cp = _checkpoints[i];
-                Vector3 center = VecUtil.ToVector3(cp.Pos) + Vector3.up * 1f;
                 var color = i == ActiveCheckpoint
                     ? new Color(0.35f, 1f, 0.45f, 0.95f)     // active: green
                     : new Color(1f, 0.62f, 0.15f, 0.95f);    // pending: orange
-                _checkpointRings[i].ShowRing(center, Mathf.Max(0.5f, cp.Radius), color);
+                if (cp.Size != null)
+                    _checkpointRings[i].ShowBox(VecUtil.ToVector3(cp.Pos),
+                        VecUtil.ToVector3(cp.Size, Vector3.one * 4f),
+                        VecUtil.ToRotation(cp.Rot), color);
+                else
+                    _checkpointRings[i].ShowRing(VecUtil.ToVector3(cp.Pos) + Vector3.up * 1f,
+                        Mathf.Max(0.5f, cp.Radius), color);
             }
         }
 

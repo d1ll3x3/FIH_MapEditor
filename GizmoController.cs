@@ -285,6 +285,11 @@ namespace FIHMapEditor
                         Vector3 v = (p - _center).normalized;
                         if (v == Vector3.zero) return;
                         float angle = Vector3.SignedAngle(_grabVector, v, _axisDir);
+                        // Shift while dragging: snap the rotation to 15° notches
+                        // (15/30/45/90…). KeyHeld, not Input.GetKey — legacy input is
+                        // dead while cursor-free mode disables the keyboard device.
+                        if (InputHandler.KeyHeld(KeyCode.LeftShift) || InputHandler.KeyHeld(KeyCode.RightShift))
+                            angle = Mathf.Round(angle / 15f) * 15f;
                         _target.rotation = Quaternion.AngleAxis(angle, _axisDir) * _startRot;
                         break;
                     }

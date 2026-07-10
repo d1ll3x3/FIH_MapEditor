@@ -116,6 +116,20 @@ namespace FIHMapEditor
         private readonly List<LineBox> _cannonLaunchBoxes = new List<LineBox>();
         private readonly List<LineBox> _multiBoxes = new List<LineBox>();
 
+        // Objects whose source couldn't be resolved (asset not loaded yet, level object
+        // despawned, remote object we can't find locally). NEVER dropped: they stay in
+        // every snapshot/save and in the sync state, and are retried periodically —
+        // otherwise a transient resolve failure at load/scene-reload would silently
+        // bake the loss into the next save, and in co-edit our diff would broadcast a
+        // phantom DELETE for an object a peer still has.
+        private readonly List<MapObjectData> _unresolvedObjects = new List<MapObjectData>();
+        private float _unresolvedRetryAt;
+
+        // The game loads assets/objects lazily, so one scan at editor-open misses
+        // things. Rescan automatically (scans are additive — entries only ever grow).
+        private float _catalogRescanAt;
+        private const float CATALOG_RESCAN_INTERVAL = 20f;
+
         // Scene / lifecycle tracking
         private string _lastSceneName = "";
         private MapFile _workingSnapshot;           // refreshed on every mutation; survives scene reloads
@@ -474,6 +488,58 @@ namespace FIHMapEditor
             Gizmo.UpdateVisual(GizmoTarget(), Camera.main);
             Xray.Update(Camera.main);
             UpdateEditorMarkers();
+
+            if (_unresolvedObjects.Count > 0 && Catalog.HasScanned && Time.time >= _unresolvedRetryAt)
+            {
+                _unresolvedRetryAt = Time.time + 5f;
+                RetryUnresolvedObjects();
+            }
+
+            if (Catalog.HasScanned && Time.time >= _catalogRescanAt)
+            {
+                _catalogRescanAt = Time.time + CATALOG_RESCAN_INTERVAL;
+                int before = Catalog.Entries.Count;
+                Catalog.Scan();
+                int added = Catalog.Entries.Count - before;
+                if (added > 0)
+                    ShowToast($"Catalog: {added} new object(s) discovered ({Catalog.Entries.Count} total)");
+            }
+        }
+
+        // Try to spawn pending objects whose source may have appeared since (assets load
+        // lazily; level objects respawn). Successes leave the pending list; the rest
+        // stay for the next pass — and stay in every save either way.
+        private void RetryUnresolvedObjects()
+        {
+            int restored = 0;
+            for (int i = _unresolvedObjects.Count - 1; i >= 0; i--)
+            {
+                var data = _unresolvedObjects[i];
+                // A remote upsert may have materialized it meanwhile — just drop the dupe.
+                if (!string.IsNullOrEmpty(data.Uid) && PlacedManager.FindByUid(data.Uid) != null)
+                {
+                    _unresolvedObjects.RemoveAt(i);
+                    continue;
+                }
+                var src = Catalog.ResolveSource(data.Source, data.SourceName);
+                if (src == null) continue;
+                var placed = PlacedManager.Spawn(src, data.Source, data.SourceName,
+                    VecUtil.ToVector3(data.Pos),
+                    Quaternion.Euler(VecUtil.ToVector3(data.Rot)),
+                    VecUtil.ToVector3(data.Scale, Vector3.one),
+                    data.Tint, restore: data);
+                if (placed != null)
+                {
+                    _unresolvedObjects.RemoveAt(i);
+                    restored++;
+                }
+            }
+            if (restored > 0)
+            {
+                SetDirty();
+                ShowToast($"Recovered {restored} pending object(s) — source finished loading");
+                MapEditorPlugin.Logger.LogInfo($"[MAP] Recovered {restored} pending object(s); {_unresolvedObjects.Count} still pending.");
+            }
         }
 
         // Dim cyan boxes on every group member except the primary (which has the
@@ -653,7 +719,26 @@ namespace FIHMapEditor
             {
                 var cp = Checkpoints[sel.MarkerIndex];
                 var p = CheckpointProxy().transform;
-                if (Gizmo.IsDragging)
+                if (cp.Size != null)
+                {
+                    // Box checkpoint: full goal-style transform (move/rotate/scale).
+                    if (Gizmo.IsDragging)
+                    {
+                        cp.Pos = VecUtil.ToArray(p.position);
+                        cp.Rot = VecUtil.ToArray(p.eulerAngles);
+                        cp.Yaw = p.eulerAngles.y;   // respawn facing follows the box
+                        var s = p.localScale;
+                        cp.Size = VecUtil.ToArray(new Vector3(
+                            Mathf.Max(1f, s.x), Mathf.Max(1f, s.y), Mathf.Max(1f, s.z)));
+                    }
+                    else
+                    {
+                        p.position = VecUtil.ToVector3(cp.Pos);
+                        p.rotation = VecUtil.ToRotation(cp.Rot);
+                        p.localScale = VecUtil.ToVector3(cp.Size, Vector3.one * 4f);
+                    }
+                }
+                else if (Gizmo.IsDragging)
                 {
                     cp.Pos = VecUtil.ToArray(p.position);
                     cp.Yaw = p.eulerAngles.y;
@@ -755,7 +840,7 @@ namespace FIHMapEditor
             else
                 _spawnBox.Hide();
 
-            // Checkpoint rings (orange) — same coin visual as play mode.
+            // Checkpoints (orange): coin rings, or wireframe boxes for the box variant.
             while (_checkpointBoxes.Count < Checkpoints.Count)
                 _checkpointBoxes.Add(new LineBox($"FIH_Line_EdCheckpoint{_checkpointBoxes.Count}"));
             for (int i = 0; i < _checkpointBoxes.Count; i++)
@@ -766,8 +851,14 @@ namespace FIHMapEditor
                     continue;
                 }
                 var cp = Checkpoints[i];
-                _checkpointBoxes[i].ShowRing(VecUtil.ToVector3(cp.Pos) + Vector3.up * 1f,
-                    Mathf.Max(0.5f, cp.Radius), new Color(1f, 0.62f, 0.15f, 0.95f));
+                var cpColor = new Color(1f, 0.62f, 0.15f, 0.95f);
+                if (cp.Size != null)
+                    _checkpointBoxes[i].ShowBox(VecUtil.ToVector3(cp.Pos),
+                        VecUtil.ToVector3(cp.Size, Vector3.one * 4f),
+                        VecUtil.ToRotation(cp.Rot), cpColor);
+                else
+                    _checkpointBoxes[i].ShowRing(VecUtil.ToVector3(cp.Pos) + Vector3.up * 1f,
+                        Mathf.Max(0.5f, cp.Radius), cpColor);
             }
 
             // Reset triggers (red boxes) — editor-only, invisible while playing.
@@ -908,7 +999,15 @@ namespace FIHMapEditor
             // marker as deleted and broadcast DELETEs to every peer after a Ctrl+Z.
             var cps = new List<CheckpointData>();
             foreach (var c in Checkpoints)
-                cps.Add(new CheckpointData { Uid = c.Uid, Pos = (float[])c.Pos?.Clone(), Yaw = c.Yaw, Radius = c.Radius });
+                cps.Add(new CheckpointData
+                {
+                    Uid = c.Uid,
+                    Pos = (float[])c.Pos?.Clone(),
+                    Yaw = c.Yaw,
+                    Radius = c.Radius,
+                    Size = (float[])c.Size?.Clone(),
+                    Rot = (float[])c.Rot?.Clone(),
+                });
             var zones = new List<ResetZoneData>();
             foreach (var z in ResetZones)
                 zones.Add(new ResetZoneData
@@ -1385,6 +1484,14 @@ namespace FIHMapEditor
             {
                 var cp = Checkpoints[i];
                 if (cp?.Pos == null) continue;
+                if (cp.Size != null)
+                {
+                    if (SelectionSystem.RayIntersectsOBB(ray.Value, VecUtil.ToVector3(cp.Pos),
+                            VecUtil.ToVector3(cp.Size, Vector3.one * 4f), VecUtil.ToRotation(cp.Rot),
+                            out float bd) && bd < markerDist)
+                        { marker = "checkpoint"; markerIndex = i; markerDist = bd; }
+                    continue;
+                }
                 float r = Mathf.Max(0.5f, cp.Radius);
                 var b = new Bounds(VecUtil.ToVector3(cp.Pos) + Vector3.up * 1f, Vector3.one * r * 2f);
                 if (SelectionSystem.RayIntersectsAABB(ray.Value, b, out float d) && d < markerDist)
@@ -1529,6 +1636,9 @@ namespace FIHMapEditor
                 if (newMode == EditorMode.Editor)
                 {
                     if (!Catalog.HasScanned) Catalog.Scan();
+                    // Quick follow-up rescan soon after opening: most lazily-loaded
+                    // content appears within the first seconds of editing.
+                    _catalogRescanAt = Time.time + 8f;
                     if (_workingSnapshot == null) NewMap(silent: true);
                     Fly.Enter();
                     Multiplayer.OnEnteredEditor();   // apply a map queued during Play
@@ -1667,6 +1777,10 @@ namespace FIHMapEditor
 
         public MapFile BuildMapFile()
         {
+            // Unresolved (pending) objects ride along in every snapshot: saves keep
+            // them, and the sync diff never mistakes them for deletions.
+            var objects = PlacedManager.Snapshot();
+            if (_unresolvedObjects.Count > 0) objects.AddRange(_unresolvedObjects);
             return new MapFile
             {
                 FormatVersion = MapFile.CURRENT_FORMAT_VERSION,
@@ -1679,7 +1793,7 @@ namespace FIHMapEditor
                 GameScene = _lastSceneName,
                 Spawn = Spawn,
                 Goal = Goal,
-                Objects = PlacedManager.Snapshot(),
+                Objects = objects,
                 LevelEdits = LevelEdits.Snapshot(),
                 Checkpoints = new List<CheckpointData>(Checkpoints),
                 ResetZones = new List<ResetZoneData>(ResetZones),
@@ -1736,13 +1850,22 @@ namespace FIHMapEditor
             Goal = null;
             Checkpoints.Clear();
             ResetZones.Clear();
+            _unresolvedObjects.Clear();
             Dirty = false;
             _autosaveDirtySince = -1f;
             LoadReport = "";
             Undo.Clear();
             ClearPendingUndo();
             RefreshSnapshot();
-            if (!silent) ShowToast("New empty map");
+            // A user-invoked "New map" wipes the co-edit session for everyone (DELETEs
+            // for every synced key). The SILENT call — the editor's first-open default
+            // init — must never broadcast: it races the initial seed from peers and
+            // could clobber their map with an empty "Untitled".
+            if (!silent)
+            {
+                Multiplayer?.NotifyDirty();
+                ShowToast("New empty map");
+            }
         }
 
         public bool SaveOverwrite()
@@ -1924,7 +2047,12 @@ namespace FIHMapEditor
                     var source = Catalog.ResolveSource(data.Source, data.SourceName);
                     if (source == null)
                     {
-                        MapEditorPlugin.Logger.LogWarning($"[COOP] Remote object source not found: {data.SourceName}");
+                        // Keep it pending instead of dropping it: dropping would make our
+                        // next diff broadcast a phantom DELETE and erase it for the peer
+                        // who placed it. The retry loop spawns it once the source loads.
+                        _unresolvedObjects.RemoveAll(o => o.Uid == data.Uid);
+                        _unresolvedObjects.Add(data);
+                        MapEditorPlugin.Logger.LogWarning($"[COOP] Remote object source not found (kept pending): {data.SourceName}");
                         return;
                     }
                     PlacedManager.Spawn(source, data.Source, data.SourceName,
@@ -1941,6 +2069,7 @@ namespace FIHMapEditor
 
         public void ApplyRemoteObjectDelete(string uid)
         {
+            if (_unresolvedObjects.RemoveAll(o => o.Uid == uid) > 0) SetDirty();
             var p = PlacedManager.FindByUid(uid);
             if (p == null) return;
             if (SelectionSys.Current.Placed == p) SelectionSys.Deselect();
@@ -2042,6 +2171,15 @@ namespace FIHMapEditor
             SetDirty();
         }
 
+        // Synced so a whole-map swap re-keys everyone's leaderboard/upload identity to
+        // the same map, instead of each peer keeping their previous MapId.
+        public void ApplyRemoteMapId(string mapId)
+        {
+            if (string.IsNullOrEmpty(mapId) || mapId == MapId) return;
+            MapId = mapId;
+            SetDirty();
+        }
+
         private void ApplyMapFile(MapFile map, bool resetDirty)
         {
             if (!Catalog.HasScanned) Catalog.Scan();
@@ -2073,14 +2211,18 @@ namespace FIHMapEditor
             if (BaseMode == MapBaseMode.Blank) BlankCanvas.Apply();
             else BlankCanvas.Restore();
 
-            int loaded = 0, skipped = 0;
+            _unresolvedObjects.Clear();
+            int loaded = 0, pending = 0;
             foreach (var obj in map.Objects)
             {
+                obj.Uid ??= Guid.NewGuid().ToString("N");   // pre-v7 files: stable key for sync/retry
                 var source = Catalog.ResolveSource(obj.Source, obj.SourceName);
                 if (source == null)
                 {
-                    skipped++;
-                    MapEditorPlugin.Logger.LogWarning($"[MAP] Source not found for '{obj.SourceName}' ({obj.Source})");
+                    pending++;
+                    _unresolvedObjects.Add(obj);
+                    MapEditorPlugin.Logger.LogWarning(
+                        $"[MAP] Source not found (kept pending, will retry) for '{obj.SourceName}' ({obj.Source})");
                     continue;
                 }
                 var placed = PlacedManager.Spawn(source, obj.Source, obj.SourceName,
@@ -2089,12 +2231,15 @@ namespace FIHMapEditor
                     VecUtil.ToVector3(obj.Scale, Vector3.one),
                     obj.Tint, restore: obj);
                 if (placed != null) loaded++;
-                else skipped++;
+                else { pending++; _unresolvedObjects.Add(obj); }
             }
+            _unresolvedRetryAt = Time.time + 5f;
 
             LevelEdits.Apply(map.LevelEdits, Catalog, out int editsApplied, out int editsSkipped);
 
-            LoadReport = skipped == 0 ? $"{loaded} objects" : $"{loaded} objects, {skipped} skipped";
+            LoadReport = pending == 0
+                ? $"{loaded} objects"
+                : $"{loaded} objects, {pending} pending (source not loaded yet — kept, retrying)";
             if (editsApplied + editsSkipped > 0)
                 LoadReport += editsSkipped == 0
                     ? $", {editsApplied} level edits"
@@ -2105,6 +2250,11 @@ namespace FIHMapEditor
                 _autosaveDirtySince = -1f;
             }
             RefreshSnapshot();
+            // Swapping the whole working map (load / online download) must reach the
+            // other editors like any other change: the per-key diff turns it into
+            // DELETEs of the old content + upserts of the new. After a mere scene
+            // re-apply the diff is empty, so this is a no-op there.
+            Multiplayer?.NotifyDirty();
             MapEditorPlugin.Logger.LogInfo($"[MAP] Applied '{MapName}': {LoadReport}");
         }
 
@@ -2280,6 +2430,15 @@ namespace FIHMapEditor
             var t = BeginTransformEdit();
             if (t == null) return;
             t.Rotate(axis, degrees, Space.World);
+            EndTransformEdit();
+        }
+
+        // Absolute rotation: type the exact world euler angles instead of adding steps.
+        public void SetRotationSelected(Vector3 euler)
+        {
+            var t = BeginTransformEdit();
+            if (t == null) return;
+            t.eulerAngles = euler;
             EndTransformEdit();
         }
 
@@ -2603,8 +2762,12 @@ namespace FIHMapEditor
         public void WipeCustomObjects()
         {
             if (ReadOnlyBlock()) return;
-            int n = PlacedManager.Count;
+            // Pending (unresolved) objects are custom objects too: the wipe takes them,
+            // and the undo snapshot brings them back through the normal restore path.
             var datas = PlacedManager.Snapshot();
+            datas.AddRange(_unresolvedObjects);
+            int n = datas.Count;
+            _unresolvedObjects.Clear();
             PlacedManager.WipeAll();
             SelectionSys.Deselect();
 
@@ -2775,6 +2938,27 @@ namespace FIHMapEditor
             SelectionSys.SelectMarker("checkpoint", Checkpoints.Count - 1);
             SetDirty();
             ShowToast($"Checkpoint #{Checkpoints.Count} placed here");
+        }
+
+        // Goal-style checkpoint: an oriented box (movable/rotatable/scalable with the
+        // gizmo) that acts exactly like a coin — touching it sets the respawn point.
+        public void AddBoxCheckpointHere()
+        {
+            if (ReadOnlyBlock()) return;
+            var t = Finder.FindPlayerTransform();
+            var cam = Finder.FindCameraTransform();
+            if (t == null) return;
+            Undo.Push("checkpoint add", CaptureMarkersState());
+            Checkpoints.Add(new CheckpointData
+            {
+                Uid = Guid.NewGuid().ToString("N"),
+                Pos = VecUtil.ToArray(t.position + Vector3.up * 1f),
+                Yaw = cam != null ? cam.eulerAngles.y : t.eulerAngles.y,
+                Size = new float[] { 4f, 4f, 4f },
+            });
+            SelectionSys.SelectMarker("checkpoint", Checkpoints.Count - 1);
+            SetDirty();
+            ShowToast($"Box checkpoint #{Checkpoints.Count} placed here — scale/rotate it with the gizmo");
         }
 
         public void AddResetZoneHere()

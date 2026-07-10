@@ -50,6 +50,9 @@ namespace FIHMapEditor
         private string _rotField = "45";
         private string _scaleField = "0.5";
         private string _colorHexField = "FFFFFF";
+        // Absolute-rotation boxes: live view of the selection's euler angles, frozen
+        // while any text field has focus so typing isn't overwritten each frame.
+        private string _rotXField = "0", _rotYField = "0", _rotZField = "0";
 
         // Map tab state: the Name box mirrors the working map. Re-seeded whenever the
         // controller's MapName changes underneath us (load, New map, remote rename) —
@@ -413,6 +416,30 @@ namespace FIHMapEditor
             if (_win.Button(new Rect(510, y, 95, 24), "Reset All")) _c.ResetSelected();
             y += 30;
 
+            // Absolute rotation: the object's CURRENT world angles, directly editable.
+            bool rotEditable = sel.IsValid && !sel.IsMarker && sel.Target != null;
+            if (rotEditable && !_win.HasFocusedTextField)
+            {
+                var e = sel.Target.transform.eulerAngles;
+                _rotXField = e.x.ToString("0.#");
+                _rotYField = e.y.ToString("0.#");
+                _rotZField = e.z.ToString("0.#");
+            }
+            GUI.Label(new Rect(15, y + 4, 70, 20), "Rot now:", _styleSmall);
+            _rotXField = _win.TextField(new Rect(85, y, 62, 22), "rotnowx", _rotXField);
+            _rotYField = _win.TextField(new Rect(152, y, 62, 22), "rotnowy", _rotYField);
+            _rotZField = _win.TextField(new Rect(219, y, 62, 22), "rotnowz", _rotZField);
+            if (_win.Button(new Rect(288, y, 55, 24), "Set") && rotEditable)
+            {
+                var cur = sel.Target.transform.eulerAngles;
+                _c.SetRotationSelected(new Vector3(
+                    ParseFloat(_rotXField, cur.x),
+                    ParseFloat(_rotYField, cur.y),
+                    ParseFloat(_rotZField, cur.z)));
+            }
+            GUI.Label(new Rect(352, y + 4, 310, 20), "X/Y/Z° — Shift while dragging gizmo = snap 15°", _styleSmall);
+            y += 30;
+
             // Scale: the box value is both the +/- step and the absolute factor for Set.
             GUI.Label(new Rect(15, y + 4, 70, 20), "Scale:", _styleSmall);
             _scaleField = _win.TextField(new Rect(85, y, 60, 22), "scalestep", _scaleField);
@@ -528,8 +555,12 @@ namespace FIHMapEditor
             if (_win.Button(new Rect(340, y, 190, 26), "Add Reset Trigger Here")) _c.AddResetZoneHere();
             GUI.Label(new Rect(537, y + 5, 130, 20), $"{_c.ResetZones.Count} placed", _styleSmall);
             y += 30;
+            if (_win.Button(new Rect(15, y, 190, 26), "Add Box Checkpoint Here")) _c.AddBoxCheckpointHere();
+            GUI.Label(new Rect(212, y + 5, 440, 20),
+                "goal-style box checkpoint — move/rotate/scale it with the gizmo", _styleSmall);
+            y += 30;
             GUI.Label(new Rect(15, y, W - 30, 20),
-                "Click a ring/red box to select it; edit with the gizmo; Del removes it.", _styleSmall);
+                "Click a ring/box to select it; edit with the gizmo; Del removes it.", _styleSmall);
             y += 26;
 
             GUI.Label(new Rect(15, y, 300, 22), "Map base:", _styleTitle);

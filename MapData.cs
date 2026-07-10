@@ -24,15 +24,21 @@ namespace FIHMapEditor
         public float[] Rot { get; set; }   // euler angles; null = axis-aligned (v5)
     }
 
-    // Coin-style checkpoint: touching its sphere makes it the active respawn point.
+    // Checkpoint: touching it makes it the active respawn point. Two shapes share this
+    // record: the classic coin (sphere of Radius around Pos) and, when Size is set, a
+    // goal-style oriented BOX (scalable/rotatable) centered on Pos — v8.
     public class CheckpointData
     {
         // Stable identity for multiplayer sync (per-item last-writer-wins); missing on
         // old files — backfilled on load.
         public string Uid { get; set; }
-        public float[] Pos { get; set; }      // respawn position (player feet)
+        public float[] Pos { get; set; }      // respawn position (box: also its center)
         public float Yaw { get; set; }        // respawn facing
         public float Radius { get; set; } = 1.5f;
+        // Box variant (null = coin). Older mod versions ignore these and fall back to
+        // treating it as a coin of Radius — degraded but functional.
+        public float[] Size { get; set; }
+        public float[] Rot { get; set; }      // euler angles; null = axis-aligned
     }
 
     // Reset trigger: entering it teleports the player back to the last checkpoint
@@ -91,9 +97,10 @@ namespace FIHMapEditor
         // v2: added LevelEdits. v3: added Checkpoints + ResetZones. v4: mechanics
         // fields on objects. v5: goal/reset-zone rotation. v6: stable MapId (leaderboard
         // key). v7: stable Uid + GroupId on objects (grouping, multiplayer sync) and Uid
-        // on checkpoints/reset zones; CustomColor. Older files load fine — missing
-        // fields stay at defaults and Uids are backfilled on load.
-        public const int CURRENT_FORMAT_VERSION = 7;
+        // on checkpoints/reset zones; CustomColor. v8: box-shaped checkpoints
+        // (CheckpointData.Size/Rot). Older files load fine — missing fields stay at
+        // defaults and Uids are backfilled on load.
+        public const int CURRENT_FORMAT_VERSION = 8;
 
         public int FormatVersion { get; set; } = CURRENT_FORMAT_VERSION;
         // Stable per-map identity for the leaderboard and the online map library. Minted

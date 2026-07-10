@@ -43,6 +43,11 @@ namespace FIHMapEditor
         // Bumped on every Scan()/Clear() so GUI-side caches of Entries can invalidate.
         public int ScanVersion { get; private set; }
 
+        // Scans are ADDITIVE within a scene session: the game loads assets and spawns
+        // objects lazily, so later scans discover things the first one couldn't see.
+        // An entry, once found, is never dropped — only Clear() (scene change) resets.
+        private readonly Dictionary<string, CatalogEntry> _seen = new Dictionary<string, CatalogEntry>();
+
         private readonly GameObjectFinder _finder;
 
         // Anything bigger than this on any axis is level-chunk scale, listed under "Large".
@@ -58,21 +63,24 @@ namespace FIHMapEditor
             Entries.Clear();
             Categories.Clear();
             ColliderlessRoots.Clear();
+            _seen.Clear();
             HasScanned = false;
             ScanVersion++;
         }
 
         public void Scan()
         {
-            Entries.Clear();
+            // Additive: keep everything already found. Decor instances are rebuilt (the
+            // live objects may have despawned); categories are re-derived at the end.
             Categories.Clear();
             ColliderlessRoots.Clear();
             ScanVersion++;
+            int entriesBefore = Entries.Count;
 
             try
             {
                 var playerRoot = _finder.FindPlayer()?.transform?.root;
-                var seen = new Dictionary<string, CatalogEntry>(); // dedupe key → entry
+                var seen = _seen; // dedupe key → entry, persistent across rescans
                 var visitedRoots = new HashSet<int>();
                 var wrapperCache = new Dictionary<int, int>();     // transform id → renderable child count
 
@@ -188,7 +196,8 @@ namespace FIHMapEditor
                 foreach (var cat in Categories)
                     summary.Append($"{cat}: {counts[cat]}  ");
                 MapEditorPlugin.Logger.LogInfo(
-                    $"[CATALOG] Scan found {Entries.Count} unique objects ({colliders.Length} colliders examined). {summary}");
+                    $"[CATALOG] Scan: {Entries.Count} unique objects (+{Entries.Count - entriesBefore} new, " +
+                    $"{colliders.Length} colliders examined). {summary}");
             }
             catch (Exception ex)
             {

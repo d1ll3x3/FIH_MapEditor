@@ -416,8 +416,10 @@ namespace FIHMapEditor
             try { if (p.GetComponent<LODGroup>() != null) return true; } catch { }
 
             int rendererBranches = 0;
-            int colliderOnlyBranches = 0;
             bool rendererBranchesAllLod = true;
+            bool hasVisualBounds = false;
+            Bounds visualBounds = default;
+            List<Transform> colliderOnly = null;
             for (int i = 0; i < p.childCount; i++)
             {
                 var child = p.GetChild(i);
@@ -426,12 +428,19 @@ namespace FIHMapEditor
                     rendererBranches++;
                     if (child.name.IndexOf("LOD", StringComparison.OrdinalIgnoreCase) < 0)
                         rendererBranchesAllLod = false;
+                    var vb = ObjectCatalog.ComputeBounds(child.gameObject);
+                    if (vb.size != Vector3.zero)
+                    {
+                        if (!hasVisualBounds) { visualBounds = vb; hasVisualBounds = true; }
+                        else visualBounds.Encapsulate(vb);
+                    }
                 }
                 else if (child.GetComponentInChildren<Collider>(true) != null)
                 {
-                    colliderOnlyBranches++;
+                    (colliderOnly ??= new List<Transform>()).Add(child);
                 }
             }
+            int colliderOnlyBranches = colliderOnly?.Count ?? 0;
 
             // Several distinct visible children = a container (level chunk, prop group)
             // — unless they're just LOD variants of one mesh (no LODGroup component).
@@ -442,8 +451,23 @@ namespace FIHMapEditor
             if (colliderOnlyBranches == 0 && rendererBranches == 0) return false; // empty node
 
             // Visual + collision split (the game keeps SM_* meshes and their collision
-            // nodes as siblings) or a collider-only group: one object, but guard against
-            // chunk-scale containers ("one house + the whole area's invisible walls").
+            // nodes as siblings): merge ONLY when every collider-only sibling actually
+            // overlaps the visual — a collision proxy wraps its mesh; an independent
+            // invisible wall that merely shares the parent does not, and merging it
+            // would swallow the visible object out of the catalog and the selection.
+            if (hasVisualBounds && colliderOnly != null)
+            {
+                var probe = visualBounds;
+                probe.Expand(1.5f);
+                foreach (var branch in colliderOnly)
+                {
+                    var cb = MechanicsController.ComputeColliderBounds(branch.gameObject);
+                    if (cb.size == Vector3.zero) continue;
+                    if (!probe.Intersects(cb)) return false;
+                }
+            }
+
+            // Chunk-size guard: never merge anything level-container sized.
             var bounds = ObjectCatalog.ComputeBounds(p.gameObject);
             if (bounds.size == Vector3.zero)
                 bounds = MechanicsController.ComputeColliderBounds(p.gameObject);

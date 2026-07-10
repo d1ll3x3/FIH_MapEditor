@@ -1,6 +1,6 @@
 {
   "name": "FIH_Custom_Map_Editor",
-  "version_number": "0.8.2",
+  "version_number": "0.9.0",
   "website_url": "https://github.com/d1ll3x3/FIH_MapEditor",
   "description": "Custom map editor for Flipping Is Hard Demo: place game assets, build your own courses, save/share them and race them with spawn, goal and timer.",
   "dependencies": [

@@ -48,13 +48,16 @@ that resizes the whole menu and HUD together.
 ## Modes
 
 - **Editor**: fly freely, scan the scene and the game files into the object catalog
-  (CATALOG tab → Rescan), place objects with PLACE/STAMP and edit them with the menu
-  or the keyboard. The SELECT tab has numeric boxes for exact rotation degrees and
-  scale values, per-axis rotate and scale buttons, and a Blender/Unity-style **gizmo**:
-  drag the colored axes on the selected object to move it, spin the rings to rotate,
-  or stretch an axis to scale (per-axis). The gizmo always draws on top of geometry,
-  so the handles never sink into the object. Switch gizmo modes with `1`/`2`/`3` or
-  the SELECT tab buttons.
+  (automatic — the catalog rescans itself as the game lazily loads content; the
+  CATALOG tab's Rescan button forces one), place objects with PLACE/STAMP and edit
+  them with the menu or the keyboard. The SELECT tab has numeric boxes for exact
+  rotation degrees and scale values, a **Rot now** row showing the selection's current
+  X/Y/Z angles (type exact values and hit Set), per-axis rotate and scale buttons, and
+  a Blender/Unity-style **gizmo**: drag the colored axes on the selected object to
+  move it, spin the rings to rotate (**hold Shift to snap to 15° steps**), or stretch
+  an axis to scale (per-axis). The gizmo always draws on top of geometry, so the
+  handles never sink into the object. Switch gizmo modes with `1`/`2`/`3` or the
+  SELECT tab buttons.
   Selection ignores triggers and invisible colliders by default so you always pick
   what you see — flip **Pick invisible: ON** in the SELECT tab to grab kill zones and
   invisible walls too, and **Show invisible: ON** to draw wireframes around them
@@ -77,6 +80,11 @@ that resizes the whole menu and HUD together.
 - **Color**: the SELECT tab has Red/Blue/Green/Yellow presets plus a hex field (e.g.
   `FF8800`) for any color, with a live preview swatch. Works on a single object or a
   whole multi-selection at once; **Clear** removes the tint.
+- **Checkpoints**: coin-style rings (Add Checkpoint Here) or **box checkpoints**
+  (Add Box Checkpoint Here) — goal-style oriented boxes you can move/rotate/scale with
+  the gizmo that activate the instant the player's body touches them. Checkpoint
+  progression is forward-only: touching an earlier checkpoint never moves your respawn
+  backwards.
 - **Play**: if the map has a spawn you appear there; the timer starts on your first
   movement and stops when you enter the goal zone. Best time per map is saved locally.
 
@@ -96,6 +104,14 @@ remembered across sessions.
   under the *GameFiles* category, even if they are not present in the current level.
   Only assets Unity has actually loaded can be listed — unreferenced bundles on disk
   are not visible to the mod.
+- **Invisible objects**: pure collider objects (invisible walls, volumes) appear under
+  the *Invisible* category, measured by their colliders. Combine with **Show
+  invisible** / **Pick invisible** to see and select them after placing.
+
+The catalog is **additive**: scans run automatically while you edit and only ever add
+entries, so nothing you've seen in the list disappears. Objects in a loaded map whose
+source isn't available yet are kept as *pending* (never lost from the save) and appear
+automatically as soon as their source loads.
 
 ## Map base
 

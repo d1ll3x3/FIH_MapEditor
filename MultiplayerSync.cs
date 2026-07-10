@@ -72,6 +72,7 @@ namespace FIHMapEditor
         private const int K_SPAWN = 8, K_SPAWN_CLEAR = 9;
         private const int K_GOAL = 10, K_GOAL_CLEAR = 11;
         private const int K_BASEMODE = 12, K_MAPNAME = 13;
+        private const int K_MAPID = 14;   // whole-map swaps re-key the leaderboard too
 
         private static readonly JsonSerializerOptions JsonOpts = new JsonSerializerOptions
         {
@@ -334,6 +335,7 @@ namespace FIHMapEditor
             if (map.Goal != null) snap["goal"] = JsonSerializer.Serialize(map.Goal, JsonOpts);
             snap["basemode"] = JsonSerializer.Serialize(map.BaseMode.ToString());
             snap["mapname"] = JsonSerializer.Serialize(map.Name ?? "");
+            snap["mapid"] = JsonSerializer.Serialize(map.MapId ?? "");
             return snap;
         }
 
@@ -347,6 +349,7 @@ namespace FIHMapEditor
             if (key == "goal") return K_GOAL;
             if (key == "basemode") return K_BASEMODE;
             if (key == "mapname") return K_MAPNAME;
+            if (key == "mapid") return K_MAPID;
             return -1;
         }
 
@@ -358,7 +361,7 @@ namespace FIHMapEditor
             if (key.StartsWith("lvl:")) return K_LVL_REVERT;
             if (key == "spawn") return K_SPAWN_CLEAR;
             if (key == "goal") return K_GOAL_CLEAR;
-            return -1; // basemode/mapname are never absent
+            return -1; // basemode/mapname/mapid are never absent
         }
 
         // Diffs the live map against what we last sent, bumping this session's own
@@ -626,6 +629,7 @@ namespace FIHMapEditor
                         _c.ApplyRemoteBaseMode(Enum.Parse<MapBaseMode>(Deserialize<string>(op.Payload)));
                         break;
                     case K_MAPNAME: _c.ApplyRemoteMapName(Deserialize<string>(op.Payload)); break;
+                    case K_MAPID: _c.ApplyRemoteMapId(Deserialize<string>(op.Payload)); break;
                 }
             }
             catch (Exception ex)
