@@ -399,6 +399,19 @@ namespace FIHMapEditor
                 _c.PickInvisible = !_c.PickInvisible;
             y += 28;
 
+            // Selected soccer goal: team toggle.
+            if (sel.Marker == "soccergoal" && sel.MarkerIndex < _c.SoccerGoals.Count)
+            {
+                int team = _c.SoccerGoals[sel.MarkerIndex].Team;
+                GUI.Label(new Rect(15, y + 3, 120, 20), "Goal team:", _styleSmall);
+                GUI.backgroundColor = team == 0 ? new Color(0.3f, 0.6f, 1f) : new Color(1f, 0.4f, 0.4f);
+                if (_win.Button(new Rect(135, y, 160, 24), team == 0 ? "Team A (click to flip)" : "Team B (click to flip)"))
+                    _c.ToggleSoccerGoalTeam(sel.MarkerIndex);
+                GUI.backgroundColor = Color.white;
+                GUI.Label(new Rect(305, y + 3, 360, 20), "ball here scores for the other team", _styleSmall);
+                y += 30;
+            }
+
             DrawMechanicsRow(sel, ref y);
 
             // Gizmo mode (mouse dragging on the axes; 1/2/3 hotkeys)
@@ -662,6 +675,27 @@ namespace FIHMapEditor
                 y += 22;
             }
             y += 4;
+
+            // Soccer mode — at the very bottom of the tab, as its own section.
+            GUI.Label(new Rect(15, y, 400, 22), "⚽ Soccer (ball + goals + scoreboard):", _styleTitle);
+            y += 26;
+            if (_win.Button(new Rect(15, y, 165, 26), _c.Ball != null ? "Move Ball Here" : "Place Ball Here"))
+                _c.PlaceBallHere();
+            GUI.backgroundColor = new Color(0.3f, 0.6f, 1f);
+            if (_win.Button(new Rect(185, y, 145, 26), "Add Goal (Blue)")) _c.AddSoccerGoalHere(0);
+            GUI.backgroundColor = new Color(1f, 0.4f, 0.4f);
+            if (_win.Button(new Rect(335, y, 145, 26), "Add Goal (Red)")) _c.AddSoccerGoalHere(1);
+            GUI.backgroundColor = Color.white;
+            if (_win.Button(new Rect(485, y, 160, 26),
+                _c.Scoreboard != null ? "Move Scoreboard" : "Place Scoreboard"))
+                _c.PlaceScoreboardHere();
+            y += 30;
+            GUI.Label(new Rect(15, y, W - 30, 36),
+                $"{_c.SoccerGoals.Count} goal(s){(_c.Ball != null ? ", ball placed" : ", no ball")}" +
+                $"{(_c.Scoreboard != null ? ", scoreboard placed" : "")}. Ball in a goal scores for the other team;\n" +
+                "the 3D scoreboard shows blue - red and is moved/rotated/scaled with the gizmo.",
+                _styleSmall);
+            y += 40;
 
             GUI.Label(new Rect(15, y, W - 30, 60),
                 "Play: R / pad X = retry from last coin; Shift+R / LB+X = full restart.\n" +

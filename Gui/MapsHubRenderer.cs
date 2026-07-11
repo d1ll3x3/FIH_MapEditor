@@ -45,7 +45,10 @@ namespace FIHMapEditor
             _c = controller;
             _win = new GuiWindowHelper(new Rect(Screen.width / 2f - W / 2f, Screen.height / 2f - H / 2f, W, H))
             {
-                InputBlocked = () => !_c.CursorFree,
+                // In the editor the hub needs the free cursor; outside it (Off-mode
+                // browsing on play-only maps) the controller frees the cursor while
+                // the hub is visible, so input is never blocked there.
+                InputBlocked = () => _c.Mode == EditorMode.Editor && !_c.CursorFree,
             };
             _windowDelegate = new Action<int>(WindowFunction);
         }

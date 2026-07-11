@@ -113,6 +113,24 @@ entries, so nothing you've seen in the list disappears. Objects in a loaded map 
 source isn't available yet are kept as *pending* (never lost from the save) and appear
 automatically as soon as their source loads.
 
+## Soccer mode
+
+Build a football pitch with a real physics ball and scoring goals, from the **Soccer**
+section of the TOOLS tab:
+
+- **Place Ball Here** drops the ball's kickoff / centre point where you stand. Only one
+  ball per map; select it and scale it with the gizmo to size the sphere. In play mode
+  the mod spawns a bouncy physics ball there that the player kicks around.
+- **Add Goal (Team A / Team B)** places a goal box (blue = A, red = B) — move, rotate and
+  scale it with the gizmo like a reset zone. Select a goal to flip its team in the SELECT
+  tab. When the ball enters a team's goal, the **other** team scores.
+- The play HUD shows the scoreboard `A  n - m  B` with a GOAL! flash. The ball returns to
+  centre after each goal (and if it falls out of bounds). `R` / Shift+`R` resets the match.
+
+Note: the ball is simulated **locally** on each client (like all mod objects), so in
+multiplayer each player sees their own ball — the co-edit sync shares the *layout* (ball
+point, goals), not the live physics.
+
 ## Map base
 
 - **Overlay**: build on top of the original level.

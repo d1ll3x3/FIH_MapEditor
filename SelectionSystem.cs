@@ -22,6 +22,9 @@ namespace FIHMapEditor
             : Marker == "reset" ? $"Reset trigger #{MarkerIndex + 1}"
             : Marker == "cannontarget" ? $"Launch target (obj #{MarkerIndex:000})"
             : Marker == "cannonlaunch" ? $"Launch point (obj #{MarkerIndex:000})"
+            : Marker == "ball" ? "Soccer ball (kickoff)"
+            : Marker == "soccergoal" ? $"Soccer goal #{MarkerIndex + 1}"
+            : Marker == "scoreboard" ? "Scoreboard"
             : Placed != null ? Placed.Root.name
             : (Raw != null ? Raw.name : "");
     }

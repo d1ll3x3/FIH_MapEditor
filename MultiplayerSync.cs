@@ -39,6 +39,7 @@ namespace FIHMapEditor
         private const byte MSG_HELLO = 1;
         private const byte MSG_OPS = 2;
         private const byte MSG_REQUEST = 3;
+        private const byte MSG_BALL = 4;   // soccer ball state / kick requests
 
         private const float HELLO_INTERVAL = 3f;
         private const float PEER_TIMEOUT = 10f;
@@ -64,6 +65,17 @@ namespace FIHMapEditor
             public string Payload { get; set; }
         }
 
+        // Soccer ball state (authority → followers) or kick request (follower → authority).
+        private class BallEnvelope
+        {
+            public string MapId { get; set; }
+            public float[] P { get; set; }
+            public float[] V { get; set; }
+            public int A { get; set; }
+            public int B { get; set; }
+            public bool K { get; set; }   // true = kick request
+        }
+
         // Kinds
         private const int K_OBJ_UPSERT = 0, K_OBJ_DELETE = 1;
         private const int K_CP_UPSERT = 2, K_CP_DELETE = 3;
@@ -73,6 +85,7 @@ namespace FIHMapEditor
         private const int K_GOAL = 10, K_GOAL_CLEAR = 11;
         private const int K_BASEMODE = 12, K_MAPNAME = 13;
         private const int K_MAPID = 14;   // whole-map swaps re-key the leaderboard too
+        private const int K_EDITABLE = 15; // play-only lock must follow a synced map swap
 
         private static readonly JsonSerializerOptions JsonOpts = new JsonSerializerOptions
         {
@@ -336,6 +349,7 @@ namespace FIHMapEditor
             snap["basemode"] = JsonSerializer.Serialize(map.BaseMode.ToString());
             snap["mapname"] = JsonSerializer.Serialize(map.Name ?? "");
             snap["mapid"] = JsonSerializer.Serialize(map.MapId ?? "");
+            snap["editable"] = JsonSerializer.Serialize(map.Editable);
             return snap;
         }
 
@@ -350,6 +364,7 @@ namespace FIHMapEditor
             if (key == "basemode") return K_BASEMODE;
             if (key == "mapname") return K_MAPNAME;
             if (key == "mapid") return K_MAPID;
+            if (key == "editable") return K_EDITABLE;
             return -1;
         }
 
@@ -471,6 +486,50 @@ namespace FIHMapEditor
             return list;
         }
 
+        // ─────────────────────────────────────────────────────────── soccer ball ──
+
+        // The lobby's lowest modded SteamID simulates the ball and counts goals; the
+        // rest run kinematic followers. Alone (no fresh peers) = always authority.
+        public bool IsBallAuthority
+        {
+            get
+            {
+                if (_selfId == 0)
+                    try { _selfId = SteamUser.GetSteamID().m_SteamID; } catch { return true; }
+                foreach (var p in FreshPeers())
+                    if (p.Id != 0 && p.Id < _selfId) return false;
+                return true;
+            }
+        }
+
+        // Broadcast ball state (authority) or a kick request (follower). Tiny payload,
+        // sent uncompressed-ish (gzip anyway for the shared framing).
+        public void SendBall(Vector3 pos, Vector3 vel, int a, int b, bool kick)
+        {
+            try
+            {
+                var fresh = FreshPeers();
+                if (fresh.Count == 0) return;
+
+                var env = new BallEnvelope
+                {
+                    MapId = _c.MapId,
+                    P = VecUtil.ToArray(pos),
+                    V = VecUtil.ToArray(vel),
+                    A = a,
+                    B = b,
+                    K = kick,
+                };
+                var payload = Gzip(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(env, JsonOpts)));
+                foreach (var peer in fresh)
+                    SendTo(peer.Id, MSG_BALL, payload);
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[COOP] Ball send error: {ex.Message}");
+            }
+        }
+
         private void SendTo(ulong steamId, byte type, byte[] payload)
         {
             try
@@ -582,6 +641,22 @@ namespace FIHMapEditor
                         }
                         break;
                     }
+
+                    case MSG_BALL:
+                    {
+                        var json = Encoding.UTF8.GetString(Gunzip(payload));
+                        var env = JsonSerializer.Deserialize<BallEnvelope>(json, JsonOpts);
+                        if (env?.P == null) break;
+                        // Only the same map's match matters.
+                        if (!string.IsNullOrEmpty(env.MapId) && env.MapId != _c.MapId) break;
+
+                        Vector3 pos = VecUtil.ToVector3(env.P);
+                        Vector3 vel = VecUtil.ToVector3(env.V);
+                        int a = env.A, b = env.B;
+                        bool kick = env.K;
+                        _c.RunOnMainThread(() => _c.PlayMode.ApplyRemoteBall(pos, vel, a, b, kick));
+                        break;
+                    }
                 }
             }
             catch (Exception ex)
@@ -630,6 +705,7 @@ namespace FIHMapEditor
                         break;
                     case K_MAPNAME: _c.ApplyRemoteMapName(Deserialize<string>(op.Payload)); break;
                     case K_MAPID: _c.ApplyRemoteMapId(Deserialize<string>(op.Payload)); break;
+                    case K_EDITABLE: _c.ApplyRemoteEditable(Deserialize<bool>(op.Payload)); break;
                 }
             }
             catch (Exception ex)

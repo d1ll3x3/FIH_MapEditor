@@ -61,7 +61,7 @@ namespace FIHMapEditor
                 case EditorMode.Off:
                     GUI.Label(new Rect(Screen.width - 430, Screen.height - 28, 420, 22),
                         _c.ReadOnly
-                            ? $"Play-only map — {EditorConfig.Settings.TogglePlayKey}: play  |  {EditorConfig.Settings.ToggleEditorKey}×2: discard map"
+                            ? $"Play-only map — {EditorConfig.Settings.TogglePlayKey}: play  |  {EditorConfig.Settings.ToggleEditorKey}: leaderboard  |  {EditorConfig.Settings.MapsHubKey}: maps"
                             : $"{EditorConfig.Settings.ToggleEditorKey}: FIH Map Editor",
                         _styleHint);
                     break;
@@ -137,13 +137,19 @@ namespace FIHMapEditor
         {
             var pm = _c.PlayMode;
 
-            DrawTopBanner(
-                $"PLAY — \"{_c.MapName}\"  |  [{EditorConfig.Settings.RestartRunKey}] retry (last coin)  " +
-                $"[Shift+{EditorConfig.Settings.RestartRunKey}] full restart  [{EditorConfig.Settings.TogglePlayKey}] editor");
+            // Play-only maps get the CLEAN hud: just the timer (plus the upload prompt
+            // and gameplay cues) — no banner, no sub lines. It's how the map's players
+            // experience the run, so keep it minimal.
+            bool clean = _c.ReadOnly;
+
+            if (!clean)
+                DrawTopBanner(
+                    $"PLAY — \"{_c.MapName}\"  |  [{EditorConfig.Settings.RestartRunKey}] retry (last coin)  " +
+                    $"[Shift+{EditorConfig.Settings.RestartRunKey}] full restart  [{EditorConfig.Settings.TogglePlayKey}] editor");
 
             if (pm.Timer != TimerState.Idle)
             {
-                var timerRect = new Rect(Screen.width / 2f - 130, 42, 260, 40);
+                var timerRect = new Rect(Screen.width / 2f - 130, clean ? 12 : 42, 260, 40);
                 GUI.Box(timerRect, "");
 
                 string text = pm.Timer switch
@@ -159,18 +165,35 @@ namespace FIHMapEditor
                     _styleTimer.normal.textColor = Color.white;
                 GUI.Label(timerRect, text, _styleTimer);
 
-                string sub = "";
-                if (pm.Timer == TimerState.Finished)
-                    sub = pm.NewBest ? "GOAL! ★ new best — R for another run" : "GOAL! — R for another run";
-                else if (pm.BestTime.HasValue)
-                    sub = $"best: {PlayModeController.FormatTime(pm.BestTime.Value)}";
-                if (pm.CheckpointCount > 0 && pm.Timer != TimerState.Finished)
+                if (!clean)
                 {
-                    string cp = pm.ActiveCheckpoint >= 0 ? (pm.ActiveCheckpoint + 1).ToString() : "—";
-                    sub += (sub == "" ? "" : "  |  ") + $"checkpoint: {cp}/{pm.CheckpointCount}";
+                    string sub = "";
+                    if (pm.Timer == TimerState.Finished)
+                        sub = pm.NewBest ? "GOAL! ★ new best — R for another run" : "GOAL! — R for another run";
+                    else if (pm.BestTime.HasValue)
+                        sub = $"best: {PlayModeController.FormatTime(pm.BestTime.Value)}";
+                    if (pm.CheckpointCount > 0 && pm.Timer != TimerState.Finished)
+                    {
+                        string cp = pm.ActiveCheckpoint >= 0 ? (pm.ActiveCheckpoint + 1).ToString() : "—";
+                        sub += (sub == "" ? "" : "  |  ") + $"checkpoint: {cp}/{pm.CheckpointCount}";
+                    }
+                    if (sub != "")
+                        GUI.Label(new Rect(Screen.width / 2f - 200, 86, 400, 20), sub, _styleToast);
                 }
-                if (sub != "")
-                    GUI.Label(new Rect(Screen.width / 2f - 200, 86, 400, 20), sub, _styleToast);
+            }
+
+            // Soccer: the score lives on the placeable 3D scoreboard now — the HUD only
+            // flashes GOAL! as feedback.
+            if (pm.HasSoccer)
+            {
+                bool flash = Time.unscaledTime < pm.GoalFlashUntil;
+                if (flash)
+                {
+                    GUI.color = new Color(0.4f, 1f, 0.5f);
+                    GUI.Label(new Rect(Screen.width / 2f - 100, Screen.height * 0.14f, 200, 30),
+                        "GOAL!", _styleTimer);
+                    GUI.color = Color.white;
+                }
             }
 
             if (pm.UploadPrompt == UploadPromptState.Offered)

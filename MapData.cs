@@ -51,6 +51,38 @@ namespace FIHMapEditor
         public float[] Rot { get; set; }   // euler angles; null = axis-aligned (v5)
     }
 
+    // Soccer mode: a physics ball spawned in play mode (a mod-generated sphere), and
+    // goal zones that score when the ball enters them (v9).
+
+    // The ball's kickoff / centre point. One per map. Radius scales the sphere.
+    public class BallData
+    {
+        public string Uid { get; set; }
+        public float[] Center { get; set; }
+        public float Radius { get; set; } = 0.5f;
+    }
+
+    // A goal box (like a reset zone) that belongs to a team. Scoring convention: when
+    // the ball enters a team's goal, the OTHER team scores.
+    public class SoccerGoalData
+    {
+        public string Uid { get; set; }
+        public float[] Center { get; set; }
+        public float[] Size { get; set; }
+        public float[] Rot { get; set; }   // euler angles; null = axis-aligned
+        public int Team { get; set; }      // 0 or 1 — the team that defends this goal
+    }
+
+    // The placeable 3D scoreboard (v10): two 7-segment numbers (blue team A, red team B)
+    // drawn in world space. Move/rotate/scale with the gizmo like any marker.
+    public class ScoreboardData
+    {
+        public string Uid { get; set; }
+        public float[] Pos { get; set; }
+        public float[] Rot { get; set; }   // euler angles
+        public float Scale { get; set; } = 1f;
+    }
+
     // An edit applied to an ORIGINAL level object (not one of our clones): a transform
     // override and/or "deleted" (renderers+colliders disabled). Identified by the same
     // stable hierarchy path used for clone sources.
@@ -98,9 +130,10 @@ namespace FIHMapEditor
         // fields on objects. v5: goal/reset-zone rotation. v6: stable MapId (leaderboard
         // key). v7: stable Uid + GroupId on objects (grouping, multiplayer sync) and Uid
         // on checkpoints/reset zones; CustomColor. v8: box-shaped checkpoints
-        // (CheckpointData.Size/Rot). Older files load fine — missing fields stay at
-        // defaults and Uids are backfilled on load.
-        public const int CURRENT_FORMAT_VERSION = 8;
+        // (CheckpointData.Size/Rot). v9: soccer mode (Ball + SoccerGoals). v10: placeable
+        // 3D scoreboard. Older files load fine — missing fields stay at defaults and
+        // Uids are backfilled on load.
+        public const int CURRENT_FORMAT_VERSION = 10;
 
         public int FormatVersion { get; set; } = CURRENT_FORMAT_VERSION;
         // Stable per-map identity for the leaderboard and the online map library. Minted
@@ -121,6 +154,9 @@ namespace FIHMapEditor
         public List<LevelEditData> LevelEdits { get; set; } = new List<LevelEditData>();
         public List<CheckpointData> Checkpoints { get; set; } = new List<CheckpointData>();
         public List<ResetZoneData> ResetZones { get; set; } = new List<ResetZoneData>();
+        public BallData Ball { get; set; }
+        public List<SoccerGoalData> SoccerGoals { get; set; } = new List<SoccerGoalData>();
+        public ScoreboardData Scoreboard { get; set; }
     }
 
     public static class VecUtil

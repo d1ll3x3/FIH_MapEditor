@@ -29,6 +29,9 @@ namespace FIHMapEditor
         public GoalZoneData Goal;
         public List<CheckpointData> Checkpoints = new List<CheckpointData>();
         public List<ResetZoneData> ResetZones = new List<ResetZoneData>();
+        public BallData Ball;                       // soccer: one kickoff/centre point
+        public List<SoccerGoalData> SoccerGoals = new List<SoccerGoalData>();
+        public ScoreboardData Scoreboard;           // soccer: placeable 3D score display
         public bool Dirty { get; private set; }
         public float LastAutosaveTime { get; private set; } = -1f;
         public string LoadReport = "";
@@ -82,6 +85,7 @@ namespace FIHMapEditor
         private EditorMenuRenderer _menu;
         private MapsHubRenderer _mapsHub;
         private HudRenderer _hud;
+        private TimesViewerRenderer _timesViewer;   // play-only maps: leaderboard + discard
 
         private readonly LineBox _goalBox = new LineBox("FIH_Line_Goal");
         private readonly LineBox _spawnBox = new LineBox("FIH_Line_Spawn");
@@ -92,6 +96,10 @@ namespace FIHMapEditor
         private GameObject _spawnProxy;
         private GameObject _checkpointProxy;
         private GameObject _resetProxy;
+        private GameObject _ballProxy;
+        private GameObject _soccerGoalProxy;
+        private GameObject _scoreboardProxy;
+        private readonly ScoreboardRenderer _scoreboardRenderer = new ScoreboardRenderer();
         private GameObject _cannonTargetProxy;
         private GameObject _cannonLaunchProxy;
         private GameObject _multiProxy;   // group gizmo handle at the selection centroid
@@ -113,6 +121,8 @@ namespace FIHMapEditor
         private readonly List<LineBox> _resetBoxes = new List<LineBox>();
         private readonly List<LineBox> _cannonTargetBoxes = new List<LineBox>();
         private readonly List<LineBox> _cannonLines = new List<LineBox>();
+        private readonly LineBox _ballRing = new LineBox("FIH_Line_Ball");
+        private readonly List<LineBox> _soccerGoalBoxes = new List<LineBox>();
         private readonly List<LineBox> _cannonLaunchBoxes = new List<LineBox>();
         private readonly List<LineBox> _multiBoxes = new List<LineBox>();
 
@@ -190,6 +200,10 @@ namespace FIHMapEditor
                 Leaderboard.FetchBoard(MapId, force: true);
             };
 
+            // Soccer ball online: lowest modded SteamID simulates, the rest follow.
+            PlayMode.BallAuthority = () => Multiplayer.IsBallAuthority;
+            PlayMode.BallSend = (pos, vel, a, b, kick) => Multiplayer.SendBall(pos, vel, a, b, kick);
+
             // Clicking level geometry with Unlock OFF explains itself instead of
             // silently doing nothing ("I can't select the grass").
             SelectionSys.OnPickHint = msg => ShowToast(msg);
@@ -197,6 +211,7 @@ namespace FIHMapEditor
             _menu = new EditorMenuRenderer(this);
             _mapsHub = new MapsHubRenderer(this);
             _hud = new HudRenderer(this);
+            _timesViewer = new TimesViewerRenderer(this);
 
             MapEditorPlugin.Logger.LogInfo("EditorController initialized");
         }
@@ -232,7 +247,10 @@ namespace FIHMapEditor
         public void ToggleMapsHub()
         {
             _mapsHub.Toggle();
-            if (_mapsHub.Visible && !CursorFree) SetCursorFree(true);
+            // In the editor the hub rides the normal free-cursor mechanism; outside it
+            // (play-only browsing from Off mode) UpdatePlayPromptCursor frees the
+            // cursor while the hub is visible.
+            if (Mode == EditorMode.Editor && _mapsHub.Visible && !CursorFree) SetCursorFree(true);
         }
 
         // ────────────────────────────────────────────────────────── update loop ──
@@ -276,6 +294,11 @@ namespace FIHMapEditor
                     case EditorMode.Play:
                         PlayMode.Update();
                         Mechanics.Update(Mode, acceptInput, AnyTextFieldFocused());
+                        // The placed 3D scoreboard shows the live match score in play.
+                        if (Scoreboard?.Pos != null)
+                            _scoreboardRenderer.Draw(Scoreboard, PlayMode.ScoreA, PlayMode.ScoreB);
+                        else
+                            _scoreboardRenderer.Hide();
                         if (acceptInput && Input.WasKeyPressed("restart", EditorConfig.Settings.RestartRunKey))
                         {
                             // Keyboard Shift ONLY: a held gamepad face button (used by
@@ -340,11 +363,22 @@ namespace FIHMapEditor
                     Cursor.lockState = CursorLockMode.None;
                     Cursor.visible = true;
                 }
+                else if (Mode == EditorMode.Off && (_timesViewer.Visible || _mapsHub.Visible))
+                {
+                    // Same for the play-only leaderboard window and the maps hub.
+                    Cursor.lockState = CursorLockMode.None;
+                    Cursor.visible = true;
+                }
 
                 _hud.Draw();
                 if (Mode == EditorMode.Editor)
                 {
                     _menu.Draw();
+                    _mapsHub.Draw();
+                }
+                else if (Mode == EditorMode.Off)
+                {
+                    _timesViewer.Draw();
                     _mapsHub.Draw();
                 }
             }
@@ -385,7 +419,8 @@ namespace FIHMapEditor
             Mechanics.ResetState();
             Multiplayer.OnSceneLeft();
             PlayMode.Exit();
-            UpdatePlayPromptCursor(); // release devices if the upload prompt had them
+            _timesViewer?.Close();
+            UpdatePlayPromptCursor(); // release devices if the upload prompt / viewer had them
             Finder.ClearCache();
             PlayerRepair.Reset();
             _warmupBaseTime = -1f;
@@ -409,7 +444,10 @@ namespace FIHMapEditor
                     || _workingSnapshot.Goal != null || _workingSnapshot.BaseMode == MapBaseMode.Blank
                     || (_workingSnapshot.LevelEdits?.Count ?? 0) > 0
                     || (_workingSnapshot.Checkpoints?.Count ?? 0) > 0
-                    || (_workingSnapshot.ResetZones?.Count ?? 0) > 0);
+                    || (_workingSnapshot.ResetZones?.Count ?? 0) > 0
+                    || _workingSnapshot.Ball != null
+                    || (_workingSnapshot.SoccerGoals?.Count ?? 0) > 0
+                    || _workingSnapshot.Scoreboard != null);
         }
 
         private void HandlePendingReapply()
@@ -439,21 +477,10 @@ namespace FIHMapEditor
                 if (Mode == EditorMode.Editor) SetMode(EditorMode.Off);
                 else if (Mode == EditorMode.Off)
                 {
-                    if (ReadOnly)
-                    {
-                        // Double-press: the only exit from a play-only map is discarding
-                        // it — you never get editor powers while it stays loaded.
-                        if (Time.unscaledTime < _discardReadOnlyUntil)
-                        {
-                            NewMap();
-                            SetMode(EditorMode.Editor);
-                        }
-                        else
-                        {
-                            _discardReadOnlyUntil = Time.unscaledTime + 3f;
-                            ShowToast($"Play-only map — press {s.ToggleEditorKey} again to DISCARD it and open an empty editor");
-                        }
-                    }
+                    // Play-only: the editor key opens the leaderboard window instead —
+                    // players can see the times without editor powers, and the window
+                    // hosts the "discard map" action (confirmed button).
+                    if (ReadOnly) _timesViewer.Toggle();
                     else SetMode(EditorMode.Editor);
                 }
                 // In Play mode F6 is ignored; use P to leave play first.
@@ -471,7 +498,10 @@ namespace FIHMapEditor
                 else if (Mode == EditorMode.Off && ReadOnly) SetMode(EditorMode.Play);
             }
 
-            if (Mode == EditorMode.Editor && Input.WasKeyPressed("mapsHub", s.MapsHubKey))
+            // The Maps hub also works from the plain game (Off): on play-only maps it's
+            // the only way to switch to another map without editor powers.
+            if ((Mode == EditorMode.Editor || Mode == EditorMode.Off)
+                && Input.WasKeyPressed("mapsHub", s.MapsHubKey))
                 ToggleMapsHub();
 
             // Ctrl-combos: work in editor mode whether the cursor is free or locked.
@@ -621,6 +651,12 @@ namespace FIHMapEditor
                         return sel.MarkerIndex < Checkpoints.Count ? CheckpointProxy().transform : null;
                     case "reset":
                         return sel.MarkerIndex < ResetZones.Count ? ResetProxy().transform : null;
+                    case "ball":
+                        return Ball != null ? BallProxy().transform : null;
+                    case "soccergoal":
+                        return sel.MarkerIndex < SoccerGoals.Count ? SoccerGoalProxy().transform : null;
+                    case "scoreboard":
+                        return Scoreboard != null ? ScoreboardProxy().transform : null;
                     case "cannontarget":
                         // MarkerIndex holds the PlacedObject.Id (stable), not a list index.
                         var pc = PlacedManager.FindById(sel.MarkerIndex);
@@ -672,6 +708,36 @@ namespace FIHMapEditor
                 UnityEngine.Object.DontDestroyOnLoad(_resetProxy);
             }
             return _resetProxy;
+        }
+
+        private GameObject BallProxy()
+        {
+            if (_ballProxy == null)
+            {
+                _ballProxy = new GameObject("FIH_BallProxy");
+                UnityEngine.Object.DontDestroyOnLoad(_ballProxy);
+            }
+            return _ballProxy;
+        }
+
+        private GameObject SoccerGoalProxy()
+        {
+            if (_soccerGoalProxy == null)
+            {
+                _soccerGoalProxy = new GameObject("FIH_SoccerGoalProxy");
+                UnityEngine.Object.DontDestroyOnLoad(_soccerGoalProxy);
+            }
+            return _soccerGoalProxy;
+        }
+
+        private GameObject ScoreboardProxy()
+        {
+            if (_scoreboardProxy == null)
+            {
+                _scoreboardProxy = new GameObject("FIH_ScoreboardProxy");
+                UnityEngine.Object.DontDestroyOnLoad(_scoreboardProxy);
+            }
+            return _scoreboardProxy;
         }
 
         private GameObject CannonTargetProxy()
@@ -816,6 +882,62 @@ namespace FIHMapEditor
                 }
             }
 
+            if (sel.Marker == "ball" && Ball != null)
+            {
+                var p = BallProxy().transform;
+                if (Gizmo.IsDragging)
+                {
+                    Ball.Center = VecUtil.ToArray(p.position);
+                    // Uniform scale → radius (half the sphere diameter).
+                    Ball.Radius = Mathf.Clamp(Mathf.Max(p.localScale.x, p.localScale.y, p.localScale.z) * 0.5f, 0.1f, 5f);
+                }
+                else
+                {
+                    p.position = VecUtil.ToVector3(Ball.Center);
+                    p.rotation = Quaternion.identity;
+                    p.localScale = Vector3.one * Mathf.Max(0.2f, Ball.Radius * 2f);
+                }
+            }
+
+            if (sel.Marker == "soccergoal" && sel.MarkerIndex < SoccerGoals.Count)
+            {
+                var goal = SoccerGoals[sel.MarkerIndex];
+                var p = SoccerGoalProxy().transform;
+                if (Gizmo.IsDragging)
+                {
+                    goal.Center = VecUtil.ToArray(p.position);
+                    goal.Rot = VecUtil.ToArray(p.eulerAngles);
+                    var s = p.localScale;
+                    goal.Size = VecUtil.ToArray(new Vector3(
+                        Mathf.Max(1f, s.x), Mathf.Max(1f, s.y), Mathf.Max(1f, s.z)));
+                }
+                else
+                {
+                    p.position = VecUtil.ToVector3(goal.Center);
+                    p.localScale = VecUtil.ToVector3(goal.Size, Vector3.one * 4f);
+                    p.rotation = VecUtil.ToRotation(goal.Rot);
+                }
+            }
+
+            if (sel.Marker == "scoreboard" && Scoreboard != null)
+            {
+                var p = ScoreboardProxy().transform;
+                if (Gizmo.IsDragging)
+                {
+                    Scoreboard.Pos = VecUtil.ToArray(p.position);
+                    Scoreboard.Rot = VecUtil.ToArray(p.eulerAngles);
+                    // Uniform scale from whichever axis got stretched furthest.
+                    Scoreboard.Scale = Mathf.Clamp(
+                        Mathf.Max(p.localScale.x, p.localScale.y, p.localScale.z), 0.2f, 40f);
+                }
+                else
+                {
+                    p.position = VecUtil.ToVector3(Scoreboard.Pos);
+                    p.rotation = VecUtil.ToRotation(Scoreboard.Rot);
+                    p.localScale = Vector3.one * Mathf.Max(0.2f, Scoreboard.Scale);
+                }
+            }
+
             if (sel.Marker == "cannontarget")
             {
                 var pc = PlacedManager.FindById(sel.MarkerIndex);
@@ -920,6 +1042,36 @@ namespace FIHMapEditor
                                        new Color(1f, 0.25f, 0.25f, 0.9f));
             }
 
+            // Soccer: the ball kickoff point (white ring) + goal boxes (blue = team A,
+            // red = team B) — editor-only.
+            if (Ball?.Center != null)
+                _ballRing.ShowRing(VecUtil.ToVector3(Ball.Center), Mathf.Max(0.25f, Ball.Radius),
+                                   new Color(0.95f, 0.95f, 1f, 0.95f));
+            else
+                _ballRing.Hide();
+
+            // The 3D scoreboard: live score while a match runs, 0-0 while editing.
+            if (Scoreboard?.Pos != null)
+                _scoreboardRenderer.Draw(Scoreboard, PlayMode.ScoreA, PlayMode.ScoreB);
+            else
+                _scoreboardRenderer.Hide();
+
+            while (_soccerGoalBoxes.Count < SoccerGoals.Count)
+                _soccerGoalBoxes.Add(new LineBox($"FIH_Line_EdSoccer{_soccerGoalBoxes.Count}"));
+            for (int i = 0; i < _soccerGoalBoxes.Count; i++)
+            {
+                if (i >= SoccerGoals.Count || SoccerGoals[i]?.Center == null)
+                {
+                    _soccerGoalBoxes[i].Hide();
+                    continue;
+                }
+                var g = SoccerGoals[i];
+                var col = g.Team == 0 ? new Color(0.3f, 0.6f, 1f, 0.95f) : new Color(1f, 0.35f, 0.35f, 0.95f);
+                _soccerGoalBoxes[i].ShowBox(VecUtil.ToVector3(g.Center),
+                                            VecUtil.ToVector3(g.Size, Vector3.one * 4f),
+                                            VecUtil.ToRotation(g.Rot), col);
+            }
+
             // Launch targets (violet ring + aim line) of cannons and aimed pads — editor-only.
             var cannons = new List<PlacedObject>();
             foreach (var p in PlacedManager.Placed)
@@ -974,6 +1126,9 @@ namespace FIHMapEditor
             foreach (var box in _cannonLines) box.Hide();
             foreach (var box in _cannonLaunchBoxes) box.Hide();
             foreach (var box in _multiBoxes) box.Hide();
+            _ballRing.Hide();
+            foreach (var box in _soccerGoalBoxes) box.Hide();
+            _scoreboardRenderer.Hide();
         }
 
         private bool AnyTextFieldFocused() => _menu.HasFocusedTextField || _mapsHub.HasFocusedTextField;
@@ -1059,6 +1214,26 @@ namespace FIHMapEditor
                     Size = (float[])z.Size?.Clone(),
                     Rot = (float[])z.Rot?.Clone(),
                 });
+            var ball = Ball == null ? null
+                : new BallData { Uid = Ball.Uid, Center = (float[])Ball.Center?.Clone(), Radius = Ball.Radius };
+            var goals = new List<SoccerGoalData>();
+            foreach (var g in SoccerGoals)
+                goals.Add(new SoccerGoalData
+                {
+                    Uid = g.Uid,
+                    Center = (float[])g.Center?.Clone(),
+                    Size = (float[])g.Size?.Clone(),
+                    Rot = (float[])g.Rot?.Clone(),
+                    Team = g.Team,
+                });
+            var scoreboard = Scoreboard == null ? null
+                : new ScoreboardData
+                {
+                    Uid = Scoreboard.Uid,
+                    Pos = (float[])Scoreboard.Pos?.Clone(),
+                    Rot = (float[])Scoreboard.Rot?.Clone(),
+                    Scale = Scoreboard.Scale,
+                };
 
             return () =>
             {
@@ -1066,6 +1241,9 @@ namespace FIHMapEditor
                 Goal = goal;
                 Checkpoints = cps;
                 ResetZones = zones;
+                Ball = ball;
+                SoccerGoals = goals;
+                Scoreboard = scoreboard;
                 if (SelectionSys.Current.IsMarker) SelectionSys.Deselect();
                 SetDirty();
             };
@@ -1548,6 +1726,31 @@ namespace FIHMapEditor
                         out float d) && d < markerDist)
                     { marker = "reset"; markerIndex = i; markerDist = d; }
             }
+            if (Ball?.Center != null)
+            {
+                float r = Mathf.Max(0.25f, Ball.Radius);
+                var b = new Bounds(VecUtil.ToVector3(Ball.Center), Vector3.one * r * 2f);
+                if (SelectionSystem.RayIntersectsAABB(ray.Value, b, out float d) && d < markerDist)
+                    { marker = "ball"; markerIndex = 0; markerDist = d; }
+            }
+            for (int i = 0; i < SoccerGoals.Count; i++)
+            {
+                var goal = SoccerGoals[i];
+                if (goal?.Center == null) continue;
+                if (SelectionSystem.RayIntersectsOBB(ray.Value, VecUtil.ToVector3(goal.Center),
+                        VecUtil.ToVector3(goal.Size, Vector3.one * 4f), VecUtil.ToRotation(goal.Rot),
+                        out float d) && d < markerDist)
+                    { marker = "soccergoal"; markerIndex = i; markerDist = d; }
+            }
+            if (Scoreboard?.Pos != null)
+            {
+                // Board plane ≈ 4×2 digit-units drawn at scale*0.5 → half-metre depth.
+                float s = Mathf.Max(0.2f, Scoreboard.Scale) * 0.5f;
+                if (SelectionSystem.RayIntersectsOBB(ray.Value, VecUtil.ToVector3(Scoreboard.Pos),
+                        new Vector3(4.6f * s, 2.4f * s, 0.6f), VecUtil.ToRotation(Scoreboard.Rot),
+                        out float d) && d < markerDist)
+                    { marker = "scoreboard"; markerIndex = 0; markerDist = d; }
+            }
             foreach (var p in PlacedManager.Placed)
             {
                 if (p.Mechanic == MechanicType.None || p.Root == null) continue;
@@ -1647,6 +1850,8 @@ namespace FIHMapEditor
         public void SetMode(EditorMode newMode)
         {
             if (newMode == Mode) return;
+            _timesViewer?.Close();   // the Off-mode windows never outlive a mode change
+            if (Mode == EditorMode.Off) _mapsHub?.Close();   // (leaving Editor closes it below)
             // Play-only maps lock the WHOLE editor, not just the edit operations —
             // otherwise fly mode + closing the mod mid-course is a free teleport cheat
             // ("start the run from wherever I flew to"). Play ↔ Off only; discarding
@@ -1702,7 +1907,7 @@ namespace FIHMapEditor
                     RefreshSnapshot();
                     if (string.IsNullOrEmpty(MapId)) MapId = Guid.NewGuid().ToString("N");
                     PlayMode.Enter(Spawn, Goal, BaseMode == MapBaseMode.Blank, MapName, MapId,
-                        Checkpoints, ResetZones);
+                        Checkpoints, ResetZones, Ball, SoccerGoals);
                     ShowToast($"PLAY — {EditorConfig.Settings.RestartRunKey} / pad X: retry (last coin), Shift+{EditorConfig.Settings.RestartRunKey} / LB+X: full restart, {EditorConfig.Settings.TogglePlayKey}: editor");
                 }
 
@@ -1767,7 +1972,11 @@ namespace FIHMapEditor
 
         private void UpdatePlayPromptCursor()
         {
-            bool wantFree = Mode == EditorMode.Play && PlayMode.UploadPrompt == UploadPromptState.Offered;
+            // Windows outside editor mode that need a clickable cursor: the post-run
+            // upload prompt (Play), the play-only leaderboard viewer and the maps hub (Off).
+            bool wantFree = (Mode == EditorMode.Play && PlayMode.UploadPrompt == UploadPromptState.Offered)
+                || (Mode == EditorMode.Off && ((_timesViewer != null && _timesViewer.Visible)
+                                               || (_mapsHub != null && _mapsHub.Visible)));
             if (wantFree == _playPromptCursorFree) return;
             _playPromptCursorFree = wantFree;
 
@@ -1801,7 +2010,15 @@ namespace FIHMapEditor
         // ───────────────────────────────────────────────────────── map lifecycle ──
 
         private float _readOnlyToastAt = -99f;
-        private float _discardReadOnlyUntil = -99f;   // F6-twice window on play-only maps
+
+        // The times-viewer's discard button: throw away the play-only map and hand the
+        // user a fresh, unlocked editor.
+        public void DiscardPlayOnlyMap()
+        {
+            NewMap();
+            SetMode(EditorMode.Editor);
+            ShowToast("Play-only map discarded — empty editor ready");
+        }
         // Returns true (and nags, throttled) when the current map is play-only, so edit
         // operations can early-return. Selection/teleport/play stay allowed.
         public bool ReadOnlyBlock()
@@ -1850,6 +2067,9 @@ namespace FIHMapEditor
                 LevelEdits = LevelEdits.Snapshot(),
                 Checkpoints = new List<CheckpointData>(Checkpoints),
                 ResetZones = new List<ResetZoneData>(ResetZones),
+                Ball = Ball,
+                SoccerGoals = new List<SoccerGoalData>(SoccerGoals),
+                Scoreboard = Scoreboard,
             };
         }
 
@@ -1903,6 +2123,9 @@ namespace FIHMapEditor
             Goal = null;
             Checkpoints.Clear();
             ResetZones.Clear();
+            Ball = null;
+            SoccerGoals.Clear();
+            Scoreboard = null;
             _unresolvedObjects.Clear();
             Dirty = false;
             _autosaveDirtySince = -1f;
@@ -2248,7 +2471,36 @@ namespace FIHMapEditor
         {
             if (string.IsNullOrEmpty(mapId) || mapId == MapId) return;
             MapId = mapId;
+            RefreshReadOnly();   // the owner-token check keys off MapId
             SetDirty();
+        }
+
+        // Synced so a swap TO a play-only map locks every co-editor too — without this,
+        // peers kept full editor powers over content they weren't meant to edit.
+        public void ApplyRemoteEditable(bool editable)
+        {
+            if (editable != Editable)
+            {
+                Editable = editable;
+                SetDirty();
+            }
+            RefreshReadOnly();
+        }
+
+        // Re-derive the play-only lock after remote Editable/MapId changes. Arrival
+        // order of the two ops is not guaranteed, so both call this.
+        private void RefreshReadOnly()
+        {
+            bool ro = !Editable && !EditorConfig.Settings.OwnerTokens.ContainsKey(MapId ?? "");
+            if (ro == ReadOnly) return;
+            ReadOnly = ro;
+            if (ReadOnly && Mode == EditorMode.Editor)
+            {
+                // Kicked out mid-edit: SetMode(Play) runs the full leave-editor cleanup
+                // (fly off, cursor, autosave); only ENTERING Editor is guarded.
+                SetMode(EditorMode.Play);
+                ShowToast("Map is play-only now — editor locked");
+            }
         }
 
         private void ApplyMapFile(MapFile map, bool resetDirty)
@@ -2274,9 +2526,15 @@ namespace FIHMapEditor
             Goal = map.Goal;
             Checkpoints = map.Checkpoints != null ? new List<CheckpointData>(map.Checkpoints) : new List<CheckpointData>();
             ResetZones = map.ResetZones != null ? new List<ResetZoneData>(map.ResetZones) : new List<ResetZoneData>();
+            Ball = map.Ball;
+            SoccerGoals = map.SoccerGoals != null ? new List<SoccerGoalData>(map.SoccerGoals) : new List<SoccerGoalData>();
+            Scoreboard = map.Scoreboard;
             // Backfill stable ids on maps saved before multiplayer sync/grouping existed.
             foreach (var cp in Checkpoints) cp.Uid ??= Guid.NewGuid().ToString("N");
             foreach (var z in ResetZones) z.Uid ??= Guid.NewGuid().ToString("N");
+            if (Ball != null) Ball.Uid ??= Guid.NewGuid().ToString("N");
+            foreach (var g in SoccerGoals) g.Uid ??= Guid.NewGuid().ToString("N");
+            if (Scoreboard != null) Scoreboard.Uid ??= Guid.NewGuid().ToString("N");
             BaseMode = map.BaseMode;
 
             if (BaseMode == MapBaseMode.Blank) BlankCanvas.Apply();
@@ -2763,6 +3021,24 @@ namespace FIHMapEditor
                             ShowToast("Reset trigger removed");
                         }
                         break;
+                    case "ball":
+                        Ball = null;
+                        SetDirty();
+                        ShowToast("Ball removed");
+                        break;
+                    case "soccergoal":
+                        if (sel.MarkerIndex < SoccerGoals.Count)
+                        {
+                            SoccerGoals.RemoveAt(sel.MarkerIndex);
+                            SetDirty();
+                            ShowToast("Goal removed");
+                        }
+                        break;
+                    case "scoreboard":
+                        Scoreboard = null;
+                        SetDirty();
+                        ShowToast("Scoreboard removed");
+                        break;
                 }
                 SelectionSys.Deselect();
                 return;
@@ -3047,6 +3323,86 @@ namespace FIHMapEditor
             SelectionSys.SelectMarker("reset", ResetZones.Count - 1);
             SetDirty();
             ShowToast($"Reset trigger #{ResetZones.Count} placed here (invisible in play)");
+        }
+
+        // ───────────────────────────────────────────────────────────── soccer ──
+
+        // Place (or move) the single ball kickoff / centre point at the player.
+        public void PlaceBallHere()
+        {
+            if (ReadOnlyBlock()) return;
+            var t = Finder.FindPlayerTransform();
+            if (t == null) return;
+            Undo.Push("ball placement", CaptureMarkersState());
+            Ball = new BallData
+            {
+                Uid = Ball?.Uid ?? Guid.NewGuid().ToString("N"),
+                Center = VecUtil.ToArray(t.position + Vector3.up * 1f),
+                Radius = Ball?.Radius ?? 0.5f,
+            };
+            SelectionSys.SelectMarker("ball", 0);
+            SetDirty();
+            ShowToast("Ball kickoff point placed — scale it with the gizmo to size the ball");
+        }
+
+        public void RemoveBall()
+        {
+            if (Ball != null) Undo.Push("ball removal", CaptureMarkersState());
+            Ball = null;
+            if (SelectionSys.Current.Marker == "ball") SelectionSys.Deselect();
+            SetDirty();
+        }
+
+        public void AddSoccerGoalHere(int team)
+        {
+            if (ReadOnlyBlock()) return;
+            var t = Finder.FindPlayerTransform();
+            if (t == null) return;
+            Undo.Push("goal box add", CaptureMarkersState());
+            SoccerGoals.Add(new SoccerGoalData
+            {
+                Uid = Guid.NewGuid().ToString("N"),
+                Center = VecUtil.ToArray(t.position + Vector3.up * 1f),
+                Size = new float[] { 4f, 4f, 4f },
+                Team = Mathf.Clamp(team, 0, 1),
+            });
+            SelectionSys.SelectMarker("soccergoal", SoccerGoals.Count - 1);
+            SetDirty();
+            ShowToast($"Goal (Team {(team == 0 ? "A" : "B")}) added — scale/rotate it with the gizmo");
+        }
+
+        // Place (or move) the 3D scoreboard in front of the camera, facing the player.
+        public void PlaceScoreboardHere()
+        {
+            if (ReadOnlyBlock()) return;
+            var cam = Finder.FindCameraTransform();
+            var t = Finder.FindPlayerTransform();
+            if (cam == null && t == null) return;
+
+            Vector3 basePos = cam != null ? cam.position + cam.forward * 8f : t.position + Vector3.up * 3f;
+            float yaw = cam != null ? cam.eulerAngles.y + 180f : 0f;   // face back at the camera
+
+            Undo.Push("scoreboard placement", CaptureMarkersState());
+            Scoreboard = new ScoreboardData
+            {
+                Uid = Scoreboard?.Uid ?? Guid.NewGuid().ToString("N"),
+                Pos = VecUtil.ToArray(basePos + Vector3.up * 1.5f),
+                Rot = new float[] { 0f, yaw, 0f },
+                Scale = Scoreboard?.Scale ?? 2f,
+            };
+            SelectionSys.SelectMarker("scoreboard", 0);
+            SetDirty();
+            ShowToast("Scoreboard placed — move/rotate/scale it with the gizmo");
+        }
+
+        // Flip which team a goal box belongs to (menu button on the selected goal).
+        public void ToggleSoccerGoalTeam(int index)
+        {
+            if (ReadOnlyBlock()) return;
+            if (index < 0 || index >= SoccerGoals.Count) return;
+            Undo.Push("goal team change", CaptureMarkersState());
+            SoccerGoals[index].Team = 1 - SoccerGoals[index].Team;
+            SetDirty();
         }
 
         public void AdjustGoalSize(float delta)
