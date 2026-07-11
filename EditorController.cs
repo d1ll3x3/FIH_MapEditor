@@ -126,9 +126,14 @@ namespace FIHMapEditor
         private float _unresolvedRetryAt;
 
         // The game loads assets/objects lazily, so one scan at editor-open misses
-        // things. Rescan automatically (scans are additive — entries only ever grow).
-        private float _catalogRescanAt;
-        private const float CATALOG_RESCAN_INTERVAL = 20f;
+        // things — but a periodic rescan forever stutters the editor for nothing (logs
+        // show the catalog stabilizes within the first minute). So: a short WARM-UP of
+        // extra scans after the first editor open, then never again automatically.
+        // The CATALOG tab re-checks cheaply on open (collider-count change) and the
+        // manual Rescan button always works.
+        private static readonly float[] WARMUP_SCAN_DELAYS = { 10f, 25f, 60f };
+        private int _warmupScansDone;
+        private float _warmupBaseTime = -1f;   // Time.time of the first editor open this scene
 
         // Scene / lifecycle tracking
         private string _lastSceneName = "";
@@ -184,6 +189,10 @@ namespace FIHMapEditor
                 Leaderboard.SubmitTime(MapId, name, sid, seconds);
                 Leaderboard.FetchBoard(MapId, force: true);
             };
+
+            // Clicking level geometry with Unlock OFF explains itself instead of
+            // silently doing nothing ("I can't select the grass").
+            SelectionSys.OnPickHint = msg => ShowToast(msg);
 
             _menu = new EditorMenuRenderer(this);
             _mapsHub = new MapsHubRenderer(this);
@@ -379,6 +388,8 @@ namespace FIHMapEditor
             UpdatePlayPromptCursor(); // release devices if the upload prompt had them
             Finder.ClearCache();
             PlayerRepair.Reset();
+            _warmupBaseTime = -1f;
+            _warmupScansDone = 0;
             PlacedManager.OnSceneChanged();
             BlankCanvas.OnSceneChanged();
             LevelEdits.OnSceneChanged();
@@ -426,14 +437,38 @@ namespace FIHMapEditor
             if (Input.WasKeyPressed("toggleEditor", s.ToggleEditorKey))
             {
                 if (Mode == EditorMode.Editor) SetMode(EditorMode.Off);
-                else if (Mode == EditorMode.Off) SetMode(EditorMode.Editor);
-                // In Play mode F6 is ignored; use P to go back to the editor first.
+                else if (Mode == EditorMode.Off)
+                {
+                    if (ReadOnly)
+                    {
+                        // Double-press: the only exit from a play-only map is discarding
+                        // it — you never get editor powers while it stays loaded.
+                        if (Time.unscaledTime < _discardReadOnlyUntil)
+                        {
+                            NewMap();
+                            SetMode(EditorMode.Editor);
+                        }
+                        else
+                        {
+                            _discardReadOnlyUntil = Time.unscaledTime + 3f;
+                            ShowToast($"Play-only map — press {s.ToggleEditorKey} again to DISCARD it and open an empty editor");
+                        }
+                    }
+                    else SetMode(EditorMode.Editor);
+                }
+                // In Play mode F6 is ignored; use P to leave play first.
             }
 
             if (Input.WasKeyPressed("togglePlay", s.TogglePlayKey))
             {
                 if (Mode == EditorMode.Editor && !AnyTextFieldFocused()) SetMode(EditorMode.Play);
-                else if (Mode == EditorMode.Play) SetMode(EditorMode.Editor);
+                else if (Mode == EditorMode.Play)
+                {
+                    // Play-only: P exits to the plain game (Off), never to the editor.
+                    if (ReadOnly) { SetMode(EditorMode.Off); ShowToast($"Left play mode — {s.TogglePlayKey}: play again"); }
+                    else SetMode(EditorMode.Editor);
+                }
+                else if (Mode == EditorMode.Off && ReadOnly) SetMode(EditorMode.Play);
             }
 
             if (Mode == EditorMode.Editor && Input.WasKeyPressed("mapsHub", s.MapsHubKey))
@@ -500,9 +535,11 @@ namespace FIHMapEditor
                 RetryUnresolvedObjects();
             }
 
-            if (Catalog.HasScanned && Time.time >= _catalogRescanAt)
+            if (Catalog.HasScanned && _warmupBaseTime > 0
+                && _warmupScansDone < WARMUP_SCAN_DELAYS.Length
+                && Time.time >= _warmupBaseTime + WARMUP_SCAN_DELAYS[_warmupScansDone])
             {
-                _catalogRescanAt = Time.time + CATALOG_RESCAN_INTERVAL;
+                _warmupScansDone++;
                 int before = Catalog.Entries.Count;
                 Catalog.Scan();
                 int added = Catalog.Entries.Count - before;
@@ -1610,6 +1647,16 @@ namespace FIHMapEditor
         public void SetMode(EditorMode newMode)
         {
             if (newMode == Mode) return;
+            // Play-only maps lock the WHOLE editor, not just the edit operations —
+            // otherwise fly mode + closing the mod mid-course is a free teleport cheat
+            // ("start the run from wherever I flew to"). Play ↔ Off only; discarding
+            // the map (F6 twice) is the only way back into the editor.
+            if (newMode == EditorMode.Editor && ReadOnly)
+            {
+                ShowToast($"Play-only map — editor locked. {EditorConfig.Settings.TogglePlayKey}: play it, " +
+                          $"{EditorConfig.Settings.ToggleEditorKey} twice: discard it");
+                return;
+            }
             var old = Mode;
             Mode = newMode;
 
@@ -1641,9 +1688,9 @@ namespace FIHMapEditor
                 if (newMode == EditorMode.Editor)
                 {
                     if (!Catalog.HasScanned) Catalog.Scan();
-                    // Quick follow-up rescan soon after opening: most lazily-loaded
-                    // content appears within the first seconds of editing.
-                    _catalogRescanAt = Time.time + 8f;
+                    // Arm the warm-up rescans once per scene: lazily-loaded content
+                    // appears during the first minute, then the catalog stabilizes.
+                    if (_warmupBaseTime < 0) _warmupBaseTime = Time.time;
                     if (_workingSnapshot == null) NewMap(silent: true);
                     Fly.Enter();
                     Multiplayer.OnEnteredEditor();   // apply a map queued during Play
@@ -1754,6 +1801,7 @@ namespace FIHMapEditor
         // ───────────────────────────────────────────────────────── map lifecycle ──
 
         private float _readOnlyToastAt = -99f;
+        private float _discardReadOnlyUntil = -99f;   // F6-twice window on play-only maps
         // Returns true (and nags, throttled) when the current map is play-only, so edit
         // operations can early-return. Selection/teleport/play stay allowed.
         public bool ReadOnlyBlock()
@@ -1921,6 +1969,12 @@ namespace FIHMapEditor
                 // Autosave slots are recovery buffers, never a save target.
                 CurrentFileName = fileName.StartsWith(MapSerializer.AUTOSAVE_NAME) ? null : fileName;
                 ShowToast($"Loaded \"{MapName}\" — {LoadReport}");
+                // Play-only: never leave the user sitting in the editor with fly mode.
+                if (ReadOnly && Mode == EditorMode.Editor)
+                {
+                    SetMode(EditorMode.Play);
+                    ShowToast($"\"{MapName}\" is play-only — straight into Play. {EditorConfig.Settings.TogglePlayKey}: stop playing");
+                }
             }
             catch (Exception ex)
             {
@@ -1942,6 +1996,13 @@ namespace FIHMapEditor
         {
             if (!OnlineMaps.Configured) { ShowToast("Online maps not configured"); return; }
             if (!HasWorkingContent()) { ShowToast("Nothing to upload — the map is empty"); return; }
+            // A play-only map without a spawn would "play from wherever you stand" —
+            // trivially cheatable. Force the author to define the intended start.
+            if (!editable && Spawn?.Pos == null)
+            {
+                ShowToast("Play-only maps need a spawn — Set Spawn Here (TOOLS) first");
+                return;
+            }
             if (string.IsNullOrEmpty(MapId)) MapId = Guid.NewGuid().ToString("N");
 
             var (sid, name) = SteamIdentity();
@@ -1985,6 +2046,11 @@ namespace FIHMapEditor
                         ApplyMapFile(map, resetDirty: true);
                         CurrentFileName = null;   // an online map isn't a local file yet
                         ShowToast($"Loaded \"{MapName}\"{(ReadOnly ? " (play-only)" : "")} — {LoadReport}");
+                        if (ReadOnly && Mode == EditorMode.Editor)
+                        {
+                            SetMode(EditorMode.Play);
+                            ShowToast($"\"{MapName}\" is play-only — straight into Play. {EditorConfig.Settings.TogglePlayKey}: stop playing");
+                        }
                     }
                     catch (Exception ex)
                     {

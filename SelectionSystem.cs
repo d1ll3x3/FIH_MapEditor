@@ -147,6 +147,24 @@ namespace FIHMapEditor
         // colliders (kill zones, invisible walls) instead of passing through to what
         // the user actually sees. additive (Ctrl+Click) only replaces Current — it must
         // NOT clear Multi (CtrlMerge builds on it right after) nor expand groups.
+        //
+        // Overlap handling: clicking the SAME spot again within 1.5s cycles to the next
+        // candidate (grass → the ground behind it → back), so overlapping objects are
+        // all reachable. Small collider-less decor (grass tufts, plants ≤8m) may WIN
+        // over a physics hit when its box is closer along the ray — that's what makes
+        // grass selectable at all; big decor stays a last resort so it can't hijack
+        // clicks aimed at the world.
+        public Action<string> OnPickHint;   // wired to EditorController.ShowToast
+
+        private Vector2 _lastPickScreenPos;
+        private float _lastPickAt = -99f;
+        private Transform _lastPickChoice;
+        private float _lastHintAt = -99f;
+
+        private const float DECOR_PRIORITY_MAX_SIZE = 8f;   // per axis
+        private const float PICK_CYCLE_SECONDS = 1.5f;
+        private const float PICK_CYCLE_PIXELS = 8f;
+
         public bool PickAtMouse(bool unlockOriginals, bool pickInvisible, out Vector3 hitPoint,
                                 bool additive = false)
         {
@@ -156,73 +174,25 @@ namespace FIHMapEditor
                 var cam = Camera.main;
                 if (cam == null) return false;
 
+                Vector2 screenPos = Input.mousePosition;
                 var ray = cam.ScreenPointToRay(Input.mousePosition);
-                var playerRoot = _finder.FindPlayer()?.transform?.root;
 
-                // Physics pass: nearest collider hit that isn't the player or a helper.
-                float bestDist = float.MaxValue;
-                Transform bestTransform = null;
-                Vector3 bestPoint = Vector3.zero;
+                // Same-spot re-click: exclude last time's winner so the next candidate
+                // behind it gets its turn. Falls back to a fresh pick when the exclusion
+                // leaves nothing (wrap-around).
+                bool sameSpot = !additive
+                    && Time.unscaledTime - _lastPickAt < PICK_CYCLE_SECONDS
+                    && (screenPos - _lastPickScreenPos).sqrMagnitude <= PICK_CYCLE_PIXELS * PICK_CYCLE_PIXELS
+                    && _lastPickChoice != null;
+                Transform exclude = sameSpot ? _lastPickChoice : null;
 
-                // Visibility verdicts are cached per logical root: several hits of one
-                // click often share the same object.
-                var visCache = new System.Collections.Generic.Dictionary<int, bool>();
-
-                var hits = Physics.RaycastAll(ray, 1000f);
-                if (hits != null)
+                if (!ResolvePick(ray, unlockOriginals, pickInvisible, exclude,
+                        out Transform bestTransform, out Vector3 bestPoint, out float bestDist)
+                    && exclude != null)
                 {
-                    foreach (var hit in hits)
-                    {
-                        var col = hit.collider;
-                        if (col == null) continue;
-                        var t = col.transform;
-                        if (playerRoot != null && t.root == playerRoot) continue;
-                        if (t.name.StartsWith("FIH_Line") || t.name.StartsWith("FIH_Gizmo")) continue;
-                        if (!pickInvisible)
-                        {
-                            if (col.isTrigger) continue;
-                            if (!IsVisible(t, visCache)) continue;
-                        }
-                        if (hit.distance < bestDist)
-                        {
-                            bestDist = hit.distance;
-                            bestTransform = t;
-                            bestPoint = hit.point;
-                        }
-                    }
-                }
-
-                // Bounds pass: collider-less objects are invisible to physics raycasts,
-                // so they're tested against their AABBs. Priority rules:
-                //  - our own collider-less clones compete with physics hits by distance
-                //    (the user placed them and must be able to reselect them), but
-                //  - scene decor (SM_* visual-only meshes) NEVER beats a collider hit —
-                //    an AABB always starts before the real surface behind it, so letting
-                //    it compete would hijack almost every click. Decor is last resort.
-                Transform boundsTransform = null;
-                float boundsDist = bestDist;
-
-                foreach (var p in _placedManager.Placed)
-                {
-                    if (p.Root == null || p.HasCollider) continue;
-                    var b = ObjectCatalog.ComputeBounds(p.Root);
-                    TestBounds(p.Root.transform, b, ray, ref boundsDist, ref boundsTransform);
-                }
-
-                if (boundsTransform == null && bestTransform == null)
-                {
-                    foreach (var decor in _catalog.ColliderlessRoots)
-                    {
-                        if (decor.Root == null || !decor.Root.activeInHierarchy) continue;
-                        TestBounds(decor.Root.transform, decor.Bounds, ray, ref boundsDist, ref boundsTransform);
-                    }
-                }
-
-                if (boundsTransform != null)
-                {
-                    bestDist = boundsDist;
-                    bestTransform = boundsTransform;
-                    bestPoint = ray.GetPoint(boundsDist);
+                    // Nothing besides the excluded object here: cycle wraps around.
+                    ResolvePick(ray, unlockOriginals, pickInvisible, null,
+                        out bestTransform, out bestPoint, out bestDist);
                 }
 
                 if (bestTransform == null) return false;
@@ -232,21 +202,30 @@ namespace FIHMapEditor
                 var placed = _placedManager.FromTransform(bestTransform);
                 if (placed != null)
                 {
+                    RememberPick(screenPos, placed.Root.transform, additive);
                     if (additive) Current = new Selection { Placed = placed };
                     else Select(placed); // group-aware
                     return true;
                 }
 
+                // Resolve to the same logical root the catalog scan would pick.
+                var root = ClimbToLogicalRoot(bestTransform);
                 if (unlockOriginals)
                 {
-                    // Resolve to the same logical root the catalog scan would pick.
-                    var root = ClimbToLogicalRoot(bestTransform);
+                    RememberPick(screenPos, root, additive);
                     if (!additive) Multi.Clear();
                     Current = new Selection { Raw = root.gameObject };
                     LogRawPickDebug(bestTransform, root);
                     return true;
                 }
 
+                // Hit level geometry with Unlock OFF: the click "does nothing" silently,
+                // which reads as "I can't select X". Say why (throttled).
+                if (Time.unscaledTime - _lastHintAt > 2f)
+                {
+                    _lastHintAt = Time.unscaledTime;
+                    OnPickHint?.Invoke($"Level object \"{root.name}\" — turn Unlock ON to select level geometry");
+                }
                 return true; // hit the world but nothing selectable — hitPoint is still useful
             }
             catch (Exception ex)
@@ -254,6 +233,147 @@ namespace FIHMapEditor
                 MapEditorPlugin.Logger.LogWarning($"[SELECT] Raycast error: {ex.Message}");
                 return false;
             }
+        }
+
+        private void RememberPick(Vector2 screenPos, Transform choice, bool additive)
+        {
+            if (additive) return;   // Ctrl+Click builds a set; cycling there is confusing
+            _lastPickScreenPos = screenPos;
+            _lastPickAt = Time.unscaledTime;
+            _lastPickChoice = choice;
+        }
+
+        // One full pick resolution: physics hits + collider-less bounds candidates,
+        // optionally excluding one object (the previous winner, for click-cycling).
+        private bool ResolvePick(Ray ray, bool unlockOriginals, bool pickInvisible, Transform exclude,
+                                 out Transform bestTransform, out Vector3 bestPoint, out float bestDist)
+        {
+            bestTransform = null;
+            bestPoint = Vector3.zero;
+            bestDist = float.MaxValue;
+
+            var playerRoot = _finder.FindPlayer()?.transform?.root;
+
+            // Visibility verdicts are cached per logical root: several hits of one
+            // click often share the same object.
+            var visCache = new Dictionary<int, bool>();
+
+            // Discard log (change: no more silent dead clicks) — first few reasons only.
+            var discarded = new List<string>();
+
+            // Physics pass: nearest collider hit that isn't the player or a helper.
+            var hits = Physics.RaycastAll(ray, 1000f);
+            int rawHitCount = hits?.Length ?? 0;
+            if (hits != null)
+            {
+                foreach (var hit in hits)
+                {
+                    var col = hit.collider;
+                    if (col == null) continue;
+                    var t = col.transform;
+                    if (playerRoot != null && t.root == playerRoot) { Note(discarded, t, "player"); continue; }
+                    if (t.name.StartsWith("FIH_Line") || t.name.StartsWith("FIH_Gizmo")) continue;
+                    if (exclude != null && (t == exclude || t.IsChildOf(exclude))) continue;
+                    if (!pickInvisible)
+                    {
+                        if (col.isTrigger) { Note(discarded, t, "trigger (Pick invisible OFF)"); continue; }
+                        if (!IsVisible(t, visCache)) { Note(discarded, t, "no visible renderer (Pick invisible OFF)"); continue; }
+                    }
+                    if (hit.distance < bestDist)
+                    {
+                        bestDist = hit.distance;
+                        bestTransform = t;
+                        bestPoint = hit.point;
+                    }
+                }
+            }
+
+            // Our own collider-less clones compete with physics hits by distance —
+            // the user placed them and must always be able to reselect them.
+            Transform boundsTransform = null;
+            float boundsDist = bestDist;
+            foreach (var p in _placedManager.Placed)
+            {
+                if (p.Root == null || p.HasCollider) continue;
+                if (exclude != null && p.Root.transform == exclude) continue;
+                var b = ObjectCatalog.ComputeBounds(p.Root);
+                TestBounds(p.Root.transform, b, ray, ref boundsDist, ref boundsTransform);
+            }
+            if (boundsTransform != null)
+            {
+                bestDist = boundsDist;
+                bestTransform = boundsTransform;
+                bestPoint = ray.GetPoint(boundsDist);
+            }
+
+            // Scene decor (grass, plants — no colliders anywhere): SMALL pieces may win
+            // over a physics hit when their box entry is strictly closer along the ray
+            // (grass sits on top of the ground, so aiming at it enters the tuft's box
+            // first). Among near-equal candidates the SMALLEST box wins, so one tuft
+            // beats a whole bush cluster. Large decor keeps the old last-resort rule.
+            Transform smallDecor = null;
+            float smallDecorDist = float.MaxValue;
+            float smallDecorVol = float.MaxValue;
+            foreach (var decor in _catalog.ColliderlessRoots)
+            {
+                if (decor.Root == null || !decor.Root.activeInHierarchy) continue;
+                if (exclude != null && decor.Root.transform == exclude) continue;
+                var b = decor.Bounds;
+                if (b.size.x > DECOR_PRIORITY_MAX_SIZE || b.size.y > DECOR_PRIORITY_MAX_SIZE
+                    || b.size.z > DECOR_PRIORITY_MAX_SIZE) continue;
+                if (!RayIntersectsAABB(ray, b, out float d)) continue;
+                if (d <= 0.05f || d >= 1000f) continue;
+                if (d >= bestDist) continue;   // must be strictly in FRONT of the physics hit
+                float vol = b.size.x * b.size.y * b.size.z;
+                if (smallDecor == null || d < smallDecorDist - 0.5f
+                    || (d < smallDecorDist + 0.5f && vol < smallDecorVol))
+                {
+                    smallDecor = decor.Root.transform;
+                    smallDecorDist = d;
+                    smallDecorVol = vol;
+                }
+            }
+            if (smallDecor != null)
+            {
+                bestDist = smallDecorDist;
+                bestTransform = smallDecor;
+                bestPoint = ray.GetPoint(smallDecorDist);
+            }
+
+            // Large decor: only when the click found nothing at all (old behavior — a
+            // big AABB always starts before the real surface and would hijack clicks).
+            if (bestTransform == null)
+            {
+                boundsTransform = null;
+                boundsDist = float.MaxValue;
+                foreach (var decor in _catalog.ColliderlessRoots)
+                {
+                    if (decor.Root == null || !decor.Root.activeInHierarchy) continue;
+                    if (exclude != null && decor.Root.transform == exclude) continue;
+                    TestBounds(decor.Root.transform, decor.Bounds, ray, ref boundsDist, ref boundsTransform);
+                }
+                if (boundsTransform != null)
+                {
+                    bestDist = boundsDist;
+                    bestTransform = boundsTransform;
+                    bestPoint = ray.GetPoint(boundsDist);
+                }
+            }
+
+            // Nothing selected and this wasn't a cycling retry: leave an evidence trail
+            // instead of a silent dead click.
+            if (bestTransform == null && exclude == null)
+            {
+                MapEditorPlugin.Logger.LogInfo(rawHitCount == 0
+                    ? "[SELECT] Click hit nothing (no colliders along the ray)."
+                    : $"[SELECT] Click discarded all {rawHitCount} hit(s): {string.Join("; ", discarded)}");
+            }
+            return bestTransform != null;
+        }
+
+        private static void Note(List<string> discarded, Transform t, string reason)
+        {
+            if (discarded.Count < 3) discarded.Add($"'{t.name}' ({reason})");
         }
 
         // An object counts as visible when its logical root has at least one enabled

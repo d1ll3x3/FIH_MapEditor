@@ -189,7 +189,36 @@ namespace FIHMapEditor
             for (int i = 0; i < names.Length; i++)
             {
                 if (_win.ToggleButton(new Rect(15 + i * w, y, w - 4, 26), names[i], (int)_tab == i))
+                {
+                    bool entering = _tab != (Tab)i;
                     _tab = (Tab)i;
+                    if (entering && _tab == Tab.Catalog) MaybeRefreshCatalog();
+                }
+            }
+        }
+
+        // Opening the CATALOG tab is the moment completeness matters. Rescan only when
+        // the scene actually changed (collider count moved) and not too often — this is
+        // what replaced the periodic auto-rescan that stuttered the whole editor.
+        private void MaybeRefreshCatalog()
+        {
+            try
+            {
+                var cat = _c.Catalog;
+                if (!cat.HasScanned) return;
+                if (Time.unscaledTime - cat.LastScanTime < 10f) return;
+                int colliders = UnityEngine.Object.FindObjectsOfType<Collider>().Length;
+                if (Mathf.Abs(colliders - cat.LastScanColliderCount) < 15) return;
+
+                int before = cat.Entries.Count;
+                cat.Scan();
+                int added = cat.Entries.Count - before;
+                if (added > 0)
+                    _c.ShowToast($"Catalog refreshed: {added} new object(s) ({cat.Entries.Count} total)");
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[CATALOG] Tab refresh check failed: {ex.Message}");
             }
         }
 
@@ -205,9 +234,21 @@ namespace FIHMapEditor
             _filter = _win.TextField(new Rect(60, y, 160, 22), "filter", _filter);
             if (_win.Button(new Rect(228, y, 80, 22), "Rescan"))
             {
-                _c.Catalog.Scan();
+                _c.Catalog.Scan(collectAudit: true);
                 _catalogTop = 0;
-                _c.ShowToast($"Catalog: {_c.Catalog.Entries.Count} unique objects");
+                // Manual rescan = someone is hunting for an object: drop the full audit
+                // (every entry + every skipped root with its reason) next to the DLL.
+                try
+                {
+                    string auditPath = System.IO.Path.Combine(
+                        BepInEx.Paths.PluginPath, "FIHMapEditor", "catalog_audit.txt");
+                    int skips = _c.Catalog.WriteAudit(auditPath);
+                    _c.ShowToast($"Catalog: {_c.Catalog.Entries.Count} objects — audit written ({skips} skipped) → catalog_audit.txt");
+                }
+                catch (Exception ex)
+                {
+                    _c.ShowToast($"Catalog: {_c.Catalog.Entries.Count} objects (audit write failed: {ex.Message})");
+                }
             }
             // Hide pure decoration (SM meshes, VFX...) that has no collision to stand on.
             if (_win.ToggleButton(new Rect(314, y, 120, 22), "Solid only", _solidOnly))

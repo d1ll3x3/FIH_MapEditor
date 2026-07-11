@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Text;
+using System.Text.Json;
 using Il2CppInterop.Runtime;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -48,6 +50,91 @@ namespace FIHMapEditor
         // An entry, once found, is never dropped — only Clear() (scene change) resets.
         private readonly Dictionary<string, CatalogEntry> _seen = new Dictionary<string, CatalogEntry>();
 
+        // Audit trail of the LAST scan's scene passes: why each visited root was
+        // cataloged or skipped. Written to catalog_audit.txt on manual Rescan, so
+        // "object X is missing" reports stop being guesswork.
+        private readonly List<string> _auditSkip = new List<string>();
+
+        // Disk cache: entries accumulated in previous sessions, per scene. Sources are
+        // left null and re-resolved lazily by path (GetLiveSource) — exactly how live
+        // entries already survive their source being destroyed. This is what makes the
+        // catalog start at its FULL size instead of re-discovering content every run.
+        [Serializable]
+        private class CachedEntry
+        {
+            public string Key { get; set; }
+            public string Name { get; set; }
+            public string Path { get; set; }
+            public string Category { get; set; }
+            public float[] Size { get; set; }
+            public bool HasCollider { get; set; }
+        }
+
+        private static string CacheFileFor(string sceneName)
+            => System.IO.Path.Combine(BepInEx.Paths.PluginPath, "FIHMapEditor",
+                $"catalog_cache_{MapSerializer.SanitizeFileName(sceneName)}.json");
+
+        private void LoadCache()
+        {
+            try
+            {
+                string file = CacheFileFor(SceneManager.GetActiveScene().name ?? "unknown");
+                if (!File.Exists(file)) return;
+                var cached = JsonSerializer.Deserialize<List<CachedEntry>>(File.ReadAllText(file));
+                if (cached == null) return;
+                int loaded = 0;
+                foreach (var c in cached)
+                {
+                    if (string.IsNullOrEmpty(c.Key) || _seen.ContainsKey(c.Key)) continue;
+                    var entry = new CatalogEntry
+                    {
+                        DisplayName = c.Name,
+                        SourcePath = c.Path,
+                        Source = null,   // re-resolved on demand by GetLiveSource
+                        BoundsSize = VecUtil.ToVector3(c.Size),
+                        Category = string.IsNullOrEmpty(c.Category) ? "Props" : c.Category,
+                        HasCollider = c.HasCollider,
+                    };
+                    _seen[c.Key] = entry;
+                    Entries.Add(entry);
+                    loaded++;
+                }
+                MapEditorPlugin.Logger.LogInfo($"[CATALOG] Cache loaded: {loaded} entries from previous sessions.");
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[CATALOG] Cache load failed: {ex.Message}");
+            }
+        }
+
+        private void SaveCache()
+        {
+            try
+            {
+                var list = new List<CachedEntry>(_seen.Count);
+                foreach (var kv in _seen)
+                {
+                    var e = kv.Value;
+                    list.Add(new CachedEntry
+                    {
+                        Key = kv.Key,
+                        Name = e.DisplayName,
+                        Path = e.SourcePath,
+                        Category = e.Category,
+                        Size = VecUtil.ToArray(e.BoundsSize),
+                        HasCollider = e.HasCollider,
+                    });
+                }
+                string file = CacheFileFor(SceneManager.GetActiveScene().name ?? "unknown");
+                Directory.CreateDirectory(System.IO.Path.GetDirectoryName(file));
+                File.WriteAllText(file, JsonSerializer.Serialize(list));
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[CATALOG] Cache save failed: {ex.Message}");
+            }
+        }
+
         private readonly GameObjectFinder _finder;
 
         // Anything bigger than this on any axis is level-chunk scale, listed under "Large".
@@ -68,13 +155,26 @@ namespace FIHMapEditor
             ScanVersion++;
         }
 
-        public void Scan()
+        // Cheap change signals for "should we rescan?" checks (no full scan needed).
+        public int LastScanColliderCount { get; private set; } = -1;
+        public float LastScanTime { get; private set; } = -999f;
+
+        // collectAudit builds the skip-reason trail (BuildPath for every skipped root —
+        // thousands of string builds). Only the manual Rescan wants that; automatic
+        // scans must stay as light as possible (they already caused editor stutter).
+        public void Scan(bool collectAudit = false)
         {
+            // First scan of this scene session: seed with everything previous sessions
+            // ever found, so the catalog starts complete instead of re-discovering.
+            if (!HasScanned && Entries.Count == 0) LoadCache();
+
             // Additive: keep everything already found. Decor instances are rebuilt (the
             // live objects may have despawned); categories are re-derived at the end.
             Categories.Clear();
             ColliderlessRoots.Clear();
+            if (collectAudit) _auditSkip.Clear();
             ScanVersion++;
+            LastScanTime = Time.unscaledTime;
             int entriesBefore = Entries.Count;
 
             try
@@ -85,6 +185,7 @@ namespace FIHMapEditor
                 var wrapperCache = new Dictionary<int, int>();     // transform id → renderable child count
 
                 var colliders = UnityEngine.Object.FindObjectsOfType<Collider>();
+                LastScanColliderCount = colliders.Length;
                 foreach (var col in colliders)
                 {
                     if (col == null) continue;
@@ -94,7 +195,11 @@ namespace FIHMapEditor
                     var root = FindCandidateRoot(t, wrapperCache);
                     if (root == null) continue;
                     if (!visitedRoots.Add(root.GetInstanceID())) continue;
-                    if (!IsValidCandidate(root, playerRoot)) continue;
+                    if (!IsValidCandidate(root, playerRoot, out string why))
+                    {
+                        if (collectAudit) _auditSkip.Add($"{why,-24} {BuildPath(root)}");
+                        continue;
+                    }
 
                     // Nothing gets skipped for being invisible anymore: an object whose
                     // renderers are disabled still measures via its meshes, and a pure
@@ -107,7 +212,11 @@ namespace FIHMapEditor
                     if (bounds.size == Vector3.zero)
                     {
                         bounds = MechanicsController.ComputeColliderBounds(root.gameObject);
-                        if (bounds.size == Vector3.zero) continue; // truly nothing measurable
+                        if (bounds.size == Vector3.zero)
+                        {
+                            if (collectAudit) _auditSkip.Add($"{"zero-bounds",-24} {BuildPath(root)}");
+                            continue; // truly nothing measurable
+                        }
                         invisible = true;
                     }
 
@@ -115,7 +224,11 @@ namespace FIHMapEditor
                     string meshName = FirstMeshName(root.gameObject);
                     string key = display + "|" + meshName;
 
-                    if (seen.ContainsKey(key)) continue;
+                    if (seen.TryGetValue(key, out var dup))
+                    {
+                        if (collectAudit) _auditSkip.Add($"{$"dedup -> \"{dup.DisplayName}\"",-24} {BuildPath(root)}");
+                        continue;
+                    }
 
                     var entry = new CatalogEntry
                     {
@@ -143,10 +256,18 @@ namespace FIHMapEditor
                     var root = FindCandidateRoot(t, wrapperCache);
                     if (root == null) continue;
                     if (!visitedRoots.Add(root.GetInstanceID())) continue;
-                    if (!IsValidCandidate(root, playerRoot)) continue;
+                    if (!IsValidCandidate(root, playerRoot, out string why))
+                    {
+                        if (collectAudit) _auditSkip.Add($"{why,-24} {BuildPath(root)}");
+                        continue;
+                    }
 
                     var bounds = ComputeBounds(root.gameObject);
-                    if (bounds.size == Vector3.zero) continue;
+                    if (bounds.size == Vector3.zero)
+                    {
+                        if (collectAudit) _auditSkip.Add($"{"zero-bounds",-24} {BuildPath(root)}");
+                        continue;
+                    }
 
                     bool hasCollider = root.GetComponentInChildren<Collider>(true) != null;
                     if (!hasCollider)
@@ -154,7 +275,11 @@ namespace FIHMapEditor
 
                     string display = CleanName(root.name);
                     string key = display + "|" + FirstMeshName(root.gameObject);
-                    if (seen.ContainsKey(key)) continue;
+                    if (seen.TryGetValue(key, out var dup))
+                    {
+                        if (collectAudit) _auditSkip.Add($"{$"dedup -> \"{dup.DisplayName}\"",-24} {BuildPath(root)}");
+                        continue;
+                    }
 
                     seen[key] = new CatalogEntry
                     {
@@ -198,6 +323,9 @@ namespace FIHMapEditor
                 MapEditorPlugin.Logger.LogInfo(
                     $"[CATALOG] Scan: {Entries.Count} unique objects (+{Entries.Count - entriesBefore} new, " +
                     $"{colliders.Length} colliders examined). {summary}");
+
+                // Persist any growth so the next session starts at full size.
+                if (Entries.Count != entriesBefore) SaveCache();
             }
             catch (Exception ex)
             {
@@ -464,18 +592,23 @@ namespace FIHMapEditor
         }
 
         private bool IsValidCandidate(Transform root, Transform playerRoot, bool requireActive = true)
+            => IsValidCandidate(root, playerRoot, out _, requireActive);
+
+        // The out reason feeds the catalog audit ("why is object X not listed?").
+        private bool IsValidCandidate(Transform root, Transform playerRoot, out string reason, bool requireActive = true)
         {
-            if (root == null) return false;
+            reason = null;
+            if (root == null) { reason = "null-root"; return false; }
             var go = root.gameObject;
-            if (requireActive && !go.activeInHierarchy) return false;
-            if (go.name.Contains(CLONE_MARKER)) return false;
-            if (go.name == "FIH_MapObjectsRoot" || go.name == "FIH_SpawnRoot") return false;
-            if (playerRoot != null && root.root == playerRoot) return false;
+            if (requireActive && !go.activeInHierarchy) { reason = "inactive"; return false; }
+            if (go.name.Contains(CLONE_MARKER)) { reason = "own-clone"; return false; }
+            if (go.name == "FIH_MapObjectsRoot" || go.name == "FIH_SpawnRoot") { reason = "mod-helper"; return false; }
+            if (playerRoot != null && root.root == playerRoot) { reason = "player-rig"; return false; }
 
             // Skip anything that is (or carries) gameplay-critical machinery.
-            if (go.GetComponentInChildren<Camera>(true) != null) return false;
-            if (go.GetComponentInChildren<AudioListener>(true) != null) return false;
-            if (go.GetComponentInChildren<Canvas>(true) != null) return false;
+            if (go.GetComponentInChildren<Camera>(true) != null) { reason = "has-camera"; return false; }
+            if (go.GetComponentInChildren<AudioListener>(true) != null) { reason = "has-audiolistener"; return false; }
+            if (go.GetComponentInChildren<Canvas>(true) != null) { reason = "has-canvas(UI)"; return false; }
 
             // Skip other players / networked characters
             try
@@ -484,7 +617,8 @@ namespace FIHMapEditor
                 {
                     if (mb == null) continue;
                     var typeName = mb.GetIl2CppType()?.Name;
-                    if (typeName == "PlayerNetworked" || typeName == "NetworkManager") return false;
+                    if (typeName == "PlayerNetworked" || typeName == "NetworkManager")
+                    { reason = "networked-player"; return false; }
                 }
             }
             catch { }
@@ -680,6 +814,34 @@ namespace FIHMapEditor
             {
                 return null;
             }
+        }
+
+        // Full completeness report: every catalog entry (is X listed, and as what?) plus
+        // every root the LAST scan skipped and why. Called from the manual Rescan button
+        // only — automatic rescans never touch the disk.
+        public int WriteAudit(string path)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"FIH Map Editor — catalog audit ({DateTime.Now:yyyy-MM-dd HH:mm:ss})");
+            sb.AppendLine($"{Entries.Count} catalog entries; this audit scan skipped {_auditSkip.Count} scene root(s).");
+            sb.AppendLine("Catalog is additive: 'dedup' means that object IS available, under the quoted entry name.");
+            sb.AppendLine();
+
+            sb.AppendLine("== CATALOG ENTRIES (category | name | source) ==");
+            var entries = new List<CatalogEntry>(Entries);
+            entries.Sort((a, b) => string.CompareOrdinal(a.Category + a.DisplayName, b.Category + b.DisplayName));
+            foreach (var e in entries)
+                sb.AppendLine($"{e.Category,-12} {e.DisplayName,-42} {e.SourcePath}");
+
+            sb.AppendLine();
+            sb.AppendLine("== SKIPPED BY LAST SCAN (reason | path) ==");
+            var skips = new List<string>(_auditSkip);
+            skips.Sort(StringComparer.Ordinal);
+            foreach (var line in skips) sb.AppendLine(line);
+
+            File.WriteAllText(path, sb.ToString());
+            MapEditorPlugin.Logger.LogInfo($"[CATALOG] Audit written to {path} ({Entries.Count} entries, {_auditSkip.Count} skips).");
+            return _auditSkip.Count;
         }
 
         private static void ParseSegment(string seg, out string name, out int index)

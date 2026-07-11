@@ -59,8 +59,11 @@ namespace FIHMapEditor
             switch (_c.Mode)
             {
                 case EditorMode.Off:
-                    GUI.Label(new Rect(Screen.width - 260, Screen.height - 28, 250, 22),
-                        $"{EditorConfig.Settings.ToggleEditorKey}: FIH Map Editor", _styleHint);
+                    GUI.Label(new Rect(Screen.width - 430, Screen.height - 28, 420, 22),
+                        _c.ReadOnly
+                            ? $"Play-only map — {EditorConfig.Settings.TogglePlayKey}: play  |  {EditorConfig.Settings.ToggleEditorKey}×2: discard map"
+                            : $"{EditorConfig.Settings.ToggleEditorKey}: FIH Map Editor",
+                        _styleHint);
                     break;
 
                 case EditorMode.Editor:
