@@ -26,12 +26,61 @@ namespace FIHMapEditor
         private static MonoBehaviour _playerRef;
         private static bool _unavailable;
 
+        // Cached component that exposes ResetJumpStateImmediate() — used to clear the
+        // stuck grounded/jump state after the mod removes ground colliders (see below).
+        private static MonoBehaviour _jumpComp;
+        private static Il2CppSystem.Reflection.MethodInfo _resetJump;
+        private static bool _jumpUnavailable;
+
         public static void Reset()
         {
             _handler = null;
             _playerNetworked = null;
             _playerRef = null;
+            _jumpComp = null;
+            _resetJump = null;
+            _jumpUnavailable = false;
             _unavailable = false;
+        }
+
+        // Clear the player's jump/grounded state right now. The game exposes a public
+        // ResetJumpStateImmediate() for exactly this. We call it after removing ground
+        // colliders: Unity doesn't fire OnCollisionExit when a collider is disabled, so
+        // without this the player can be left "grounded" on ground that no longer exists
+        // — the endless jump-reset / slippery loop. Safe no-op if the API isn't found.
+        public static void ResetJumpState(GameObject localPlayer)
+        {
+            if (_jumpUnavailable || localPlayer == null) return;
+            try
+            {
+                if (_resetJump == null || _jumpComp == null)
+                {
+                    var root = localPlayer.transform.root != null
+                        ? localPlayer.transform.root.gameObject : localPlayer;
+                    foreach (var mb in root.GetComponentsInChildren<MonoBehaviour>(true))
+                    {
+                        if (mb == null) continue;
+                        Il2CppSystem.Reflection.MethodInfo m = null;
+                        try { m = mb.GetIl2CppType()?.GetMethod("ResetJumpStateImmediate"); }
+                        catch { }
+                        if (m == null) continue;
+                        _jumpComp = mb;
+                        _resetJump = m;
+                        break;
+                    }
+                    if (_resetJump == null)
+                    {
+                        _jumpUnavailable = true;
+                        MapEditorPlugin.Logger.LogWarning("[Repair] ResetJumpStateImmediate not found — stuck-jump fix unavailable.");
+                        return;
+                    }
+                }
+                _resetJump.Invoke(_jumpComp, null);
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[Repair] ResetJumpState error: {ex.Message}");
+            }
         }
 
         private static void Resolve(GameObject localPlayer)

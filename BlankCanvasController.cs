@@ -47,6 +47,10 @@ namespace FIHMapEditor
                 {
                     if (c == null || !c.enabled) continue;
                     if (!IsWipeable(c.transform, playerRoot)) continue;
+                    // Remove from the game's ground system BEFORE disabling: a disabled
+                    // collider never fires OnCollisionExit, so without this the player
+                    // gets left "grounded" on a collider that no longer exists.
+                    GroundRegistrar.Unregister(c);
                     c.enabled = false;
                     _disabledColliders.Add(c);
                 }
@@ -85,7 +89,12 @@ namespace FIHMapEditor
                 }
                 foreach (var c in _disabledColliders)
                 {
-                    if (c != null) { c.enabled = true; restored++; }
+                    if (c != null)
+                    {
+                        c.enabled = true;
+                        GroundRegistrar.RegisterLevelCollider(c); // put it back in the ground system
+                        restored++;
+                    }
                 }
                 _disabledRenderers.Clear();
                 _disabledColliders.Clear();

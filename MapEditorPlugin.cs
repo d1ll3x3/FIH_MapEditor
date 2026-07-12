@@ -82,6 +82,11 @@ namespace FIHMapEditor
         {
             try
             {
+                // Reserve a no-collision physics layer up front, before anything that
+                // hides/unhides colliders (LevelEditManager, BlankCanvas) might want
+                // to move stuff into it.
+                HiddenLayer.EnsureInitialized();
+
                 _controller = new EditorController();
                 _controller.Initialize();
                 _initialized = true;

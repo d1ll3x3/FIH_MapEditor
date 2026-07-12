@@ -228,7 +228,11 @@ namespace FIHMapEditor
                                 if (r != null && r.enabled) r.enabled = false;
                         if (record.HiddenColliders != null)
                             foreach (var c in record.HiddenColliders)
-                                if (c != null && c.enabled) c.enabled = false;
+                                if (c != null && c.enabled)
+                                {
+                                    GroundRegistrar.Unregister(c); // re-enabled by the game → unregister before re-hiding
+                                    c.enabled = false;
+                                }
                     }
                 }
                 catch { }
@@ -252,6 +256,10 @@ namespace FIHMapEditor
                 foreach (var c in record.Target.GetComponentsInChildren<Collider>(false))
                 {
                     if (c == null || !c.enabled) continue;
+                    // Remove it from the game's ground system BEFORE disabling — a
+                    // disabled collider never fires OnCollisionExit, so the player can be
+                    // left permanently "grounded" on it (endless jump reset).
+                    GroundRegistrar.Unregister(c);
                     c.enabled = false;
                     record.HiddenColliders.Add(c);
                 }
@@ -279,7 +287,11 @@ namespace FIHMapEditor
                         if (r != null) r.enabled = true;
                 if (record.HiddenColliders != null)
                     foreach (var c in record.HiddenColliders)
-                        if (c != null) c.enabled = true;
+                        if (c != null)
+                        {
+                            c.enabled = true;
+                            GroundRegistrar.RegisterLevelCollider(c); // put it back in the ground system
+                        }
                 record.HiddenRenderers = null;
                 record.HiddenColliders = null;
                 record.Hidden = false;

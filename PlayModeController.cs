@@ -87,11 +87,32 @@ namespace FIHMapEditor
         private float _remoteBallAt = -999f;
         private float _outrankedUntil = -999f;   // a lower SteamID is actively broadcasting
 
+        // The ball must NOT physically collide with player bodies (user decision): the
+        // ball's ground layer collides with players by definition, so we explicitly
+        // disable every ball↔player collider pair. All interaction is the manual kick.
+        // Refreshed each second so players who join mid-match get unpaired too.
+        private float _nextBallUnpairAt;
+        private readonly HashSet<int> _ballUnpaired = new HashSet<int>();
+        // Per-pair collision control — Physics.IgnoreCollision overrides the layer
+        // matrix in BOTH directions, so this works no matter how the game (re)configures
+        // its layers. Rule: the ball collides with exactly what the PLAYER collides
+        // with, minus the players themselves:
+        //   - player bodies → never (user decision; interaction = the manual kick)
+        //   - decor the player walks through (grass carpets…) → never (ball sinks in)
+        //   - everything else near the ball → FORCED on (always rests on the field)
+        private float _nextBallPairsAt;
+
         // Manual kick: physics alone is unreliable (the player's collider layer may
         // ignore the ball's), so any player body overlapping the ball shoves it.
         private float _kickCooldownUntil;
         private readonly System.Collections.Generic.Dictionary<int, Vector3> _playerLastPos
             = new System.Collections.Generic.Dictionary<int, Vector3>();
+
+        // Cached "Player"-tagged list for the kick. FindGameObjectsWithTag walks the
+        // whole scene each call — once per authority frame is fine, but we used to
+        // call it inside the kick hot path. Rescan every 2s and on Spawn/Restart.
+        private GameObject[] _cachedPlayers = System.Array.Empty<GameObject>();
+        private float _nextPlayerRescanAt;
 
         private readonly LineBox _goalBeacon = new LineBox("FIH_Line_GoalBeacon");
         private readonly List<LineBox> _checkpointRings = new List<LineBox>();
@@ -164,6 +185,11 @@ namespace FIHMapEditor
             _remoteBallAt = -999f;
             _outrankedUntil = -999f;
             _playerLastPos.Clear();
+            _ballUnpaired.Clear();   // fresh ball collider → previous pairs are stale
+            _nextBallUnpairAt = 0f;
+            _nextBallPairsAt = 0f;
+            _cachedPlayers = System.Array.Empty<GameObject>();   // force rescan
+            _nextPlayerRescanAt = 0f;
             if (_ball?.Center != null)
                 _soccerBall.Spawn(VecUtil.ToVector3(_ball.Center), _ball.Radius, ChooseBallLayer());
         }
@@ -315,6 +341,14 @@ namespace FIHMapEditor
 
         private void UpdateSoccer()
         {
+            // Per-pair collision control: force the ball to ignore every player collider
+            // (so the manual kick is the only way the player interacts with the ball) and
+            // ignore any decor the player walks through (grass carpets — the ball sinks
+            // through them, matching the player). Everything else is forced ON so the
+            // ball rests on the real ground/walls regardless of the layer matrix.
+            EnsureBallIgnoresPlayers();
+            RefreshBallCollisionPairs();
+
             bool authority = BallAuthority?.Invoke() ?? true;
             // Instant conflict resolution: someone with a LOWER SteamID is actively
             // broadcasting ball states — they outrank us no matter what our (possibly
@@ -334,6 +368,87 @@ namespace FIHMapEditor
 
             if (authority) UpdateSoccerAuthority();
             else UpdateSoccerFollower();
+        }
+
+        // Disable every ball↔player collider pair. Run every second (not per-frame) so
+        // players joining mid-match also get unpaired. Cached in _ballUnpaired so each
+        // collider is only visited once.
+        private void EnsureBallIgnoresPlayers()
+        {
+            if (Time.unscaledTime < _nextBallUnpairAt) return;
+            _nextBallUnpairAt = Time.unscaledTime + 1f;
+            try
+            {
+                var ballCol = _soccerBall.Go != null ? _soccerBall.Go.GetComponent<Collider>() : null;
+                if (ballCol == null) return;
+
+                GameObject[] players;
+                try { players = GameObject.FindGameObjectsWithTag("Player"); }
+                catch { players = null; }
+                if (players == null || players.Length == 0)
+                {
+                    var local = _finder.FindPlayer();
+                    players = local != null ? new[] { local } : null;
+                }
+                if (players == null) return;
+
+                foreach (var p in players)
+                {
+                    if (p == null) continue;
+                    foreach (var pc in p.GetComponentsInChildren<Collider>(false))
+                    {
+                        if (pc == null || pc.isTrigger) continue;
+                        if (!_ballUnpaired.Add(pc.GetInstanceID())) continue;   // already done
+                        Physics.IgnoreCollision(ballCol, pc, true);             // no ball↔player physics
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[BALL] Player-unpair error: {ex.Message}");
+            }
+        }
+
+        // Per-pair collision control — Physics.IgnoreCollision overrides the layer
+        // matrix in BOTH directions, so this works no matter how the game (re)configures
+        // its layers. Rule: the ball collides with exactly what the PLAYER collides
+        // with, minus the players themselves:
+        //   - player bodies → never (user decision; interaction = the manual kick)
+        //   - decor the player walks through (grass carpets…) → never (ball sinks in)
+        //   - everything else near the ball → FORCED on (always rests on the field)
+        private void RefreshBallCollisionPairs()
+        {
+            if (Time.unscaledTime < _nextBallPairsAt) return;
+            _nextBallPairsAt = Time.unscaledTime + 0.25f;
+            try
+            {
+                var ballCol = _soccerBall.Go != null ? _soccerBall.Go.GetComponent<Collider>() : null;
+                if (ballCol == null) return;
+
+                var playerCol = _finder.FindPlayer()?.GetComponentInChildren<Collider>(false);
+                int playerLayer = playerCol != null ? playerCol.gameObject.layer : -1;
+
+                var near = Physics.OverlapSphere(_soccerBall.Position, 40f);
+                if (near == null) return;
+                foreach (var c in near)
+                {
+                    if (c == null || c.isTrigger || c == ballCol) continue;
+                    if (!_ballUnpaired.Add(c.GetInstanceID())) continue;   // already decided
+
+                    bool isPlayer = false;
+                    try { isPlayer = c.transform.root != null && c.transform.root.CompareTag("Player"); }
+                    catch { }
+
+                    bool decor = playerLayer >= 0
+                        && Physics.GetIgnoreLayerCollision(c.gameObject.layer, playerLayer);
+
+                    Physics.IgnoreCollision(ballCol, c, isPlayer || decor);
+                }
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[BALL] Collision-pair refresh error: {ex.Message}");
+            }
         }
 
         private void UpdateSoccerAuthority()
@@ -431,8 +546,16 @@ namespace FIHMapEditor
             }
             else
             {
-                try { players = GameObject.FindGameObjectsWithTag("Player"); }
-                catch { players = null; }
+                // Use the cached list when fresh; rescan periodically to pick up
+                // joiners/leavers. FindGameObjectsWithTag walks the whole scene.
+                if (_cachedPlayers == null || _cachedPlayers.Length == 0
+                    || Time.unscaledTime >= _nextPlayerRescanAt)
+                {
+                    try { _cachedPlayers = GameObject.FindGameObjectsWithTag("Player"); }
+                    catch { _cachedPlayers = null; }
+                    _nextPlayerRescanAt = Time.unscaledTime + 2f;
+                }
+                players = _cachedPlayers;
                 if (players == null || players.Length == 0)
                 {
                     var local = _finder.FindPlayer();
@@ -796,7 +919,15 @@ namespace FIHMapEditor
             try
             {
                 var player = _finder.FindPlayer();
-                if (player != null) PlayerRepair.Repair(player);
+                if (player != null)
+                {
+                    PlayerRepair.Repair(player);
+                    // Clear any stuck grounded/jump state: on maps that wiped or hid
+                    // ground, the player may have been left "grounded" on a collider the
+                    // mod disabled (Unity never fires the exit). A respawn is a natural
+                    // moment to reset it.
+                    PlayerRepair.ResetJumpState(player);
+                }
             }
             catch (Exception ex)
             {

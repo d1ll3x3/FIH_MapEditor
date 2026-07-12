@@ -574,11 +574,19 @@ namespace FIHMapEditor
                 && Time.time >= _warmupBaseTime + WARMUP_SCAN_DELAYS[_warmupScansDone])
             {
                 _warmupScansDone++;
-                int before = Catalog.Entries.Count;
-                Catalog.Scan();
-                int added = Catalog.Entries.Count - before;
-                if (added > 0)
-                    ShowToast($"Catalog: {added} new object(s) discovered ({Catalog.Entries.Count} total)");
+                // Cheap pre-check (same pattern as MaybeRefreshCatalog on the CATALOG
+                // tab): if the collider count hasn't moved meaningfully since the last
+                // scan, the warm-up rescan would be a no-op. Skipping it removes the
+                // 8/25/60s stutter the user reported.
+                int collidersNow = UnityEngine.Object.FindObjectsOfType<Collider>().Length;
+                if (Mathf.Abs(collidersNow - Catalog.LastScanColliderCount) >= 15)
+                {
+                    int before = Catalog.Entries.Count;
+                    Catalog.Scan();
+                    int added = Catalog.Entries.Count - before;
+                    if (added > 0)
+                        ShowToast($"Catalog: {added} new object(s) discovered ({Catalog.Entries.Count} total)");
+                }
             }
         }
 
