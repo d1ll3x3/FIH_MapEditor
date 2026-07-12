@@ -200,8 +200,11 @@ namespace FIHMapEditor
                 Leaderboard.FetchBoard(MapId, force: true);
             };
 
-            // Soccer ball online: lowest modded SteamID simulates, the rest follow.
+            // Soccer ball online: lowest modded SteamID among the players actually in
+            // Play on this map simulates; the rest follow. LocalSteamId feeds the
+            // instant yield-to-lower-id conflict resolution.
             PlayMode.BallAuthority = () => Multiplayer.IsBallAuthority;
+            PlayMode.LocalSteamId = () => Multiplayer.SelfId;
             PlayMode.BallSend = (pos, vel, a, b, kick) => Multiplayer.SendBall(pos, vel, a, b, kick);
 
             // Clicking level geometry with Unlock OFF explains itself instead of
@@ -423,6 +426,7 @@ namespace FIHMapEditor
             UpdatePlayPromptCursor(); // release devices if the upload prompt / viewer had them
             Finder.ClearCache();
             PlayerRepair.Reset();
+            GroundRegistrar.Reset();
             _warmupBaseTime = -1f;
             _warmupScansDone = 0;
             PlacedManager.OnSceneChanged();
@@ -2501,6 +2505,45 @@ namespace FIHMapEditor
                 SetMode(EditorMode.Play);
                 ShowToast("Map is play-only now — editor locked");
             }
+        }
+
+        // Soccer PLACEMENT sync (kickoff point / goal boxes / scoreboard marker) — the
+        // editor-time config, not the live ball position (that's PlayModeController.
+        // ApplyRemoteBall over MSG_BALL). Without this a peer who never placed soccer
+        // themselves never receives it and their client silently has no match to run.
+        public void ApplyRemoteBallMarker(BallData data)
+        {
+            Ball = data;
+            if (SelectionSys.Current.Marker == "ball") SelectionSys.Deselect();
+            SetDirty();
+        }
+
+        public void ApplyRemoteSoccerGoalUpsert(SoccerGoalData data)
+        {
+            if (string.IsNullOrEmpty(data?.Uid)) return;
+            int idx = SoccerGoals.FindIndex(g => g.Uid == data.Uid);
+            if (idx >= 0) SoccerGoals[idx] = data; else SoccerGoals.Add(data);
+            SetDirty();
+        }
+
+        public void ApplyRemoteSoccerGoalDelete(string uid)
+        {
+            int idx = SoccerGoals.FindIndex(g => g.Uid == uid);
+            if (idx < 0) return;
+            if (SelectionSys.Current.Marker == "soccergoal")
+            {
+                if (SelectionSys.Current.MarkerIndex == idx) SelectionSys.Deselect();
+                else if (SelectionSys.Current.MarkerIndex > idx) SelectionSys.Current.MarkerIndex--;
+            }
+            SoccerGoals.RemoveAt(idx);
+            SetDirty();
+        }
+
+        public void ApplyRemoteScoreboard(ScoreboardData data)
+        {
+            Scoreboard = data;
+            if (SelectionSys.Current.Marker == "scoreboard") SelectionSys.Deselect();
+            SetDirty();
         }
 
         private void ApplyMapFile(MapFile map, bool resetDirty)

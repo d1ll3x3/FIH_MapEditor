@@ -113,9 +113,30 @@ namespace FIHMapEditor
                 catch { }
 
                 // Only force a transition when actually destroyed — re-entering Normal on
-                // every teleport would needlessly reset movement/abilities.
-                if (stateName != null && stateName.IndexOf("Destroy", StringComparison.OrdinalIgnoreCase) < 0)
+                // every teleport would needlessly reset movement/abilities (jump, run,
+                // abilities) and is the root cause of "the jump resets every time I
+                // spawn/respawn" reports.
+                //
+                // The stateName can be null when the reflection lookup fails: this game
+                // build doesn't expose CurrentStateName, the property getter throws, or
+                // the FSM is mid-transition. The previous code had
+                //   if (stateName != null && stateName.IndexOf("Destroy", ...) < 0) return;
+                // which looks correct but FAILS OPEN: when stateName is null the && is
+                // short-circuited, the early return is skipped, and the code falls
+                // through to setState — re-arming movement on every teleport, phone
+                // intact or not. Fix: bail out conservatively when we can't read the
+                // state at all (we have no way to know it's destroyed, so don't risk
+                // the reset).
+                if (stateName == null)
+                {
+                    MapEditorPlugin.Logger.LogInfo("[Repair] Cannot read FSM state name; skipping forced Normal (would reset movement on intact phones).");
                     return;
+                }
+                if (stateName.IndexOf("Destroy", StringComparison.OrdinalIgnoreCase) < 0)
+                {
+                    MapEditorPlugin.Logger.LogInfo($"[Repair] FSM in '{stateName}' (not destroyed); no forced Normal.");
+                    return;
+                }
 
                 var setState = fsmType.GetMethod("SetState");
                 if (setState == null) return;

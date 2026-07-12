@@ -226,6 +226,7 @@ namespace FIHMapEditor
 
                     if (seen.TryGetValue(key, out var dup))
                     {
+                        UpgradeSourceIfBetter(dup, root.gameObject);
                         if (collectAudit) _auditSkip.Add($"{$"dedup -> \"{dup.DisplayName}\"",-24} {BuildPath(root)}");
                         continue;
                     }
@@ -277,6 +278,7 @@ namespace FIHMapEditor
                     string key = display + "|" + FirstMeshName(root.gameObject);
                     if (seen.TryGetValue(key, out var dup))
                     {
+                        UpgradeSourceIfBetter(dup, root.gameObject);
                         if (collectAudit) _auditSkip.Add($"{$"dedup -> \"{dup.DisplayName}\"",-24} {BuildPath(root)}");
                         continue;
                     }
@@ -324,8 +326,13 @@ namespace FIHMapEditor
                     $"[CATALOG] Scan: {Entries.Count} unique objects (+{Entries.Count - entriesBefore} new, " +
                     $"{colliders.Length} colliders examined). {summary}");
 
-                // Persist any growth so the next session starts at full size.
-                if (Entries.Count != entriesBefore) SaveCache();
+                // Persist growth AND source upgrades (an upgraded path must replace the
+                // hidden-variant path stored by an earlier session).
+                if (Entries.Count != entriesBefore || _sourcesUpgraded)
+                {
+                    _sourcesUpgraded = false;
+                    SaveCache();
+                }
             }
             catch (Exception ex)
             {
@@ -565,6 +572,37 @@ namespace FIHMapEditor
             }
             catch { }
             return null;
+        }
+
+        // The game keeps HIDDEN duplicates of level objects (disabled templates,
+        // pooling). If the dedup happened to store one of those as an entry's Source,
+        // every placement clones the hidden variant — wrong renderers (invisible) and
+        // wrong physic materials (a GroundBlock that doesn't slide). Whenever a scan
+        // sees an ACTIVE, VISIBLE instance of the same object, upgrade the entry to
+        // point at the real thing.
+        private bool _sourcesUpgraded;
+
+        private void UpgradeSourceIfBetter(CatalogEntry entry, GameObject candidate)
+        {
+            try
+            {
+                if (candidate == null || !candidate.activeInHierarchy) return;
+                if (entry.SourcePath != null && entry.SourcePath.StartsWith(ASSET_PREFIX)) return;
+
+                bool currentBad = entry.Source == null
+                    || !entry.Source.activeInHierarchy
+                    || ComputeBounds(entry.Source).size == Vector3.zero;   // renderers disabled
+                if (!currentBad) return;
+                if (ComputeBounds(candidate).size == Vector3.zero) return; // candidate no better
+
+                entry.Source = candidate;
+                entry.SourcePath = BuildPath(candidate.transform);
+                entry.HasCollider = candidate.GetComponentInChildren<Collider>(true) != null;
+                _sourcesUpgraded = true;
+                MapEditorPlugin.Logger.LogInfo(
+                    $"[CATALOG] '{entry.DisplayName}': source upgraded to a live visible instance ({entry.SourcePath}).");
+            }
+            catch { }
         }
 
         // Climb from a collider to the object's logical root. The climb rule lives in

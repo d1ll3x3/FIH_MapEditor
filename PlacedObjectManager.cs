@@ -127,6 +127,47 @@ namespace FIHMapEditor
                 clone.transform.localScale = scale;
                 clone.SetActive(true);
 
+                // A clone must always spawn VISIBLE. Sources cataloged straight from the
+                // level can have their renderers toggled off or their visual nodes
+                // deactivated (phase objects, chunks the game hides, Hidden-category
+                // sources) — a copy inheriting that places as collision-only, an
+                // invisible block. Only rescue clones that would otherwise show NOTHING;
+                // normally-visible objects keep their intentional on/off child states.
+                bool anyVisible = false;
+                foreach (var r in clone.GetComponentsInChildren<Renderer>(false))
+                    if (r != null && r.enabled) { anyVisible = true; break; }
+                if (!anyVisible)
+                {
+                    int reEnabled = 0;
+                    foreach (var childT in clone.GetComponentsInChildren<Transform>(true))
+                    {
+                        if (childT != null && !childT.gameObject.activeSelf)
+                        {
+                            childT.gameObject.SetActive(true);
+                            reEnabled++;
+                        }
+                    }
+                    foreach (var r in clone.GetComponentsInChildren<Renderer>(true))
+                    {
+                        if (r != null && !r.enabled)
+                        {
+                            r.enabled = true;
+                            reEnabled++;
+                        }
+                    }
+                    if (reEnabled > 0)
+                        MapEditorPlugin.Logger.LogInfo(
+                            $"[PLACE] '{clone.name}' had no visible renderer — re-enabled {reEnabled} hidden renderer(s)/node(s).");
+                }
+
+                // Visual-only sources (SM_*, decor, prefab assets with no collider) would
+                // leave the clone unselectable via the physics raycast and physics-less in
+                // play mode — the user expects placed geometry to behave like the level's
+                // own colliders. Add a matching collider (MeshCollider from the shared
+                // mesh, BoxCollider fallback) so the clone enters the normal picking +
+                // physics path the same way the original collider-bearing sources do.
+                EnsureColliders(clone);
+
                 var placed = new PlacedObject
                 {
                     Id = _nextId++,
@@ -171,6 +212,11 @@ namespace FIHMapEditor
                     if (!string.IsNullOrEmpty(restore.Uid)) placed.Uid = restore.Uid;
                     placed.GroupId = restore.GroupId;
                 }
+
+                // The game's surface behavior (slippery ground, footstep surfaces) lives
+                // in its GroundRegistry, keyed per collider — register the clone's so it
+                // behaves exactly like the original it was copied from.
+                GroundRegistrar.RegisterClone(clone, source);
 
                 _placed.Add(placed);
                 _byRootId[clone.GetInstanceID()] = placed;
@@ -266,6 +312,73 @@ namespace FIHMapEditor
                 t = t.parent;
             }
             return null;
+        }
+
+        // Backfill colliders on a clone whose source had none. Done AFTER the
+        // visibility rescue so the visible extent is the right one to measure.
+        //
+        // The sharedMesh on a game-bundle asset is non-accessible at the native
+        // level (Read/Write Enabled = OFF in the asset's import settings, baked
+        // at build time) — Unity refuses to bake CollisionMeshData for any
+        // MeshCollider that uses it, regardless of whether the C# wrapper is an
+        // Instantiate() copy. The flag lives on the native data, not the
+        // wrapper, so Instantiate doesn't help. BoxCollider is the only type
+        // that can be guaranteed to work at runtime on these assets.
+        //
+        // One BoxCollider covering the full visual AABB in the root's local
+        // space (computed by transforming each renderer's world-AABB corners
+        // through InverseTransformPoint so the collider follows placement
+        // position, rotation and scale). Stacking the AABB into multiple
+        // step-sized boxes LOOKED like the right answer for stairs, but the
+        // game detects the player as "always grounded" whenever a non-trigger
+        // collider is in constant contact — and with a 0.3m stack, a player
+        // ~1m tall always has their torso inside the box of the step above
+        // them, so the jump keeps resetting mid-air. A single solid box means
+        // the player stands on the TOP face (nothing above them in the air)
+        // and the jump works normally. The trade-off is no step-by-step
+        // climb — the top of the box is at the top of the AABB, so the player
+        // can only reach it by jumping onto it from the side or by chaining
+        // ramps next to it.
+        private static void EnsureColliders(GameObject root)
+        {
+            try
+            {
+                if (root == null) return;
+                if (root.GetComponentInChildren<Collider>(true) != null) return;
+
+                var rt = root.transform;
+                Bounds? localAabb = null;
+                foreach (var r in root.GetComponentsInChildren<Renderer>(true))
+                {
+                    if (r == null) continue;
+                    var rb = r.bounds;
+                    Vector3 c = rb.center, e = rb.extents;
+                    // 8 corners of the renderer's world AABB, brought into local space.
+                    for (int xi = -1; xi <= 1; xi += 2)
+                        for (int yi = -1; yi <= 1; yi += 2)
+                            for (int zi = -1; zi <= 1; zi += 2)
+                            {
+                                Vector3 lc = rt.InverseTransformPoint(
+                                    c + new Vector3(xi * e.x, yi * e.y, zi * e.z));
+                                if (localAabb == null) localAabb = new Bounds(lc, Vector3.zero);
+                                else { var b = localAabb.Value; b.Encapsulate(lc); localAabb = b; }
+                            }
+                }
+                if (localAabb == null) return;
+                var la = localAabb.Value;
+                if (la.size.sqrMagnitude < 0.01f) return;        // degenerate
+
+                var bc = root.AddComponent<BoxCollider>();
+                bc.center = la.center;
+                bc.size = la.size;
+
+                MapEditorPlugin.Logger.LogInfo(
+                    $"[PLACE] '{root.name}' had no colliders — added 1 box collider (AABB {la.size.x:0.#}x{la.size.y:0.#}x{la.size.z:0.#}) for raycast picking + play-mode physics.");
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[PLACE] Could not add colliders to '{root.name}': {ex.Message}");
+            }
         }
 
         public void ApplyTint(PlacedObject placed, TintColor tint)

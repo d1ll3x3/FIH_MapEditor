@@ -208,6 +208,7 @@ namespace FIHMapEditor
                     RememberPick(screenPos, placed.Root.transform, additive);
                     if (additive) Current = new Selection { Placed = placed };
                     else Select(placed); // group-aware
+                    LogColliderPhysics(placed.Root, "clone");
                     return true;
                 }
 
@@ -219,6 +220,7 @@ namespace FIHMapEditor
                     if (!additive) Multi.Clear();
                     Current = new Selection { Raw = root.gameObject };
                     LogRawPickDebug(bestTransform, root);
+                    LogColliderPhysics(root.gameObject, "original");
                     return true;
                 }
 
@@ -464,13 +466,23 @@ namespace FIHMapEditor
             return true;
         }
 
-        // Hierarchy dump on every raw (level-object) pick: which node the ray hit, what
-        // root the climb resolved, and what lives around it. This is the evidence trail
-        // for objects whose visuals and colliders the game keeps in separate branches.
+        // One-line breadcrumb on every raw (level-object) pick: which node the ray hit
+        // and what root the climb resolved to. The verbose "climb into parent / root
+        // children" hierarchy dump used to be appended here — turned into a spam
+        // multiplier (24 children × 2 sections per click) so the log file was
+        // unreadable. If you need the full hierarchy for a specific case, flip
+        // VERBOSE_PICK_DUMP to true and rebuild.
+        private static bool VERBOSE_PICK_DUMP = false;
         private static void LogRawPickDebug(Transform hit, Transform root)
         {
             try
             {
+                if (!VERBOSE_PICK_DUMP)
+                {
+                    MapEditorPlugin.Logger.LogInfo(
+                        $"[SELECT] raw pick hit='{ObjectCatalog.BuildPath(hit)}' root='{ObjectCatalog.BuildPath(root)}'");
+                    return;
+                }
                 var sb = new System.Text.StringBuilder();
                 sb.AppendLine($"[SELECT] raw pick hit='{ObjectCatalog.BuildPath(hit)}' root='{ObjectCatalog.BuildPath(root)}'");
                 var p = root.parent;
@@ -498,6 +510,47 @@ namespace FIHMapEditor
                 return $"[renderers:{r} colliders:{c}{(rb ? " rigidbody" : "")}{(t.gameObject.activeInHierarchy ? "" : " INACTIVE")}]";
             }
             catch { return "[?]"; }
+        }
+
+        // Physics fingerprint of the colliders under a root. Used to be a full
+        // per-collider dump (type, layer, trigger, physic material) — every pick
+        // spammed 5-10 lines into the log. Collapsed to a single count line; if
+        // you need the per-collider details for a specific case, flip
+        // VERBOSE_COLLIDER_DUMP to true and rebuild.
+        private static bool VERBOSE_COLLIDER_DUMP = false;
+        public static void LogColliderPhysics(GameObject root, string label)
+        {
+            try
+            {
+                var cols = root.GetComponentsInChildren<Collider>(true);
+                if (!VERBOSE_COLLIDER_DUMP)
+                {
+                    MapEditorPlugin.Logger.LogInfo(
+                        $"[SELECT] physics of {label} '{root.name}' ({cols.Length} collider(s))");
+                    return;
+                }
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine($"[SELECT] physics of {label} '{root.name}' ({cols.Length} collider(s)):");
+                int shown = 0;
+                foreach (var col in cols)
+                {
+                    if (col == null || shown++ >= 10) continue;
+                    string mat;
+                    try
+                    {
+                        var pm = col.sharedMaterial;
+                        mat = pm == null
+                            ? "none"
+                            : $"'{pm.name}' dynFric={pm.dynamicFriction:0.###} statFric={pm.staticFriction:0.###} " +
+                              $"bounce={pm.bounciness:0.###} fricCombine={pm.frictionCombine} bounceCombine={pm.bounceCombine}";
+                    }
+                    catch { mat = "?"; }
+                    sb.AppendLine($"    - '{col.name}' type={col.GetType().Name} layer={col.gameObject.layer} " +
+                                  $"trigger={col.isTrigger} enabled={col.enabled} mat={mat}");
+                }
+                MapEditorPlugin.Logger.LogInfo(sb.ToString());
+            }
+            catch { }
         }
 
         // Public: the invisible-collider visualizer groups colliders by the same root.

@@ -51,6 +51,21 @@ namespace FIHMapEditor
             public ulong Id;
             public string Name = "?";
             public float LastHello;
+            // From the structured HELLO: whether the peer is currently in Play mode on
+            // a ball map, and which map. Ball authority is only contested among peers
+            // actually PLAYING the same map — a lobby idler with a low SteamID must
+            // never be "authority" of a match it isn't even simulating.
+            public bool InPlay;
+            public string MapId = "";
+        }
+
+        // Structured HELLO payload. Legacy clients sent the bare persona name; parsing
+        // falls back to that, leaving InPlay=false (legacy peers never win elections).
+        private class HelloEnvelope
+        {
+            public string N { get; set; }
+            public bool P { get; set; }
+            public string M { get; set; }
         }
 
         // One change to one syncable unit. Payload is that unit's own JSON (or null for
@@ -86,6 +101,16 @@ namespace FIHMapEditor
         private const int K_BASEMODE = 12, K_MAPNAME = 13;
         private const int K_MAPID = 14;   // whole-map swaps re-key the leaderboard too
         private const int K_EDITABLE = 15; // play-only lock must follow a synced map swap
+
+        // Soccer PLACEMENT (kickoff point, goal boxes, scoreboard marker) — editor-time
+        // config, distinct from the live ball position/velocity broadcast over MSG_BALL.
+        // Without these, a peer who never placed soccer themselves never gets it: their
+        // client has no Ball/SoccerGoals, so it never spawns the ball or runs
+        // UpdateSoccer at all — which is why "the ball freezes and clients don't see it"
+        // (the other side simply never received what to simulate).
+        private const int K_BALL = 16, K_BALL_CLEAR = 17;
+        private const int K_SOCCERGOAL_UPSERT = 18, K_SOCCERGOAL_DELETE = 19;
+        private const int K_SCOREBOARD = 20, K_SCOREBOARD_CLEAR = 21;
 
         private static readonly JsonSerializerOptions JsonOpts = new JsonSerializerOptions
         {
@@ -350,6 +375,11 @@ namespace FIHMapEditor
             snap["mapname"] = JsonSerializer.Serialize(map.Name ?? "");
             snap["mapid"] = JsonSerializer.Serialize(map.MapId ?? "");
             snap["editable"] = JsonSerializer.Serialize(map.Editable);
+            if (map.Ball != null) snap["ball"] = JsonSerializer.Serialize(map.Ball, JsonOpts);
+            foreach (var g in map.SoccerGoals)
+                if (!string.IsNullOrEmpty(g.Uid))
+                    snap["soccergoal:" + g.Uid] = JsonSerializer.Serialize(g, JsonOpts);
+            if (map.Scoreboard != null) snap["scoreboard"] = JsonSerializer.Serialize(map.Scoreboard, JsonOpts);
             return snap;
         }
 
@@ -365,6 +395,9 @@ namespace FIHMapEditor
             if (key == "mapname") return K_MAPNAME;
             if (key == "mapid") return K_MAPID;
             if (key == "editable") return K_EDITABLE;
+            if (key == "ball") return K_BALL;
+            if (key.StartsWith("soccergoal:")) return K_SOCCERGOAL_UPSERT;
+            if (key == "scoreboard") return K_SCOREBOARD;
             return -1;
         }
 
@@ -376,7 +409,10 @@ namespace FIHMapEditor
             if (key.StartsWith("lvl:")) return K_LVL_REVERT;
             if (key == "spawn") return K_SPAWN_CLEAR;
             if (key == "goal") return K_GOAL_CLEAR;
-            return -1; // basemode/mapname/mapid are never absent
+            if (key == "ball") return K_BALL_CLEAR;
+            if (key.StartsWith("soccergoal:")) return K_SOCCERGOAL_DELETE;
+            if (key == "scoreboard") return K_SCOREBOARD_CLEAR;
+            return -1; // basemode/mapname/mapid/editable are never absent
         }
 
         // Diffs the live map against what we last sent, bumping this session's own
@@ -438,7 +474,13 @@ namespace FIHMapEditor
         {
             string name = "player";
             try { name = SteamFriends.GetPersonaName(); } catch { }
-            var payload = Encoding.UTF8.GetBytes(name);
+            var env = new HelloEnvelope
+            {
+                N = name,
+                P = _c.Mode == EditorMode.Play && _c.Ball != null,
+                M = _c.MapId ?? "",
+            };
+            var payload = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(env, JsonOpts));
             foreach (var id in _lobbyMembers)
                 SendTo(id, MSG_HELLO, payload);
         }
@@ -488,16 +530,33 @@ namespace FIHMapEditor
 
         // ─────────────────────────────────────────────────────────── soccer ball ──
 
-        // The lobby's lowest modded SteamID simulates the ball and counts goals; the
-        // rest run kinematic followers. Alone (no fresh peers) = always authority.
-        public bool IsBallAuthority
+        public ulong SelfId
         {
             get
             {
                 if (_selfId == 0)
-                    try { _selfId = SteamUser.GetSteamID().m_SteamID; } catch { return true; }
+                    try { _selfId = SteamUser.GetSteamID().m_SteamID; } catch { }
+                return _selfId;
+            }
+        }
+
+        // The lowest modded SteamID AMONG THE PLAYERS ACTUALLY IN PLAY ON THIS MAP
+        // simulates the ball and counts goals; the rest run followers. A lobby member
+        // who is editing / idling / on another map never wins the election — electing
+        // someone who isn't simulating left every real player ball-less ("desync").
+        // Alone (no fresh playing peers) = always authority.
+        public bool IsBallAuthority
+        {
+            get
+            {
+                if (SelfId == 0) return true;
                 foreach (var p in FreshPeers())
-                    if (p.Id != 0 && p.Id < _selfId) return false;
+                {
+                    if (p.Id == 0 || p.Id >= _selfId) continue;
+                    if (!p.InPlay) continue;
+                    if (!string.IsNullOrEmpty(p.MapId) && p.MapId != (_c.MapId ?? "")) continue;
+                    return false;
+                }
                 return true;
             }
         }
@@ -593,7 +652,25 @@ namespace FIHMapEditor
                             _peers[senderId] = peer;
                         }
                         peer.LastHello = Time.unscaledTime;
-                        try { peer.Name = Encoding.UTF8.GetString(payload); } catch { }
+                        try
+                        {
+                            string raw = Encoding.UTF8.GetString(payload);
+                            try
+                            {
+                                var env = JsonSerializer.Deserialize<HelloEnvelope>(raw, JsonOpts);
+                                peer.Name = string.IsNullOrEmpty(env?.N) ? raw : env.N;
+                                peer.InPlay = env?.P ?? false;
+                                peer.MapId = env?.M ?? "";
+                            }
+                            catch
+                            {
+                                // Legacy bare-name HELLO from an old client.
+                                peer.Name = raw;
+                                peer.InPlay = false;
+                                peer.MapId = "";
+                            }
+                        }
+                        catch { }
                         if (isNew)
                         {
                             MapEditorPlugin.Logger.LogInfo($"[COOP] Modded peer joined: {peer.Name} ({senderId})");
@@ -654,7 +731,7 @@ namespace FIHMapEditor
                         Vector3 vel = VecUtil.ToVector3(env.V);
                         int a = env.A, b = env.B;
                         bool kick = env.K;
-                        _c.RunOnMainThread(() => _c.PlayMode.ApplyRemoteBall(pos, vel, a, b, kick));
+                        _c.RunOnMainThread(() => _c.PlayMode.ApplyRemoteBall(senderId, pos, vel, a, b, kick));
                         break;
                     }
                 }
@@ -706,6 +783,12 @@ namespace FIHMapEditor
                     case K_MAPNAME: _c.ApplyRemoteMapName(Deserialize<string>(op.Payload)); break;
                     case K_MAPID: _c.ApplyRemoteMapId(Deserialize<string>(op.Payload)); break;
                     case K_EDITABLE: _c.ApplyRemoteEditable(Deserialize<bool>(op.Payload)); break;
+                    case K_BALL: _c.ApplyRemoteBallMarker(Deserialize<BallData>(op.Payload)); break;
+                    case K_BALL_CLEAR: _c.ApplyRemoteBallMarker(null); break;
+                    case K_SOCCERGOAL_UPSERT: _c.ApplyRemoteSoccerGoalUpsert(Deserialize<SoccerGoalData>(op.Payload)); break;
+                    case K_SOCCERGOAL_DELETE: _c.ApplyRemoteSoccerGoalDelete(op.Key.Substring("soccergoal:".Length)); break;
+                    case K_SCOREBOARD: _c.ApplyRemoteScoreboard(Deserialize<ScoreboardData>(op.Payload)); break;
+                    case K_SCOREBOARD_CLEAR: _c.ApplyRemoteScoreboard(null); break;
                 }
             }
             catch (Exception ex)

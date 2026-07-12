@@ -65,7 +65,12 @@ namespace FIHMapEditor
         private float _goalCooldownUntil = 0f;
         public int ScoreA { get; private set; }   // team 0
         public int ScoreB { get; private set; }   // team 1
+        // HasSoccer gates SCORING/HUD (needs goals to score into). The ball itself —
+        // physics, kicks and ONLINE SYNC — only needs the ball to exist: gating the
+        // sync behind goals silently gave every player their own local ball on maps
+        // with a ball but no goals yet ("the ball desyncs").
         public bool HasSoccer => _ball != null && _soccerGoals.Count > 0;
+        private bool HasBall => _ball != null && _soccerBall.Alive;
         // Brief "GOAL!" flash for the HUD.
         public float GoalFlashUntil { get; private set; }
 
@@ -74,11 +79,13 @@ namespace FIHMapEditor
         // goals and broadcasts state; everyone else runs a kinematic follower ball and
         // sends kick requests. Defaults keep everything fully local in singleplayer.
         public Func<bool> BallAuthority = () => true;
+        public Func<ulong> LocalSteamId = () => 0;
         public Action<Vector3, Vector3, int, int, bool> BallSend;   // pos, vel, scoreA, scoreB, isKick
         private bool _ballWasAuthority = true;
         private float _nextBallSendAt;
         private Vector3 _remoteBallPos, _remoteBallVel;
         private float _remoteBallAt = -999f;
+        private float _outrankedUntil = -999f;   // a lower SteamID is actively broadcasting
 
         // Manual kick: physics alone is unreliable (the player's collider layer may
         // ignore the ball's), so any player body overlapping the ball shoves it.
@@ -155,6 +162,7 @@ namespace FIHMapEditor
             _goalCooldownUntil = 0f;
             _ballWasAuthority = true;
             _remoteBallAt = -999f;
+            _outrankedUntil = -999f;
             _playerLastPos.Clear();
             if (_ball?.Center != null)
                 _soccerBall.Spawn(VecUtil.ToVector3(_ball.Center), _ball.Radius, ChooseBallLayer());
@@ -212,7 +220,7 @@ namespace FIHMapEditor
             NewBest = false;
             UploadPrompt = UploadPromptState.None;
             // A full restart also resets the match: score to 0 and ball back to centre.
-            if (HasSoccer) SpawnSoccerBall();
+            if (_ball != null) SpawnSoccerBall();
         }
 
         // R key: retry from the last collected coin, keeping the run timer going.
@@ -301,16 +309,24 @@ namespace FIHMapEditor
             }
 
             // Soccer runs independently of the run timer — it's a match, not a run.
-            if (HasSoccer && _soccerBall.Alive && !paused)
+            if (HasBall && !paused)
                 UpdateSoccer();
         }
 
         private void UpdateSoccer()
         {
             bool authority = BallAuthority?.Invoke() ?? true;
+            // Instant conflict resolution: someone with a LOWER SteamID is actively
+            // broadcasting ball states — they outrank us no matter what our (possibly
+            // seconds-stale) peer table says. Yield immediately instead of running a
+            // second simulation; the window renews with each of their packets.
+            if (authority && Time.unscaledTime < _outrankedUntil) authority = false;
+
             if (authority != _ballWasAuthority)
             {
-                // Role flip (a peer joined/left): follower balls freeze local physics.
+                // Role flip (a peer joined/left/started playing): follower balls freeze
+                // local physics; the freeze-guard in UpdateSoccerFollower un-freezes if
+                // states stop arriving.
                 _soccerBall.SetKinematic(!authority);
                 _ballWasAuthority = authority;
                 MapEditorPlugin.Logger.LogInfo($"[BALL] Ball authority: {authority}");
@@ -368,14 +384,30 @@ namespace FIHMapEditor
 
         private void UpdateSoccerFollower()
         {
+            // Freeze-guard: a follower whose authority isn't actually feeding it states
+            // (different map copy → MapId filter drops the packets, version mismatch,
+            // authority not in Play) must NOT sit kinematic forever — that's the
+            // "ball freezes solid the moment my friend connects" report. No fresh state
+            // in 3s → run plain local physics until states show up again.
+            bool receiving = _remoteBallAt > 0 && Time.unscaledTime - _remoteBallAt < 3f;
+            if (!receiving)
+            {
+                if (_soccerBall.Rb != null && _soccerBall.Rb.isKinematic)
+                {
+                    _soccerBall.SetKinematic(false);
+                    MapEditorPlugin.Logger.LogInfo("[BALL] Follower without authority states — running the ball locally.");
+                }
+                TryKick(sendRemote: false);
+                return;
+            }
+            if (_soccerBall.Rb != null && !_soccerBall.Rb.isKinematic)
+                _soccerBall.SetKinematic(true);
+
             // Move our kinematic ball toward the authority's state, extrapolating with
             // its last velocity so it doesn't stutter between packets.
-            if (_remoteBallAt > 0)
-            {
-                float age = Mathf.Min(Time.unscaledTime - _remoteBallAt, 0.5f);
-                Vector3 target = _remoteBallPos + _remoteBallVel * age;
-                _soccerBall.MoveTo(Vector3.Lerp(_soccerBall.Position, target, Time.deltaTime * 12f));
-            }
+            float age = Mathf.Min(Time.unscaledTime - _remoteBallAt, 0.5f);
+            Vector3 target = _remoteBallPos + _remoteBallVel * age;
+            _soccerBall.MoveTo(Vector3.Lerp(_soccerBall.Position, target, Time.deltaTime * 12f));
 
             // Local kicks are requests: the authority applies them and echoes the result.
             TryKick(sendRemote: true);
@@ -460,11 +492,11 @@ namespace FIHMapEditor
         }
 
         // A ball message arrived over P2P (routed via EditorController on main thread).
-        public void ApplyRemoteBall(Vector3 pos, Vector3 vel, int a, int b, bool isKick)
+        public void ApplyRemoteBall(ulong senderId, Vector3 pos, Vector3 vel, int a, int b, bool isKick)
         {
-            if (!HasSoccer || !_soccerBall.Alive) return;
+            if (!HasBall) return;
 
-            bool authority = BallAuthority?.Invoke() ?? true;
+            bool authority = _ballWasAuthority;
             if (isKick)
             {
                 // A follower asked to kick: the authority applies it if plausible.
@@ -473,7 +505,15 @@ namespace FIHMapEditor
                 return;
             }
 
-            if (authority) return;   // stale state from an old authority — ignore
+            // Ball STATE from a LOWER SteamID: they outrank us — yield instantly even
+            // if our own peer table still says we're authority (it can lag seconds
+            // behind; two simulations even for a moment reads as "desync"). State from
+            // a higher id while we're authority is the stale old authority winding
+            // down — ignore it.
+            ulong self = LocalSteamId?.Invoke() ?? 0;
+            bool senderOutranksUs = self == 0 || senderId < self;
+            if (authority && !senderOutranksUs) return;
+            if (senderOutranksUs) _outrankedUntil = Time.unscaledTime + 2f;
 
             _remoteBallPos = pos;
             _remoteBallVel = vel;

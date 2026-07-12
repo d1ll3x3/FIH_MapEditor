@@ -116,6 +116,11 @@ namespace FIHMapEditor
         // Arbitrary RGB (0..1), set via the color picker; overrides Tint when present.
         public float[] CustomColor { get; set; }
 
+        // v11: mesh-generated collision for collider-less sources (SM_* visuals whose
+        // real collision lives in the level's combined chunk mesh and can't be cloned).
+        // null = legacy/off; new placements of collider-less objects default to true.
+        public bool? Solid { get; set; }
+
         // Mechanics (v4). Null/None on plain scenery and on older files.
         public MechanicType Mechanic { get; set; } = MechanicType.None;
         public float? BoostForce { get; set; }
