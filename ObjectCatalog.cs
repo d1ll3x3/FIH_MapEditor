@@ -70,17 +70,32 @@ namespace FIHMapEditor
             int added = 0;
             try
             {
+                // Dedup the pull against the LOCAL catalog by SourcePath, NOT by the
+                // cloud key. Locally scanned/cached entries are keyed in _seen by
+                // Name|MeshName, but the pull can only re-derive Name|PathFragment
+                // (MakeCloudKey) — the mesh name was never stored in the cloud — so the
+                // two keys never match for the same object and every object the user
+                // already has would be added a second time (the catalog would double on
+                // the first scan of every session once the cloud table is seeded).
+                // SourcePath is the object's real hierarchy identity and is stored on
+                // both sides, so it dedups correctly (and collapses intra-pull dups too).
+                var knownPaths = new HashSet<string>();
+                foreach (var ee in Entries)
+                    if (!string.IsNullOrEmpty(ee.SourcePath)) knownPaths.Add(ee.SourcePath);
+
                 foreach (var e in pulled)
                 {
                     if (e == null) continue;
-                    // We don't have a mesh-name on the pulled entry (the cloud
-                    // stored Name|PathFragment, not Name|MeshName), so the
-                    // seen-dict key here is a re-derivation. As long as the
-                    // pull never duplicates a local key, we're fine — and we
-                    // check for the same key by matching the path+name pair.
-                    string key = MakeCloudKey(e);
-                    if (_seen.ContainsKey(key)) continue;
-                    _seen[key] = e;
+                    if (!string.IsNullOrEmpty(e.SourcePath))
+                    {
+                        // Already have this object (or a duplicate within the pull).
+                        if (!knownPaths.Add(e.SourcePath)) continue;
+                    }
+                    else if (_seen.ContainsKey(MakeCloudKey(e)))
+                    {
+                        continue;   // no path to match on — fall back to the cloud key
+                    }
+                    _seen[MakeCloudKey(e)] = e;
                     Entries.Add(e);
                     added++;
                 }
