@@ -14,6 +14,9 @@ namespace FIHMapEditor
 
         private readonly List<Renderer> _disabledRenderers = new List<Renderer>();
         private readonly List<Collider> _disabledColliders = new List<Collider>();
+        // B2: original layers so Restore can put each collider back on the layer it
+        // was on before we moved it to HiddenLayer.
+        private readonly List<int> _disabledColliderLayers = new List<int>();
 
         public bool IsActive { get; private set; }
 
@@ -29,6 +32,7 @@ namespace FIHMapEditor
             {
                 _disabledRenderers.Clear();
                 _disabledColliders.Clear();
+                _disabledColliderLayers.Clear();
 
                 var playerRoot = _finder.FindPlayer()?.transform?.root;
 
@@ -47,17 +51,24 @@ namespace FIHMapEditor
                 {
                     if (c == null || !c.enabled) continue;
                     if (!IsWipeable(c.transform, playerRoot)) continue;
-                    // Remove from the game's ground system BEFORE disabling: a disabled
-                    // collider never fires OnCollisionExit, so without this the player
-                    // gets left "grounded" on a collider that no longer exists.
-                    GroundRegistrar.Unregister(c);
-                    c.enabled = false;
+                    // B2: move to HiddenLayer instead of c.enabled = false. Unity fires
+                    // OnCollisionExit when the collider leaves the player's collision
+                    // matrix, so the game's grounded tracker properly forgets the touch.
+                    int original = HiddenLayer.MoveTo(c);
+                    if (original < 0)
+                    {
+                        // HiddenLayer not initialised — fall back to the old path.
+                        GroundRegistrar.Unregister(c);
+                        c.enabled = false;
+                        original = -1;
+                    }
                     _disabledColliders.Add(c);
+                    _disabledColliderLayers.Add(original);
                 }
 
                 IsActive = true;
                 MapEditorPlugin.Logger.LogInfo(
-                    $"[BLANK] Hidden {_disabledRenderers.Count} renderers / {_disabledColliders.Count} colliders.");
+                    $"[BLANK] Hidden {_disabledRenderers.Count} renderers / {_disabledColliders.Count} colliders → HiddenLayer.");
             }
             catch (Exception ex)
             {
@@ -87,17 +98,24 @@ namespace FIHMapEditor
                 {
                     if (r != null) { r.enabled = true; restored++; }
                 }
-                foreach (var c in _disabledColliders)
+                for (int i = 0; i < _disabledColliders.Count; i++)
                 {
-                    if (c != null)
+                    var c = _disabledColliders[i];
+                    if (c == null) continue;
+                    int original = (i < _disabledColliderLayers.Count) ? _disabledColliderLayers[i] : -1;
+                    if (original >= 0)
+                        HiddenLayer.Restore(c, original);
+                    else
                     {
+                        // Legacy fallback.
                         c.enabled = true;
-                        GroundRegistrar.RegisterLevelCollider(c); // put it back in the ground system
-                        restored++;
+                        GroundRegistrar.RegisterLevelCollider(c);
                     }
+                    restored++;
                 }
                 _disabledRenderers.Clear();
                 _disabledColliders.Clear();
+                _disabledColliderLayers.Clear();
                 IsActive = false;
                 MapEditorPlugin.Logger.LogInfo($"[BLANK] Restored {restored} components.");
             }
@@ -112,6 +130,7 @@ namespace FIHMapEditor
         {
             _disabledRenderers.Clear();
             _disabledColliders.Clear();
+            _disabledColliderLayers.Clear();
             IsActive = false;
         }
 

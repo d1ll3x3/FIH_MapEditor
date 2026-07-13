@@ -78,6 +78,10 @@ namespace FIHMapEditor
         // in range (SetUiScale clamps on write), this just guards a hand-edited config.
         public static float UiScale => Mathf.Clamp(Settings.GuiScale, 0.5f, 2f);
 
+        // Gates the per-object log lines ([PLACE]/[GROUND]/[CATALOG]) that repeat dozens
+        // of times per map load. Flip to true and rebuild when debugging.
+        public static bool VerboseLogs = false;
+
         public static void Load()
         {
             try

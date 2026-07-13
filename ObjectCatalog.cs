@@ -45,6 +45,77 @@ namespace FIHMapEditor
         // Bumped on every Scan()/Clear() so GUI-side caches of Entries can invalidate.
         public int ScanVersion { get; private set; }
 
+        // CatalogSyncService hook. Set by EditorController after construction; the
+        // catalog uses it to push newly discovered entries and to pull the
+        // community catalog for this scene the first time it scans. Null = sync
+        // disabled (test rigs, singleplayer with no Supabase config).
+        public CatalogSyncService Sync;
+
+        // First-scan-per-session latch. The Scan loop fires multiple times during
+        // warm-up (EditorController schedules 3 rescan passes at 10/25/60s). We
+        // only want the cloud pull once — set on the very first Scan(), reset
+        // by Reset() when the user leaves the game scene.
+        public bool HasScannedPreviously { get; private set; }
+
+        // Called by the sync service from a background task when a community
+        // catalog pull finishes. The result is added to the seen-dict + entries
+        // list (only if the key is new — never overwrite a local entry, the
+        // local one is always fresher). Then we bump ScanVersion so the GUI
+        // re-renders and rebuild categories. Safe to call from any thread
+        // because the only Unity access is reading SceneManager (caller does
+        // the dispatch through ApplyOnMainThread).
+        public void ApplyPulledEntries(List<CatalogEntry> pulled)
+        {
+            if (pulled == null || pulled.Count == 0) return;
+            int added = 0;
+            try
+            {
+                foreach (var e in pulled)
+                {
+                    if (e == null) continue;
+                    // We don't have a mesh-name on the pulled entry (the cloud
+                    // stored Name|PathFragment, not Name|MeshName), so the
+                    // seen-dict key here is a re-derivation. As long as the
+                    // pull never duplicates a local key, we're fine — and we
+                    // check for the same key by matching the path+name pair.
+                    string key = MakeCloudKey(e);
+                    if (_seen.ContainsKey(key)) continue;
+                    _seen[key] = e;
+                    Entries.Add(e);
+                    added++;
+                }
+                if (added > 0)
+                {
+                    // Re-derive categories so the GUI shows the new entries in
+                    // the right tab. Sort again so the list stays stable.
+                    Categories.Clear();
+                    foreach (var ee in Entries)
+                        if (!Categories.Contains(ee.Category)) Categories.Add(ee.Category);
+                    Categories.Sort();
+                    Entries.Sort((a, b) => string.CompareOrdinal(a.DisplayName, b.DisplayName));
+                    ScanVersion++;
+                    MapEditorPlugin.Logger.LogInfo(
+                        $"[CATALOG] Community pull merged {added} new entries (total {Entries.Count}).");
+                }
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[CATALOG] ApplyPulledEntries error: {ex.Message}");
+            }
+        }
+
+        // Cloud key derivation: mirrors CatalogSyncService.MakeKey so the
+        // seen-dict lookup is symmetric — what was pushed is what gets merged
+        // back. We have to keep both in lockstep.
+        public static string MakeCloudKey(CatalogEntry e)
+        {
+            if (e == null) return "";
+            string dn = e.DisplayName ?? "";
+            string sp = e.SourcePath ?? "";
+            string tail = sp.Length > 64 ? sp.Substring(sp.Length - 64) : sp;
+            return dn + "|" + tail;
+        }
+
         // Scans are ADDITIVE within a scene session: the game loads assets and spawns
         // objects lazily, so later scans discover things the first one couldn't see.
         // An entry, once found, is never dropped — only Clear() (scene change) resets.
@@ -152,6 +223,10 @@ namespace FIHMapEditor
             ColliderlessRoots.Clear();
             _seen.Clear();
             HasScanned = false;
+            // Also reset the first-scan latch so the next scene gets its own
+            // community pull (instead of inheriting "we already pulled this
+            // session" from a different scene).
+            HasScannedPreviously = false;
             ScanVersion++;
         }
 
@@ -176,6 +251,18 @@ namespace FIHMapEditor
             ScanVersion++;
             LastScanTime = Time.unscaledTime;
             int entriesBefore = Entries.Count;
+
+            // Snapshot the keys we already know so we can identify the new ones
+            // after the scan for the cloud-push hook. Cheap (one HashSet copy).
+            // We capture only when sync is configured — otherwise this allocates
+            // for nothing.
+            HashSet<string> keysBeforeScan = null;
+            string sceneName = null;
+            if (Sync != null && Sync.Configured)
+            {
+                keysBeforeScan = new HashSet<string>(_seen.Keys);
+                sceneName = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
+            }
 
             try
             {
@@ -333,6 +420,48 @@ namespace FIHMapEditor
                     _sourcesUpgraded = false;
                     SaveCache();
                 }
+
+                // Cloud sync hooks: only run when the service is configured AND
+                // we're in a scene worth cataloguing (filters out the loading
+                // screen scene where scans also fire as a side effect of
+                // editor-open warm-up).
+                if (Sync != null && Sync.Configured && keysBeforeScan != null
+                    && !string.IsNullOrEmpty(sceneName)
+                    && sceneName.StartsWith("Scene_Game", StringComparison.Ordinal))
+                {
+                    // 1) Push: any keys we didn't have before this scan are new.
+                    //    Cheap because the seen-dict already has the full
+                    //    post-scan state and we just diff against the snapshot.
+                    int newCount = 0;
+                    foreach (var key in _seen.Keys)
+                    {
+                        if (!keysBeforeScan.Contains(key)) newCount++;
+                    }
+                    if (newCount > 0)
+                    {
+                        var newEntries = new List<CatalogEntry>(newCount);
+                        foreach (var key in _seen.Keys)
+                        {
+                            if (keysBeforeScan.Contains(key)) continue;
+                            if (_seen.TryGetValue(key, out var e) && e != null)
+                                newEntries.Add(e);
+                        }
+                        Sync.OnEntriesDiscovered(sceneName, newEntries);
+                        MapEditorPlugin.Logger.LogInfo(
+                            $"[CATALOG] {newEntries.Count} new entries queued for cloud push (scene '{sceneName}').");
+                    }
+
+                    // 2) Pull: only the first time we see this scene in this
+                    //    session. The service tracks "pulled this session" so
+                    //    warm-up rescans don't spam the backend. Schedule via
+                    //    the applyOnMainThread callback so the merge lands on
+                    //    the right thread.
+                    if (!HasScannedPreviously)   // first scan of this scene in this session
+                    {
+                        HasScannedPreviously = true;
+                        Sync.RequestPull(sceneName, ApplyPulledEntries);
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -385,7 +514,8 @@ namespace FIHMapEditor
                     Entries.Add(entry);
                     added++;
                 }
-                MapEditorPlugin.Logger.LogInfo($"[CATALOG] Inactive-object scan added {added} hidden entries.");
+                if (EditorConfig.VerboseLogs)
+                    MapEditorPlugin.Logger.LogInfo($"[CATALOG] Inactive-object scan added {added} hidden entries.");
             }
             catch (Exception ex)
             {
@@ -443,7 +573,8 @@ namespace FIHMapEditor
                     Entries.Add(entry);
                     added++;
                 }
-                MapEditorPlugin.Logger.LogInfo($"[CATALOG] Mechanics-assembly scan added {added} entries.");
+                if (EditorConfig.VerboseLogs)
+                    MapEditorPlugin.Logger.LogInfo($"[CATALOG] Mechanics-assembly scan added {added} entries.");
             }
             catch (Exception ex)
             {
@@ -491,7 +622,8 @@ namespace FIHMapEditor
                     Entries.Add(entry);
                     added++;
                 }
-                MapEditorPlugin.Logger.LogInfo($"[CATALOG] Prefab-asset scan added {added} entries from game files.");
+                if (EditorConfig.VerboseLogs)
+                    MapEditorPlugin.Logger.LogInfo($"[CATALOG] Prefab-asset scan added {added} entries from game files.");
             }
             catch (Exception ex)
             {
@@ -599,8 +731,9 @@ namespace FIHMapEditor
                 entry.SourcePath = BuildPath(candidate.transform);
                 entry.HasCollider = candidate.GetComponentInChildren<Collider>(true) != null;
                 _sourcesUpgraded = true;
-                MapEditorPlugin.Logger.LogInfo(
-                    $"[CATALOG] '{entry.DisplayName}': source upgraded to a live visible instance ({entry.SourcePath}).");
+                if (EditorConfig.VerboseLogs)
+                    MapEditorPlugin.Logger.LogInfo(
+                        $"[CATALOG] '{entry.DisplayName}': source upgraded to a live visible instance ({entry.SourcePath}).");
             }
             catch { }
         }

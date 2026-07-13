@@ -39,7 +39,8 @@ namespace FIHMapEditor
                 rb.useGravity = false;
                 rb.detectCollisions = false;
                 _active = true;
-                MapEditorPlugin.Logger.LogInfo("[FLY] Editor fly ON");
+                if (EditorConfig.VerboseLogs)
+                    MapEditorPlugin.Logger.LogInfo("[FLY] Editor fly ON");
             }
             catch (Exception ex)
             {
@@ -66,7 +67,8 @@ namespace FIHMapEditor
                     }
                 }
                 _active = false;
-                MapEditorPlugin.Logger.LogInfo("[FLY] Editor fly OFF");
+                if (EditorConfig.VerboseLogs)
+                    MapEditorPlugin.Logger.LogInfo("[FLY] Editor fly OFF");
             }
             catch (Exception ex)
             {

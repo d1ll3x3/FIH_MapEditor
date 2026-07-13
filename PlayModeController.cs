@@ -876,11 +876,28 @@ namespace FIHMapEditor
 
         public void TeleportToSpawn() => TeleportTo(_spawnPos, _spawnYaw);
 
+        // Keep the stored spawn in sync on a map swap: _spawnPos is otherwise only set
+        // in Enter(), so the post-load teleport in ApplyMapFile used to send the player
+        // to the PREVIOUS map's spawn (visible in logs as a teleport to the old height
+        // right before the correct one).
+        public void UpdateSpawn(SpawnPointData spawn)
+        {
+            if (spawn?.Pos == null) return;
+            _spawnPos = VecUtil.ToVector3(spawn.Pos);
+            _spawnYaw = spawn.Yaw;
+        }
+
+        // Teleport, verbatim from the trainer's proven TeleportToSavedPosition: move the
+        // rigidbody, brief kinematic toggle to force a PhysX sync, zero velocity. Nothing
+        // else. The old jump/ground "forcing" (ResetJumpState / ForcePlayerGrounded /
+        // RestartJumpSystem / watchdog) fought the game's own respawn every frame and was
+        // the source of the stuck-jump bug — the trainer never touches any of that and its
+        // teleport never breaks the jump. Phone repair stays (self-gated no-op when intact,
+        // exactly like the trainer keeps PhoneRepair on teleport).
         private void TeleportTo(Vector3 position, float yaw)
         {
             _movedByUs = true;
             _lastPos = position;
-            MapEditorPlugin.Logger.LogInfo($"[PLAY] Mod teleport -> {position} (timer={Timer}, activeCp={ActiveCheckpoint})");
             try
             {
                 var playerT = _finder.FindPlayerTransform();
@@ -914,19 +931,16 @@ namespace FIHMapEditor
                 MapEditorPlugin.Logger.LogError($"[PLAY] Teleport error: {ex}");
             }
 
-            // Always auto-repair on any teleport/respawn — self-gated to a no-op when the
-            // phone is intact. Independent try/catch so a repair failure never aborts play.
+            // Auto-repair the phone on teleport — self-gated to a no-op when intact.
             try
             {
                 var player = _finder.FindPlayer();
                 if (player != null)
                 {
+                    // The teleport's Y delta must not count as a fall (it triggers the
+                    // game's fall respawn, which gets stuck on custom maps → jump blocked).
+                    PlayerRepair.ResetFallTracking(player);
                     PlayerRepair.Repair(player);
-                    // Clear any stuck grounded/jump state: on maps that wiped or hid
-                    // ground, the player may have been left "grounded" on a collider the
-                    // mod disabled (Unity never fires the exit). A respawn is a natural
-                    // moment to reset it.
-                    PlayerRepair.ResetJumpState(player);
                 }
             }
             catch (Exception ex)

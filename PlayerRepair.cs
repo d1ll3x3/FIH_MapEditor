@@ -1,6 +1,5 @@
 using System;
 using UnityEngine;
-using Il2CppInterop.Runtime;
 using Il2CppInterop.Runtime.InteropTypes.Arrays;
 
 namespace FIHMapEditor
@@ -17,6 +16,12 @@ namespace FIHMapEditor
     // the referenced Assembly-CSharp.dll) is isolated in try/catch methods; if those types
     // are missing (e.g. a future playtest build), the feature disables itself instead of
     // crashing.
+    //
+    // HISTORY (do not repeat): >20 iterations of per-frame jump/ground "forcing"
+    // (ResetJumpState, ForcePlayerGrounded, RestartJumpSystem, ClearAirControlBlocker,
+    // ClearRespawnStuck, watchdogs) lived here and were all removed — the forcing fought
+    // the game's own respawn and was itself the source of the stuck-jump bug. The real
+    // root cause is handled by ResetFallTracking below. Never re-add per-frame forcing.
     public static class PlayerRepair
     {
         // Cached per local player. Unity's overloaded == makes a destroyed component
@@ -26,83 +31,46 @@ namespace FIHMapEditor
         private static MonoBehaviour _playerRef;
         private static bool _unavailable;
 
-        // Cached component that exposes ResetJumpStateImmediate() — used to clear the
-        // stuck grounded/jump state after the mod removes ground colliders (see below).
-        private static MonoBehaviour _jumpComp;
-        private static Il2CppSystem.Reflection.MethodInfo _resetJump;
-        private static bool _jumpUnavailable;
-
         public static void Reset()
         {
             _handler = null;
             _playerNetworked = null;
             _playerRef = null;
-            _jumpComp = null;
-            _resetJump = null;
-            _jumpUnavailable = false;
             _unavailable = false;
         }
 
-        // Clear the player's jump/grounded state right now. The game exposes a public
-        // ResetJumpStateImmediate() for exactly this. We call it after removing ground
-        // colliders: Unity doesn't fire OnCollisionExit when a collider is disabled, so
-        // without this the player can be left "grounded" on ground that no longer exists
-        // — the endless jump-reset / slippery loop. Safe no-op if the API isn't found.
-        public static void ResetJumpState(GameObject localPlayer)
-        {
-            if (_jumpUnavailable || localPlayer == null) return;
-            try
-            {
-                if (_resetJump == null || _jumpComp == null)
-                {
-                    var root = localPlayer.transform.root != null
-                        ? localPlayer.transform.root.gameObject : localPlayer;
-                    foreach (var mb in root.GetComponentsInChildren<MonoBehaviour>(true))
-                    {
-                        if (mb == null) continue;
-                        Il2CppSystem.Reflection.MethodInfo m = null;
-                        try { m = mb.GetIl2CppType()?.GetMethod("ResetJumpStateImmediate"); }
-                        catch { }
-                        if (m == null) continue;
-                        _jumpComp = mb;
-                        _resetJump = m;
-                        break;
-                    }
-                    if (_resetJump == null)
-                    {
-                        _jumpUnavailable = true;
-                        MapEditorPlugin.Logger.LogWarning("[Repair] ResetJumpStateImmediate not found — stuck-jump fix unavailable.");
-                        return;
-                    }
-                }
-                _resetJump.Invoke(_jumpComp, null);
-            }
-            catch (Exception ex)
-            {
-                MapEditorPlugin.Logger.LogWarning($"[Repair] ResetJumpState error: {ex.Message}");
-            }
-        }
-
-        private static void Resolve(GameObject localPlayer)
+        // Root-cause fix for the stuck-jump-on-map-change bug: the mod's teleport moves
+        // the player with a huge Y delta, and EHS.PlayerFallData counts that as a lethal
+        // fall (fallStartPoint.y − posY > threshold) → the game fires its fall respawn,
+        // which gets stuck on custom maps and blocks jumping. This one-shot reset does
+        // exactly what the game itself does on landing — the fall now starts at the new
+        // position, so the teleport measures as a ~0m fall. A single per-teleport reset,
+        // not per-frame forcing. OnGroundEnter() is intentionally NOT called — that's
+        // where the game evaluates the fall consequence.
+        public static void ResetFallTracking(GameObject localPlayer)
         {
             if (localPlayer == null) return;
             var root = localPlayer.transform.root != null
-                ? localPlayer.transform.root.gameObject
-                : localPlayer;
+                ? localPlayer.transform.root.gameObject : localPlayer;
+            Vector3 pos = localPlayer.transform.position;
 
-            if (_handler == null)
-                _handler = root.GetComponentInChildren<EHS.DestroyedPhoneEffectHandler>(true);
-
-            if (_playerNetworked == null || _playerRef == null)
+            try
             {
-                foreach (var mb in root.GetComponentsInChildren<MonoBehaviour>(true))
+                var fd = root.GetComponentInChildren<EHS.PlayerFallData>(true);
+                if (fd == null)
                 {
-                    if (mb == null) continue;
-                    var t = mb.GetIl2CppType();
-                    if (t == null) continue;
-                    if (_playerNetworked == null && t.Name == "PlayerNetworked") _playerNetworked = mb;
-                    if (_playerRef == null && t.Name == "PlayerRef") _playerRef = mb;
+                    MapEditorPlugin.Logger.LogWarning("[FALL] PlayerFallData not found; fall tracking NOT reset.");
+                    return;
                 }
+                fd.fallStartPoint = pos.y;   // float: the game only tracks the start height
+                fd.lastFallDistance = 0f;
+                fd.groundEnterTime = Time.time;
+
+                MapEditorPlugin.Logger.LogInfo($"[FALL] Fall tracking reset at y={pos.y:0.##}.");
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[FALL] Fall-tracking reset failed: {ex.Message}");
             }
         }
 
@@ -164,28 +132,12 @@ namespace FIHMapEditor
                 // Only force a transition when actually destroyed — re-entering Normal on
                 // every teleport would needlessly reset movement/abilities (jump, run,
                 // abilities) and is the root cause of "the jump resets every time I
-                // spawn/respawn" reports.
-                //
-                // The stateName can be null when the reflection lookup fails: this game
-                // build doesn't expose CurrentStateName, the property getter throws, or
-                // the FSM is mid-transition. The previous code had
-                //   if (stateName != null && stateName.IndexOf("Destroy", ...) < 0) return;
-                // which looks correct but FAILS OPEN: when stateName is null the && is
-                // short-circuited, the early return is skipped, and the code falls
-                // through to setState — re-arming movement on every teleport, phone
-                // intact or not. Fix: bail out conservatively when we can't read the
-                // state at all (we have no way to know it's destroyed, so don't risk
-                // the reset).
-                if (stateName == null)
-                {
-                    MapEditorPlugin.Logger.LogInfo("[Repair] Cannot read FSM state name; skipping forced Normal (would reset movement on intact phones).");
+                // spawn/respawn" reports. When the state can't be read at all, bail out
+                // conservatively (we have no way to know it's destroyed, so don't risk
+                // the reset — a null used to FAIL OPEN here and re-arm movement on every
+                // teleport).
+                if (stateName == null || stateName.IndexOf("Destroy", StringComparison.OrdinalIgnoreCase) < 0)
                     return;
-                }
-                if (stateName.IndexOf("Destroy", StringComparison.OrdinalIgnoreCase) < 0)
-                {
-                    MapEditorPlugin.Logger.LogInfo($"[Repair] FSM in '{stateName}' (not destroyed); no forced Normal.");
-                    return;
-                }
 
                 var setState = fsmType.GetMethod("SetState");
                 if (setState == null) return;
@@ -216,6 +168,29 @@ namespace FIHMapEditor
             catch (Exception ex)
             {
                 MapEditorPlugin.Logger.LogWarning($"[Repair] reassemble RPC failed: {ex.Message}");
+            }
+        }
+
+        private static void Resolve(GameObject localPlayer)
+        {
+            if (localPlayer == null) return;
+            var root = localPlayer.transform.root != null
+                ? localPlayer.transform.root.gameObject
+                : localPlayer;
+
+            if (_handler == null)
+                _handler = root.GetComponentInChildren<EHS.DestroyedPhoneEffectHandler>(true);
+
+            if (_playerNetworked == null || _playerRef == null)
+            {
+                foreach (var mb in root.GetComponentsInChildren<MonoBehaviour>(true))
+                {
+                    if (mb == null) continue;
+                    var t = mb.GetIl2CppType();
+                    if (t == null) continue;
+                    if (_playerNetworked == null && t.Name == "PlayerNetworked") _playerNetworked = mb;
+                    if (_playerRef == null && t.Name == "PlayerRef") _playerRef = mb;
+                }
             }
         }
     }

@@ -63,6 +63,7 @@ namespace FIHMapEditor
         public MultiplayerSync Multiplayer { get; private set; }
         public LeaderboardService Leaderboard { get; private set; }
         public OnlineMapService OnlineMaps { get; private set; }
+        public CatalogSyncService CatalogSync { get; private set; }
 
         // Play-only map: the editor is locked when a non-editable online map is loaded.
         public bool ReadOnly { get; private set; }
@@ -186,6 +187,13 @@ namespace FIHMapEditor
             Multiplayer = new MultiplayerSync(this);
             Leaderboard = new LeaderboardService();
             OnlineMaps = new OnlineMapService();
+            CatalogSync = new CatalogSyncService();
+            // Hook the sync service into the catalog so every Scan can push
+            // newly discovered entries and pull the community catalog the
+            // first time the scene is scanned this session. Pull results merge
+            // into catalog state the main thread iterates → dispatch required.
+            CatalogSync.Dispatch = RunOnMainThread;
+            if (Catalog != null) Catalog.Sync = CatalogSync;
 
             // Every finished run offers to upload (HudRenderer draws the prompt); veto
             // immediately if there's nothing sensible to upload to.
@@ -272,6 +280,8 @@ namespace FIHMapEditor
                 TrackScene();
                 if (!InGameScene) return;
 
+                RespawnZoneGuard.Watch();
+                GroundContactFix.Tick(Finder.FindPlayer());
                 HandlePendingReapply();
                 Multiplayer.Update();
 
@@ -427,6 +437,9 @@ namespace FIHMapEditor
             Finder.ClearCache();
             PlayerRepair.Reset();
             GroundRegistrar.Reset();
+            CatalogSync?.Reset();
+            RespawnZoneGuard.OnSceneChanged();
+            CatalogSync?.Reset();
             _warmupBaseTime = -1f;
             _warmupScansDone = 0;
             PlacedManager.OnSceneChanged();
@@ -507,6 +520,11 @@ namespace FIHMapEditor
             if ((Mode == EditorMode.Editor || Mode == EditorMode.Off)
                 && Input.WasKeyPressed("mapsHub", s.MapsHubKey))
                 ToggleMapsHub();
+
+            // F9: one-shot dump of the jump/ground state (see GroundContactFix.Dump) —
+            // press it while a jump bug is live and the log tells us which flag stuck.
+            if (Input.WasKeyPressed("jumpDump", KeyCode.F9))
+                GroundContactFix.Dump(Finder.FindPlayer());
 
             // Ctrl-combos: work in editor mode whether the cursor is free or locked.
             if (Mode == EditorMode.Editor && !AnyTextFieldFocused() && Input.IsCtrlHeld())
@@ -1918,6 +1936,8 @@ namespace FIHMapEditor
                 {
                     RefreshSnapshot();
                     if (string.IsNullOrEmpty(MapId)) MapId = Guid.NewGuid().ToString("N");
+                    // Re-sweep: some zones are spawnable and may have appeared since load.
+                    RespawnZoneGuard.DisableAll();
                     PlayMode.Enter(Spawn, Goal, BaseMode == MapBaseMode.Blank, MapName, MapId,
                         Checkpoints, ResetZones, Ball, SoccerGoals);
                     ShowToast($"PLAY — {EditorConfig.Settings.RestartRunKey} / pad X: retry (last coin), Shift+{EditorConfig.Settings.RestartRunKey} / LB+X: full restart, {EditorConfig.Settings.TogglePlayKey}: editor");
@@ -1972,7 +1992,8 @@ namespace FIHMapEditor
             {
                 MapEditorPlugin.Logger.LogWarning($"[CURSOR] Error toggling cursor: {ex.Message}");
             }
-            MapEditorPlugin.Logger.LogInfo($"[CURSOR] free={free}");
+            if (EditorConfig.VerboseLogs)
+                MapEditorPlugin.Logger.LogInfo($"[CURSOR] free={free}");
         }
 
         // Independent of SetCursorFree/CursorFree (an Editor-mode concept): Play mode
@@ -2559,6 +2580,7 @@ namespace FIHMapEditor
             if (!Catalog.HasScanned) Catalog.Scan();
 
             PlacedManager.WipeAll();
+
             LevelEdits.RestoreAll();
             SelectionSys.Deselect();
             Undo.Clear();
@@ -2617,6 +2639,11 @@ namespace FIHMapEditor
 
             LevelEdits.Apply(map.LevelEdits, Catalog, out int editsApplied, out int editsSkipped);
 
+            // The game's touch-respawn zones must never fire while a custom map is
+            // active — a half-run pipe respawn leaves IsBeingRespawned stuck and kills
+            // the jump. The mod's spawn/checkpoints/reset zones own respawning here.
+            RespawnZoneGuard.DisableAll();
+
             LoadReport = pending == 0
                 ? $"{loaded} objects"
                 : $"{loaded} objects, {pending} pending (source not loaded yet — kept, retrying)";
@@ -2636,6 +2663,27 @@ namespace FIHMapEditor
             // re-apply the diff is empty, so this is a no-op there.
             Multiplayer?.NotifyDirty();
             MapEditorPlugin.Logger.LogInfo($"[MAP] Applied '{MapName}': {LoadReport}");
+
+            // After a map swap, drop the player onto the new map's spawn — the same
+            // simple trainer-style teleport used everywhere else in play.
+            if (PlayMode != null && Spawn != null && Spawn.Pos != null)
+            {
+                try
+                {
+                    PlayMode.UpdateSpawn(Spawn);   // NEW map's spawn, not the previous one
+                    PlayMode.TeleportToSpawn();
+                }
+                catch (Exception ex)
+                {
+                    MapEditorPlugin.Logger.LogWarning($"[MAP] Post-load teleport failed: {ex.Message}");
+                }
+            }
+
+            // WipeAll just destroyed the old map's ground — possibly under the player's
+            // feet, and Unity fires no OnCollisionExit for destroyed colliders. Schedule
+            // a ground-contact refresh so IsTouchingGround doesn't stay true forever
+            // (the "infinite jump after changing maps" bug).
+            GroundContactFix.ScheduleAfterMapSwap();
         }
 
         // ──────────────────────────────────────────────────────── edit operations ──

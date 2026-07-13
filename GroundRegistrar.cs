@@ -23,6 +23,14 @@ namespace FIHMapEditor
         private static bool _unavailable;
         private static bool _unregisterBroken;
 
+        // Diagnostic counters — see in the log whether Unregister is actually being
+        // called and succeeding. If _diagUnregisterCalls is 0 after a wipe, something
+        // is bypassing the hide/unhide path. If _diagUnregisterErrors > 0, the
+        // reflection is hitting a real exception (and we've given up).
+        public static int _diagUnregisterCalls;
+        public static int _diagUnregisterSuccess;
+        public static int _diagUnregisterErrors;
+
         // Scene reload kills the cached registry instance.
         public static void Reset()
         {
@@ -31,6 +39,32 @@ namespace FIHMapEditor
             _unregister = null;
             _unavailable = false;
             _unregisterBroken = false;
+            _fallbackGround = null;
+        }
+
+        // Default surface descriptor for clones that carry no Ground of their own.
+        // The game HARD-REQUIRES every collider the player steps on to be registered:
+        // an unregistered one makes GroundContact.OnCollisionEnter error out mid-
+        // processing ("Missing ground registration..."), corrupting the grounded
+        // state — one of the faces of the jump bug. Any Ground in the scene works as
+        // a generic descriptor; wrong footstep sound at worst.
+        private static MonoBehaviour _fallbackGround;
+
+        private static MonoBehaviour FallbackGround()
+        {
+            if (_fallbackGround != null) return _fallbackGround;
+            try
+            {
+                foreach (var mb in UnityEngine.Object.FindObjectsOfType<MonoBehaviour>())
+                {
+                    if (mb == null) continue;
+                    string n = null;
+                    try { n = mb.GetIl2CppType()?.Name; } catch { }
+                    if (n == "Ground") { _fallbackGround = mb; break; }
+                }
+            }
+            catch { }
+            return _fallbackGround;
         }
 
         // Take a collider OUT of the game's ground system. CRITICAL before disabling a
@@ -43,16 +77,20 @@ namespace FIHMapEditor
         public static void Unregister(Collider col)
         {
             if (_unavailable || _unregisterBroken || col == null) return;
+            _diagUnregisterCalls++;
             try
             {
                 if (!EnsureRegistry() || _unregister == null) { _unregisterBroken = _unregister == null; return; }
                 var args = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<Il2CppSystem.Object>(1);
                 args[0] = col;
                 _unregister.Invoke(_registry, args);
+                _diagUnregisterSuccess++;
             }
             catch (Exception ex)
             {
-                MapEditorPlugin.Logger.LogWarning($"[GROUND] Unregister failed: {ex.Message}");
+                _diagUnregisterErrors++;
+                MapEditorPlugin.Logger.LogWarning(
+                    $"[DIAG] Unregister failed (call #{_diagUnregisterCalls}, errors #{_diagUnregisterErrors}): {ex.GetType().Name}: {ex.Message}");
                 // Called for every wiped collider (mostly not ground) — give up quietly
                 // after the first failure instead of spamming per collider.
                 _unregisterBroken = true;
@@ -89,25 +127,27 @@ namespace FIHMapEditor
                 var cols = clone.GetComponentsInChildren<Collider>(true);
                 if (cols.Length == 0) return;
 
-                // Hot-path cheap-out: if the clone has no Ground in its tree, and the
-                // source has none either, no per-collider reflection can possibly find
-                // one. Bail before the loop (mass-apply spam otherwise does N reflection
-                // climbs for N clones, most of which carry no Ground).
-                if (FindGroundInTree(clone.transform) == null
-                    && (source == null || FindGroundUpward(source.transform, null) == null))
-                    return;
-
                 // Fallback surface descriptor: the source's own Ground (may sit on a
                 // parent chunk above the cloned root).
                 MonoBehaviour sourceGround = source != null
                     ? FindGroundUpward(source.transform, null)
                     : null;
 
+                // Hot-path cheap-out: no Ground anywhere in the clone's tree or source →
+                // skip the per-collider reflection climbs and register everything with
+                // the scene's generic Ground. NEVER leave a walkable collider
+                // unregistered — the game errors out on contact and the grounded state
+                // corrupts (jump bug).
+                bool useFallbackOnly = sourceGround == null && FindGroundInTree(clone.transform) == null;
+                if (useFallbackOnly) sourceGround = FallbackGround();
+
                 int registered = 0;
                 foreach (var col in cols)
                 {
-                    if (col == null) continue;
-                    var ground = FindGroundUpward(col.transform, clone.transform) ?? sourceGround;
+                    if (col == null || col.isTrigger) continue;
+                    var ground = useFallbackOnly
+                        ? sourceGround
+                        : (FindGroundUpward(col.transform, clone.transform) ?? sourceGround ?? FallbackGround());
                     if (ground == null) continue;
                     if (!EnsureRegistry()) return;
                     var args = new Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppReferenceArray<Il2CppSystem.Object>(2);
@@ -116,7 +156,7 @@ namespace FIHMapEditor
                     _register.Invoke(_registry, args);
                     registered++;
                 }
-                if (registered > 0)
+                if (registered > 0 && EditorConfig.VerboseLogs)
                     MapEditorPlugin.Logger.LogInfo(
                         $"[GROUND] '{clone.name}': {registered} collider(s) registered with their Ground surface.");
             }
@@ -185,10 +225,21 @@ namespace FIHMapEditor
                     _registry = reg;
                     _register = m;
                     try { _unregister = reg.GetIl2CppType().GetMethod("Unregister"); } catch { }
+                    // Diagnostic: print the registry class + which methods we found.
+                    // If Unregister is missing, the fix for "stuck grounded after a hide"
+                    // is partial — we can clear the layer-matrix entry but not the
+                    // touching state. The ResetJumpState fallback should still work, but
+                    // we want to KNOW.
+                    string regClass = reg.GetIl2CppType()?.FullName ?? "?";
+                    string unreg = _unregister != null ? "found" : "NOT FOUND (no Unregister method on the registry)";
+                    MapEditorPlugin.Logger.LogInfo(
+                        $"[DIAG] GroundRegistry resolved: class='{regClass}' " +
+                        $"Register=found Unregister={unreg} (host MonoBehaviour='{mb.GetIl2CppType()?.FullName}')");
                     MapEditorPlugin.Logger.LogInfo("[GROUND] GroundRegistry found — placed objects keep their surface behavior.");
                     return true;
                 }
                 _unavailable = true;
+                MapEditorPlugin.Logger.LogWarning("[DIAG] GroundRegistry NOT found on any MonoBehaviour — stuck-jump fix path is dead.");
                 MapEditorPlugin.Logger.LogWarning("[GROUND] GroundRegistry not found — placed ground keeps the default surface.");
                 return false;
             }

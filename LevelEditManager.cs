@@ -29,6 +29,10 @@ namespace FIHMapEditor
         // Exact components disabled by Hide, so unhide is lossless.
         public List<Renderer> HiddenRenderers;
         public List<Collider> HiddenColliders;
+        // B2: instead of c.enabled = false (which Unity never fires OnCollisionExit for),
+        // we move each collider to HiddenLayer.Layer. Storing the original layer here
+        // so Unhide / EnforceEdits can restore it exactly.
+        public List<int> HiddenColliderLayers;
 
         // Transform-controlling components (FishNet sync, animators) disabled while the
         // object is edited, so nothing fights our transform. Re-enabled on revert.
@@ -227,12 +231,36 @@ namespace FIHMapEditor
                             foreach (var r in record.HiddenRenderers)
                                 if (r != null && r.enabled) r.enabled = false;
                         if (record.HiddenColliders != null)
-                            foreach (var c in record.HiddenColliders)
-                                if (c != null && c.enabled)
+                        {
+                            for (int i = 0; i < record.HiddenColliders.Count; i++)
+                            {
+                                var c = record.HiddenColliders[i];
+                                if (c == null) continue;
+                                int original = (record.HiddenColliderLayers != null && i < record.HiddenColliderLayers.Count)
+                                    ? record.HiddenColliderLayers[i] : -1;
+                                if (original >= 0)
                                 {
-                                    GroundRegistrar.Unregister(c); // re-enabled by the game → unregister before re-hiding
+                                    // Re-hide via layer (B2) — but only if it's been
+                                    // moved back to its original layer by the game.
+                                    if (c.gameObject.layer != HiddenLayer.Layer)
+                                    {
+                                        int retaken = HiddenLayer.MoveTo(c);
+                                        // Sanity: if HiddenLayer returned a different
+                                        // value, the stored original is stale. Update it.
+                                        if (retaken != original && retaken >= 0)
+                                        {
+                                            record.HiddenColliderLayers[i] = retaken;
+                                        }
+                                    }
+                                }
+                                else if (c.enabled)
+                                {
+                                    // Legacy fallback path (no recorded original layer).
+                                    GroundRegistrar.Unregister(c);
                                     c.enabled = false;
                                 }
+                            }
+                        }
                     }
                 }
                 catch { }
@@ -247,6 +275,7 @@ namespace FIHMapEditor
             {
                 record.HiddenRenderers = new List<Renderer>();
                 record.HiddenColliders = new List<Collider>();
+                record.HiddenColliderLayers = new List<int>();
                 foreach (var r in record.Target.GetComponentsInChildren<Renderer>(false))
                 {
                     if (r == null || !r.enabled) continue;
@@ -256,17 +285,28 @@ namespace FIHMapEditor
                 foreach (var c in record.Target.GetComponentsInChildren<Collider>(false))
                 {
                     if (c == null || !c.enabled) continue;
-                    // Remove it from the game's ground system BEFORE disabling — a
-                    // disabled collider never fires OnCollisionExit, so the player can be
-                    // left permanently "grounded" on it (endless jump reset).
-                    GroundRegistrar.Unregister(c);
-                    c.enabled = false;
+                    // B2: instead of c.enabled = false (Unity never fires
+                    // OnCollisionExit for that → grounded tracker stays stuck), move the
+                    // collider to the no-collision HiddenLayer. Unity DOES fire the
+                    // exit when the collider leaves the player's layer matrix, so the
+                    // game's tracker properly forgets the touch. We keep the original
+                    // layer in record.HiddenColliderLayers for Unhide.
+                    int original = HiddenLayer.MoveTo(c);
+                    if (original < 0)
+                    {
+                        // HiddenLayer not initialised — fall back to the old
+                        // c.enabled = false + Unregister path.
+                        GroundRegistrar.Unregister(c);
+                        c.enabled = false;
+                    }
                     record.HiddenColliders.Add(c);
+                    record.HiddenColliderLayers.Add(original);
                 }
                 record.Hidden = true;
-                MapEditorPlugin.Logger.LogInfo(
-                    $"[LEVELEDIT] Hid '{record.Name}': {record.HiddenRenderers.Count} renderer(s), " +
-                    $"{record.HiddenColliders.Count} collider(s) disabled.");
+                if (EditorConfig.VerboseLogs)
+                    MapEditorPlugin.Logger.LogInfo(
+                        $"[LEVELEDIT] Hid '{record.Name}': {record.HiddenRenderers.Count} renderer(s), " +
+                        $"{record.HiddenColliders.Count} collider(s) → HiddenLayer.");
                 if (record.HiddenRenderers.Count == 0)
                     MapEditorPlugin.Logger.LogWarning(
                         $"[LEVELEDIT] '{record.Name}' had no enabled renderers — it was already invisible (collision-only object?).");
@@ -286,14 +326,26 @@ namespace FIHMapEditor
                     foreach (var r in record.HiddenRenderers)
                         if (r != null) r.enabled = true;
                 if (record.HiddenColliders != null)
-                    foreach (var c in record.HiddenColliders)
-                        if (c != null)
+                {
+                    for (int i = 0; i < record.HiddenColliders.Count; i++)
+                    {
+                        var c = record.HiddenColliders[i];
+                        if (c == null) continue;
+                        int original = (record.HiddenColliderLayers != null && i < record.HiddenColliderLayers.Count)
+                            ? record.HiddenColliderLayers[i] : -1;
+                        if (original >= 0)
+                            HiddenLayer.Restore(c, original);   // restores the layer
+                        else
                         {
+                            // Fallback: old c.enabled = true path
                             c.enabled = true;
-                            GroundRegistrar.RegisterLevelCollider(c); // put it back in the ground system
+                            GroundRegistrar.RegisterLevelCollider(c);
                         }
+                    }
+                }
                 record.HiddenRenderers = null;
                 record.HiddenColliders = null;
+                record.HiddenColliderLayers = null;
                 record.Hidden = false;
             }
             catch (Exception ex)

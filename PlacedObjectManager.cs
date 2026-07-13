@@ -201,7 +201,7 @@ namespace FIHMapEditor
                             (placed.Mechanic == MechanicType.Cannon ? Vector3.forward * 12f : Vector3.up * 5f + Vector3.forward * 4f));
                 }
 
-                if (placed.Mechanic != MechanicType.None)
+                if (placed.Mechanic != MechanicType.None && EditorConfig.VerboseLogs)
                     MapEditorPlugin.Logger.LogInfo(
                         $"[MECH] '{clone.name}' is a {placed.Mechanic} (force={placed.BoostForce:0.#}, timer={placed.CannonTimer:0.##}s)");
 
@@ -372,8 +372,9 @@ namespace FIHMapEditor
                 bc.center = la.center;
                 bc.size = la.size;
 
-                MapEditorPlugin.Logger.LogInfo(
-                    $"[PLACE] '{root.name}' had no colliders — added 1 box collider (AABB {la.size.x:0.#}x{la.size.y:0.#}x{la.size.z:0.#}) for raycast picking + play-mode physics.");
+                if (EditorConfig.VerboseLogs)
+                    MapEditorPlugin.Logger.LogInfo(
+                        $"[PLACE] '{root.name}' had no colliders — added 1 box collider (AABB {la.size.x:0.#}x{la.size.y:0.#}x{la.size.z:0.#}) for raycast picking + play-mode physics.");
             }
             catch (Exception ex)
             {
@@ -489,7 +490,7 @@ namespace FIHMapEditor
             if (placed.Root != null)
             {
                 _byRootId.Remove(placed.Root.GetInstanceID());
-                UnityEngine.Object.Destroy(placed.Root);
+                DestroyWithUnregister(placed.Root);
             }
         }
 
@@ -497,10 +498,30 @@ namespace FIHMapEditor
         {
             foreach (var p in _placed)
             {
-                if (p.Root != null) UnityEngine.Object.Destroy(p.Root);
+                DestroyWithUnregister(p.Root);
             }
             _placed.Clear();
             _byRootId.Clear();
+        }
+
+        // CRITICAL: Unity's bug — destroying a collider that the player is touching
+        // also fails to fire OnCollisionExit, leaving the game's "grounded" tracker
+        // stuck on a collider that no longer exists. Same root cause as Hide() with
+        // c.enabled = false, but for the Destroy path used by map change (WipeAll)
+        // and single-object delete. Mirror the fix: Unregister first, then destroy.
+        private static void DestroyWithUnregister(GameObject root)
+        {
+            if (root == null) return;
+            try
+            {
+                foreach (var c in root.GetComponentsInChildren<Collider>(false))
+                {
+                    if (c == null) continue;
+                    GroundRegistrar.Unregister(c);
+                }
+            }
+            catch { }
+            UnityEngine.Object.Destroy(root);
         }
 
         public List<MapObjectData> Snapshot()
