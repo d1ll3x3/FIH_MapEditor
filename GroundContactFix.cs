@@ -49,7 +49,14 @@ namespace FIHMapEditor
                 {
                     var dead = new List<Collider>();
                     foreach (var kv in cache)
-                        if (kv.Key == null) dead.Add(kv.Key);   // destroyed collider, entry stuck forever
+                    {
+                        // Blank mode keeps vanilla colliders alive for lossless restore,
+                        // but moves them to the no-collision sink. Their old contact can
+                        // remain cached just like a destroyed collider and block jumping.
+                        bool hidden = kv.Key != null && HiddenLayer.Layer >= 0
+                            && kv.Key.gameObject.layer == HiddenLayer.Layer;
+                        if (kv.Key == null || hidden) dead.Add(kv.Key);
+                    }
                     foreach (var k in dead)
                         if (cache.Remove(k)) stale++;
                 }
@@ -60,7 +67,7 @@ namespace FIHMapEditor
                     var jump = root.GetComponentInChildren<EHS.PlayerMovementJump>(true);
                     if (jump != null) jump.ResetJumpStateImmediate();
                     MapEditorPlugin.Logger.LogInfo(
-                        $"[JUMP] Map swap: purged {stale} stale ground contact(s), touching recalculated, jump reset.");
+                        $"[JUMP] Purged {stale} stale/hidden ground contact(s), touching recalculated, jump reset.");
                 }
             }
             catch (Exception ex)

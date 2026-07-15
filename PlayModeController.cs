@@ -326,9 +326,15 @@ namespace FIHMapEditor
                     break;
             }
 
-            if (Timer != TimerState.Finished && !paused)
+            if (!paused)
             {
-                UpdateCheckpoints(pos);
+                // Checkpoints belong to the timed run and stop changing after finish.
+                if (Timer != TimerState.Finished)
+                    UpdateCheckpoints(pos);
+
+                // Reset triggers are map safety/gameplay volumes, not timer features.
+                // Keep them active after the goal has been reached, matching native
+                // RespawnOnTouch hazards such as LowGround.
                 UpdateResetZones(pos);
                 // No automatic fall respawn: falling forever is the player's business.
                 // Map makers who want one place a reset trigger where they need it.
@@ -758,6 +764,14 @@ namespace FIHMapEditor
             }
         }
 
+        // Native RespawnOnTouch hazards finish through the game's pipe sequence.
+        // After that animation completes, hand the destination back to the custom map.
+        public void RespawnAtCustomPoint()
+        {
+            if (Timer == TimerState.Idle) return;
+            RespawnAtCheckpoint();
+        }
+
         // Both shapes respawn the player STANDING ON THE FLOOR under the checkpoint,
         // not at the raw stored point (a coin placed while flying would otherwise
         // respawn you mid-air; a box stores its center, mid-box). Scan down from the
@@ -875,6 +889,8 @@ namespace FIHMapEditor
         }
 
         public void TeleportToSpawn() => TeleportTo(_spawnPos, _spawnYaw);
+
+        public void TeleportToPosition(Vector3 position, float yaw) => TeleportTo(position, yaw);
 
         // Keep the stored spawn in sync on a map swap: _spawnPos is otherwise only set
         // in Enter(), so the post-load teleport in ApplyMapFile used to send the player

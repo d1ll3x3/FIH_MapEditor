@@ -1,6 +1,12 @@
 using System;
 using System.Collections.Generic;
+using EHS.Bootstraps;
+using EHS.Interactables.Abstract;
+using EHS.Interactables.BoostPad;
+using EHS.Interactables.Cannon;
+using Il2CppInterop.Runtime;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace FIHMapEditor
 {
@@ -12,6 +18,11 @@ namespace FIHMapEditor
         public string Uid = System.Guid.NewGuid().ToString("N");
         public string GroupId;            // objects sharing this move/rotate/scale/delete together
         public GameObject Root;
+        // For real networked mechanics Root is the NetworkObject spawned by this
+        // scene spawner. Keep the spawner so delete/map unload can use the game's
+        // matching network de-initialization path.
+        public GameObject NetworkSpawnerRoot;
+        public NetworkSpawnerPoint NetworkSpawner;
         public string SourcePath;
         public string SourceName;
         public TintColor Tint = TintColor.None;
@@ -65,6 +76,14 @@ namespace FIHMapEditor
         private GameObject _mapRoot;     // scene-local: a scene reload naturally clears all clones
         private int _nextId = 1;
 
+        // Applied to NetworkData* before FishNet registers a newly placed mechanic.
+        public bool OverrideNetworkMechanicSettings;
+        public float NetworkBoostForce = 20f;
+        public float NetworkBoostAngle = 45f;
+        public float NetworkCannonForce = 20f;
+        public float NetworkCannonAngle = 45f;
+        public float NetworkCannonAirControlBlock = 0.5f;
+
         public IReadOnlyList<PlacedObject> Placed => _placed;
         public int Count => _placed.Count;
 
@@ -103,6 +122,10 @@ namespace FIHMapEditor
             if (source == null) return null;
             try
             {
+                var networked = TrySpawnNetworkedInteractable(source, sourcePath, sourceName,
+                    position, rotation, scale, tint, restore, out bool networkPlacement);
+                if (networkPlacement) return networked; // failure must not fall back to an inert clone
+
                 // Mechanics must be detected on the SOURCE: the clone gets its
                 // EHS.Interactables components stripped below. When the source is one of
                 // OUR clones (duplicate/multi-clone), never climb ancestors — the shared
@@ -114,6 +137,8 @@ namespace FIHMapEditor
                     || source.transform.root.name == "FIH_SpawnRoot";
                 var mechanic = MechanicsDetector.Detect(source, out float boostForce, out float cannonTimer,
                     climbAncestors: !sourceIsClone);
+                if (mechanic == MechanicType.None)
+                    mechanic = MechanicsDetector.InferFromSourceName(sourcePath, sourceName);
 
                 // Instantiate under an INACTIVE parent so Awake doesn't run on any
                 // component before we strip the networking ones.
@@ -126,6 +151,7 @@ namespace FIHMapEditor
                 clone.transform.rotation = rotation;
                 clone.transform.localScale = scale;
                 clone.SetActive(true);
+                InitializePlacedRespawnZones(clone);
 
                 // A clone must always spawn VISIBLE. Sources cataloged straight from the
                 // level can have their renderers toggled off or their visual nodes
@@ -235,6 +261,269 @@ namespace FIHMapEditor
             }
         }
 
+        private PlacedObject TrySpawnNetworkedInteractable(GameObject source, string sourcePath,
+            string sourceName, Vector3 position, Quaternion rotation, Vector3 scale,
+            TintColor tint, MapObjectData restore, out bool handled)
+        {
+            string requested = ObjectCatalog.CleanName(sourceName ?? source.name).ToLowerInvariant();
+            // Only the actual network interactable entry should redirect through a
+            // spawner. Visual children such as SM_Cannon_Platform contain "cannon" in
+            // their path but are ordinary map pieces; treating each as the parent
+            // NetworkObject created duplicate full cannons and stale FishNet entries.
+            handled = requested.StartsWith("networkedinteractable_", StringComparison.OrdinalIgnoreCase)
+                && IsNetworkMechanicName(requested);
+            if (!handled) return null; // ordinary catalog object
+            NetworkSpawnerPoint template = FindMatchingNetworkSpawner(source, sourceName);
+            if (template == null) template = FindSpawnerPrefab(requested);
+
+            GameObject spawnerRoot = null;
+            try
+            {
+                var post = UnityEngine.Object.FindObjectOfType<PostBootstrapGame>();
+                var refs = post?.GameRefs;
+                var cache = refs?.BootstrapGlobal?.GlobalRefs?.GameAddressableNetworkedCacheManager;
+                var server = refs?.FishnetManagers?.ServerManager;
+                if (refs == null || cache == null || server == null || !server.Started)
+                {
+                    MapEditorPlugin.Logger.LogWarning(
+                        $"[NETPLACE] Cannot place '{sourceName}': this client is not the active server/host.");
+                    return null;
+                }
+
+                // Prefer a real scene template. Levels without this mechanic have no
+                // template to clone, so construct the game's concrete spawner component;
+                // its data is populated from the selected network prefab below.
+                if (template != null) spawnerRoot = UnityEngine.Object.Instantiate(template.gameObject);
+                else
+                {
+                    spawnerRoot = new GameObject(requested.Contains("cannon")
+                        ? "NetworkSpawner_Cannon" : "NetworkSpawner_BoostPad");
+                    if (requested.Contains("cannon")) spawnerRoot.AddComponent<NetworkSpawnerPointCannon>();
+                    else spawnerRoot.AddComponent<NetworkSpawnerPointBoostPad>();
+                }
+                spawnerRoot.name = $"{ObjectCatalog.CleanName(spawnerRoot.name)} {ObjectCatalog.CLONE_MARKER}";
+                spawnerRoot.transform.position = position;
+                spawnerRoot.transform.rotation = rotation;
+                spawnerRoot.transform.localScale = scale;
+                spawnerRoot.transform.SetParent(GetMapRoot().transform, true);
+
+                NetworkSpawnerPoint spawner = spawnerRoot.GetComponentInChildren<NetworkSpawnerPointBoostPad>(true);
+                if (spawner == null) spawner = spawnerRoot.GetComponentInChildren<NetworkSpawnerPointCannon>(true);
+                if (spawner == null) throw new InvalidOperationException("cloned spawner lost NetworkSpawnerPoint");
+
+                // NetworkSceneInit can only use the AssetReference serialized on the
+                // template. Catalog entries instead identify the selected prefab by
+                // name, so resolve that exact variant from the already-preloaded
+                // network cache and perform the same spawn + derived initialization.
+                var prefab = FindNetworkObjectOnSource(source) ?? GetSelectedNetworkPrefab(cache, sourceName);
+                if (prefab == null)
+                    throw new InvalidOperationException($"selected source '{sourceName}' has no NetworkObject");
+                var nob = UnityEngine.Object.Instantiate(prefab, position, rotation);
+
+                var padSpawner = spawner.TryCast<NetworkSpawnerPointBoostPad>();
+                if (padSpawner != null)
+                {
+                    var pad = nob.gameObject.GetComponentInChildren<NetworkedInteractableBoostPad>(true);
+                    var sourceData = pad?.dataEditor;
+                    padSpawner.boostPadData = new NetworkDataBoostPad
+                    {
+                        boostForce = OverrideNetworkMechanicSettings ? NetworkBoostForce
+                            : sourceData?.boostForce ?? MechanicsDetector.DEFAULT_BOOST_FORCE,
+                        targetAngle = OverrideNetworkMechanicSettings ? NetworkBoostAngle
+                            : sourceData?.targetAngle ?? 45f,
+                    };
+                }
+                var cannonSpawner = spawner.TryCast<NetworkSpawnerPointCannon>();
+                if (cannonSpawner != null)
+                {
+                    var cannon = nob.gameObject.GetComponentInChildren<NetworkedInteractableCannon>(true);
+                    var sourceData = cannon?.dataEditor;
+                    cannonSpawner.cannonData = new NetworkDataCannon
+                    {
+                        launchAngle = OverrideNetworkMechanicSettings ? NetworkCannonAngle
+                            : sourceData?.launchAngle ?? 45f,
+                        launchForce = OverrideNetworkMechanicSettings ? NetworkCannonForce
+                            : sourceData?.launchForce ?? 20f,
+                        blockAirControlDuration = OverrideNetworkMechanicSettings ? NetworkCannonAirControlBlock
+                            : sourceData?.blockAirControlDuration ?? 0.5f,
+                    };
+                }
+
+                server.Spawn(nob.gameObject, null, SceneManager.GetActiveScene());
+                spawner.nob = nob;
+                spawner.InitializeNobServer(refs);
+                if (spawner.nob == null || spawner.nob.gameObject == null)
+                    throw new InvalidOperationException("spawner did not retain its spawned NetworkObject");
+
+                var spawned = spawner.nob.gameObject;
+                spawned.name = $"{ObjectCatalog.CleanName(sourceName)} {ObjectCatalog.CLONE_MARKER}";
+                var placed = new PlacedObject
+                {
+                    Id = _nextId++, Root = spawned, NetworkSpawnerRoot = spawnerRoot,
+                    NetworkSpawner = spawner, SourcePath = sourcePath, SourceName = sourceName,
+                    OriginalScale = spawned.transform.localScale,
+                    HasCollider = spawned.GetComponentInChildren<Collider>(true) != null,
+                    // The real EHS/FishNet components own behavior. Do not also run the
+                    // editor's legacy local simulation or the effect would fire twice.
+                    Mechanic = MechanicType.None,
+                };
+                if (restore != null)
+                {
+                    if (!string.IsNullOrEmpty(restore.Uid)) placed.Uid = restore.Uid;
+                    placed.GroupId = restore.GroupId;
+                    if (restore.CannonTarget != null) placed.CannonTarget = (float[])restore.CannonTarget.Clone();
+                    if (restore.CannonLaunchPos != null) placed.CannonLaunchPos = (float[])restore.CannonLaunchPos.Clone();
+                }
+
+                _placed.Add(placed);
+                _byRootId[spawned.GetInstanceID()] = placed;
+                MapEditorPlugin.Logger.LogInfo(
+                    $"[NETPLACE] '{sourceName}' spawned through '{spawnerRoot.name}' as network object '{spawned.name}'.");
+                return placed;
+            }
+            catch (Exception ex)
+            {
+                if (spawnerRoot != null) UnityEngine.Object.Destroy(spawnerRoot);
+                MapEditorPlugin.Logger.LogError($"[NETPLACE] Failed to place '{sourceName}' through its spawner: {ex.Message}");
+                return null;
+            }
+        }
+
+        private static NetworkSpawnerPoint FindMatchingNetworkSpawner(GameObject source, string sourceName)
+        {
+            string wanted = ObjectCatalog.CleanName(sourceName ?? source.name).ToLowerInvariant();
+            if (!IsNetworkMechanicName(wanted)) return null;
+
+            NetworkSpawnerPoint fallback = null;
+            foreach (var spawner in FindConcreteNetworkSpawners())
+            {
+                if (spawner == null) continue;
+                if (spawner.gameObject.name.Contains(ObjectCatalog.CLONE_MARKER)) continue;
+
+                string key = null;
+                try { spawner.TryGetAssetReferenceKey(out key); } catch { }
+                string addressable = (key ?? "").ToLowerInvariant();
+                if (wanted.Contains("candyland") && addressable.Contains("candyland")) return spawner;
+
+                var nob = spawner.nob;
+                if (nob == null || nob.gameObject == null)
+                {
+                    if (fallback == null && ((wanted.Contains("cannon") && addressable.Contains("cannon"))
+                        || (wanted.Contains("boost") && addressable.Contains("boost")))) fallback = spawner;
+                    continue;
+                }
+                var spawned = nob.gameObject;
+                if (source == spawned || source.transform.IsChildOf(spawned.transform)
+                    || spawned.transform.IsChildOf(source.transform)) return spawner;
+
+                string actual = ObjectCatalog.CleanName(spawned.name).ToLowerInvariant();
+                if (actual == wanted) return spawner;
+                if (fallback == null && ((wanted.Contains("cannon") && actual.Contains("cannon"))
+                    || (wanted.Contains("boost") && actual.Contains("boost")))) fallback = spawner;
+                // Never let the generic fallback replace an explicitly selected variant.
+                if (wanted.Contains("candyland") && actual.Contains("candyland")) return spawner;
+            }
+            return wanted.Contains("candyland") ? null : fallback;
+        }
+
+        private static NetworkSpawnerPoint FindSpawnerPrefab(string requested)
+        {
+            string prefabName = requested.Contains("cannon") ? "networkspawner_cannon"
+                : requested.Contains("candyland") ? "networkspawner_boostpadcandyland"
+                : "networkspawner_boostpad";
+            try
+            {
+                foreach (var obj in Resources.FindObjectsOfTypeAll(Il2CppType.Of<GameObject>()))
+                {
+                    var go = obj?.TryCast<GameObject>();
+                    if (go == null || go.name.ToLowerInvariant() != prefabName) continue;
+                    var spawner = go.GetComponentInChildren<NetworkSpawnerPoint>(true);
+                    if (spawner != null) return spawner;
+                }
+
+                // Scene registry objects are the safe templates: Addressables has
+                // already loaded and initialized them and we do not contend for its
+                // bundles. Scan by concrete IL2CPP type because querying the abstract
+                // NetworkSpawnerPoint base directly misses these generated components.
+                foreach (var spawner in FindConcreteNetworkSpawners())
+                {
+                    if (spawner == null || spawner.gameObject.name.Contains(ObjectCatalog.CLONE_MARKER)) continue;
+                    bool correct = requested.Contains("cannon")
+                        ? spawner.TryCast<NetworkSpawnerPointCannon>() != null
+                        : spawner.TryCast<NetworkSpawnerPointBoostPad>() != null;
+                    if (!correct) continue;
+                    return spawner;
+                }
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[NETPLACE] Spawner-prefab lookup failed: {ex.Message}");
+            }
+            return null;
+        }
+
+        private static List<NetworkSpawnerPoint> FindConcreteNetworkSpawners()
+        {
+            var result = new List<NetworkSpawnerPoint>();
+            try
+            {
+                foreach (var obj in Resources.FindObjectsOfTypeAll(Il2CppType.Of<NetworkSpawnerPointBoostPad>()))
+                {
+                    var concrete = obj?.TryCast<NetworkSpawnerPointBoostPad>();
+                    if (concrete != null) result.Add(concrete);
+                }
+                foreach (var obj in Resources.FindObjectsOfTypeAll(Il2CppType.Of<NetworkSpawnerPointCannon>()))
+                {
+                    var concrete = obj?.TryCast<NetworkSpawnerPointCannon>();
+                    if (concrete != null) result.Add(concrete);
+                }
+                if (EditorConfig.VerboseLogs)
+                    MapEditorPlugin.Logger.LogInfo($"[NETPLACE] Concrete spawner discovery found {result.Count} template(s).");
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[NETPLACE] Concrete spawner discovery failed: {ex.Message}");
+            }
+            return result;
+        }
+
+        private static FishNet.Object.NetworkObject GetSelectedNetworkPrefab(
+            EHS.AddressableNetworkedCacheManager cache, string sourceName)
+        {
+            string clean = ObjectCatalog.CleanName(sourceName).Replace("(Clone)", "").Trim();
+            string[] keys = { clean + ".prefab", clean, clean.ToLowerInvariant() + ".prefab", clean.ToLowerInvariant() };
+            foreach (string key in keys)
+            {
+                try
+                {
+                    var prefab = cache.GetNetworkedPrefab(key);
+                    if (prefab != null) return prefab;
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        private static FishNet.Object.NetworkObject FindNetworkObjectOnSource(GameObject source)
+        {
+            if (source == null) return null;
+            var nob = source.GetComponent<FishNet.Object.NetworkObject>()
+                ?? source.GetComponentInChildren<FishNet.Object.NetworkObject>(true);
+            var t = source.transform.parent;
+            while (nob == null && t != null)
+            {
+                nob = t.gameObject.GetComponent<FishNet.Object.NetworkObject>();
+                t = t.parent;
+            }
+            return nob;
+        }
+
+        private static bool IsNetworkMechanicName(string name)
+        {
+            return name.Contains("cannon") || name.Contains("boostpad")
+                || name.Contains("boost pad") || name.Contains("booster");
+        }
+
         public PlacedObject FindById(int id)
         {
             foreach (var p in _placed)
@@ -298,6 +587,39 @@ namespace FIHMapEditor
                     catch { }
                     MapEditorPlugin.Logger.LogWarning($"[PLACE] Could not destroy component: {ex.Message}");
                 }
+            }
+        }
+
+        private static void InitializePlacedRespawnZones(GameObject clone)
+        {
+            try
+            {
+                var zones = clone.GetComponentsInChildren<EHS.RespawnZones.RespawnOnTouch>(true);
+                if (zones == null || zones.Length == 0) return;
+                var post = UnityEngine.Object.FindObjectOfType<PostBootstrapGame>();
+                var refs = post?.GameRefs;
+                if (refs == null)
+                {
+                    MapEditorPlugin.Logger.LogWarning(
+                        $"[RESPAWN] '{clone.name}' contains a respawn hazard but GameReferences are unavailable.");
+                    return;
+                }
+                int initialized = 0;
+                foreach (var zone in zones)
+                {
+                    if (zone == null) continue;
+                    zone.postBootstrapGame = post;
+                    zone.respawnZones = refs.RespawnPipesZones;
+                    zone.ScenePostInit(refs);
+                    zone.enabled = true;
+                    initialized++;
+                }
+                MapEditorPlugin.Logger.LogInfo(
+                    $"[RESPAWN] Initialized {initialized} placed touch-respawn zone(s) on '{clone.name}'.");
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[RESPAWN] Placed-zone initialization failed: {ex.Message}");
             }
         }
 
@@ -490,7 +812,13 @@ namespace FIHMapEditor
             if (placed.Root != null)
             {
                 _byRootId.Remove(placed.Root.GetInstanceID());
-                DestroyWithUnregister(placed.Root);
+                if (placed.NetworkSpawner != null)
+                {
+                    try { placed.NetworkSpawner.NetworkSceneDeInit(); }
+                    catch (Exception ex) { MapEditorPlugin.Logger.LogWarning($"[NETPLACE] DeInit failed: {ex.Message}"); }
+                    if (placed.NetworkSpawnerRoot != null) UnityEngine.Object.Destroy(placed.NetworkSpawnerRoot);
+                }
+                else DestroyWithUnregister(placed.Root);
             }
         }
 
@@ -498,7 +826,12 @@ namespace FIHMapEditor
         {
             foreach (var p in _placed)
             {
-                DestroyWithUnregister(p.Root);
+                if (p.NetworkSpawner != null)
+                {
+                    try { p.NetworkSpawner.NetworkSceneDeInit(); } catch { }
+                    if (p.NetworkSpawnerRoot != null) UnityEngine.Object.Destroy(p.NetworkSpawnerRoot);
+                }
+                else DestroyWithUnregister(p.Root);
             }
             _placed.Clear();
             _byRootId.Clear();

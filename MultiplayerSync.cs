@@ -117,7 +117,7 @@ namespace FIHMapEditor
             Converters = { new JsonStringEnumConverter() },
         };
 
-        private readonly EditorController _c;
+        private readonly IMultiplayerEditorContext _c;
         private readonly Dictionary<ulong, Peer> _peers = new Dictionary<ulong, Peer>();
 
         // Always on: discovery is idle-cheap in singleplayer, and syncing must never
@@ -148,7 +148,7 @@ namespace FIHMapEditor
         private readonly List<ulong> _lobbyMembers = new List<ulong>();
         private int _lastLoggedMemberCount = -1;
 
-        public MultiplayerSync(EditorController controller)
+        public MultiplayerSync(IMultiplayerEditorContext controller)
         {
             _c = controller;
         }

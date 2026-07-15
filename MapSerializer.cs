@@ -50,10 +50,7 @@ namespace FIHMapEditor
         {
             var map = JsonSerializer.Deserialize<MapFile>(json, Options);
             if (map == null) throw new InvalidDataException("Map JSON deserialized to null");
-            map.Objects ??= new List<MapObjectData>();
-            map.LevelEdits ??= new List<LevelEditData>();
-            map.Checkpoints ??= new List<CheckpointData>();
-            map.ResetZones ??= new List<ResetZoneData>();
+            MapMigrations.Normalize(map);
             // Legacy maps (pre-v6) carry no MapId — mint and keep one so the leaderboard
             // has a stable key from now on.
             if (string.IsNullOrEmpty(map.MapId))
@@ -90,11 +87,7 @@ namespace FIHMapEditor
             if (map.FormatVersion > MapFile.CURRENT_FORMAT_VERSION)
                 MapEditorPlugin.Logger.LogWarning(
                     $"Map '{fileName}' has format v{map.FormatVersion} (newer than v{MapFile.CURRENT_FORMAT_VERSION}); loading anyway.");
-            map.Objects ??= new List<MapObjectData>();
-            map.LevelEdits ??= new List<LevelEditData>();
-            map.Checkpoints ??= new List<CheckpointData>();
-            map.ResetZones ??= new List<ResetZoneData>();
-            return map;
+            return MapMigrations.Normalize(map);
         }
 
         public static void Delete(string fileName)

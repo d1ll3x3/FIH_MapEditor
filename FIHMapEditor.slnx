@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/Core/">
+    <Project Path="Core/FIHMapEditor.Core.csproj" />
+  </Folder>
+  <Folder Name="/Tests/">
+    <Project Path="Tests/FIHMapEditor.Core.Tests.csproj" />
+  </Folder>
+  <Project Path="FIHMapEditor.csproj" />
+</Solution>

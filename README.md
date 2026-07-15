@@ -334,6 +334,11 @@ build.bat        # builds and deploys to the game
 Requires the .NET 6 SDK. `build.bat` assumes the game at
 `I:\SteamLibrary\steamapps\common\Flipping is Hard Demo` — edit it if your path differs.
 
+The `FIHMapEditor.slnx` solution includes the runtime plugin, Unity-independent core,
+and test suite. See [REFACTOR_AND_ADDITIONS.md](REFACTOR_AND_ADDITIONS.md) for a tour of
+the refactor and recent runtime fixes, then [ARCHITECTURE.md](ARCHITECTURE.md) for the
+dependency rules to follow when adding new features.
+
 ## License
 
 This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0).

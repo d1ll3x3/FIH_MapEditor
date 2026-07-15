@@ -53,6 +53,19 @@ namespace FIHMapEditor
             return MechanicType.None;
         }
 
+        // Catalog/file entries can resolve to a visual child whose original EHS
+        // component lived on a sibling that is no longer available. Preserve useful
+        // mechanics for those pieces from their stable source path/name.
+        public static MechanicType InferFromSourceName(string sourcePath, string sourceName)
+        {
+            string text = $"{sourcePath} {sourceName}".ToLowerInvariant();
+            if (text.Contains("cannon")) return MechanicType.Cannon;
+            if (text.Contains("boostpad") || text.Contains("booster")
+                || (text.Contains("boost") && text.Contains("pad")))
+                return MechanicType.BoostPad;
+            return MechanicType.None;
+        }
+
         private static MechanicType DetectIn(GameObject root, ref float boostForce, ref float cannonTimer)
         {
             try
@@ -258,7 +271,10 @@ namespace FIHMapEditor
                 var bounds = GetColliderBounds(p);
                 if (bounds.size == Vector3.zero) continue;
                 bounds.Expand(0.6f);
-                if (!bounds.Contains(pos)) continue;
+                // The Rigidbody pivot sits around the player's torso, so requiring the
+                // pivot itself inside a thin pad misses normal foot contact. Test a few
+                // points down the body and allow a small grazing distance.
+                if (!PlayerBodyTouchesBounds(pos, bounds)) continue;
                 if (_cooldowns.TryGetValue(p.Id, out float until) && Time.time < until) continue;
 
                 if (p.CannonTarget != null)
@@ -295,8 +311,12 @@ namespace FIHMapEditor
             foreach (var p in _placed.Placed)
             {
                 if (p.Mechanic != MechanicType.Cannon || p.Root == null) continue;
-                var bounds = GetColliderBounds(p);
-                float d = Vector3.Distance(bounds.center, playerPos);
+                // Cannon assemblies often carry a huge interaction trigger whose center
+                // is nowhere near the visible cannon. Range is measured to the nearest
+                // point of the visual bounds instead.
+                var bounds = ObjectCatalog.ComputeBounds(p.Root);
+                if (bounds.size == Vector3.zero) bounds = GetColliderBounds(p);
+                float d = Mathf.Sqrt(bounds.SqrDistance(playerPos));
                 if (d < nearestDist)
                 {
                     nearest = p;
@@ -447,6 +467,18 @@ namespace FIHMapEditor
             }
             catch { }
             return has ? bounds : ObjectCatalog.ComputeBounds(go);
+        }
+
+        private static bool PlayerBodyTouchesBounds(Vector3 playerPos, Bounds bounds)
+        {
+            float[] samples = { -1.2f, -0.8f, -0.4f, 0f, 0.8f };
+            foreach (float y in samples)
+            {
+                Vector3 sample = playerPos + Vector3.up * y;
+                if (bounds.Contains(sample) || bounds.SqrDistance(sample) <= 0.25f)
+                    return true;
+            }
+            return false;
         }
 
         // Apex-height parameterization: always solvable, lands on the target under

@@ -11,30 +11,31 @@ namespace FIHMapEditor
     // Central orchestrator: mode state machine, scene tracking, hotkeys, input context
     // switching, map lifecycle (working map, autosave, re-apply after scene reload) and
     // every edit operation the GUI exposes.
-    public class EditorController
+    public class EditorController : IMultiplayerEditorContext
     {
         public EditorMode Mode { get; private set; } = EditorMode.Off;
         public bool CursorFree { get; private set; }
         public bool InGameScene { get; private set; }
 
-        // Working map state (the in-memory truth while editing)
-        public string MapName = "Untitled";
-        public string MapId;                        // stable leaderboard key (see MapFile.MapId)
-        public bool Editable = true;                // false = play-only when others load it
-        public string AuthorName;                   // stamped on upload
-        public long AuthorSteamId;
-        public string CurrentFileName;              // null until saved / loaded
-        public MapBaseMode BaseMode { get; private set; } = MapBaseMode.Overlay;
-        public SpawnPointData Spawn;
-        public GoalZoneData Goal;
-        public List<CheckpointData> Checkpoints = new List<CheckpointData>();
-        public List<ResetZoneData> ResetZones = new List<ResetZoneData>();
-        public BallData Ball;                       // soccer: one kickoff/centre point
-        public List<SoccerGoalData> SoccerGoals = new List<SoccerGoalData>();
-        public ScoreboardData Scoreboard;           // soccer: placeable 3D score display
-        public bool Dirty { get; private set; }
+        // Compatibility facade over the extracted, Unity-independent working session.
+        public MapSession Session { get; } = new MapSession();
+        public string MapName { get => Session.Name; set => Session.Name = value; }
+        public string MapId { get => Session.MapId; set => Session.MapId = value; }
+        public bool Editable { get => Session.Editable; set => Session.Editable = value; }
+        public string AuthorName { get => Session.AuthorName; set => Session.AuthorName = value; }
+        public long AuthorSteamId { get => Session.AuthorSteamId; set => Session.AuthorSteamId = value; }
+        public string CurrentFileName { get => Session.CurrentFileName; set => Session.CurrentFileName = value; }
+        public MapBaseMode BaseMode { get => Session.BaseMode; private set => Session.BaseMode = value; }
+        public SpawnPointData Spawn { get => Session.Spawn; set => Session.Spawn = value; }
+        public GoalZoneData Goal { get => Session.Goal; set => Session.Goal = value; }
+        public List<CheckpointData> Checkpoints { get => Session.Checkpoints; set => Session.Checkpoints = value; }
+        public List<ResetZoneData> ResetZones { get => Session.ResetZones; set => Session.ResetZones = value; }
+        public BallData Ball { get => Session.Ball; set => Session.Ball = value; }
+        public List<SoccerGoalData> SoccerGoals { get => Session.SoccerGoals; set => Session.SoccerGoals = value; }
+        public ScoreboardData Scoreboard { get => Session.Scoreboard; set => Session.Scoreboard = value; }
+        public bool Dirty { get => Session.Dirty; private set => Session.Dirty = value; }
         public float LastAutosaveTime { get; private set; } = -1f;
-        public string LoadReport = "";
+        public string LoadReport { get => Session.LoadReport; set => Session.LoadReport = value; }
 
         // Edit options driven by the menu
         public int MoveSpeedMultiplier = 1;         // 1 / 4 / 10
@@ -64,9 +65,15 @@ namespace FIHMapEditor
         public LeaderboardService Leaderboard { get; private set; }
         public OnlineMapService OnlineMaps { get; private set; }
         public CatalogSyncService CatalogSync { get; private set; }
+        public IMapRepository Maps { get; }
+        public EditorFeatureRegistry Features { get; }
+        public MarkerEditingService Markers { get; }
 
         // Play-only map: the editor is locked when a non-editable online map is loaded.
         public bool ReadOnly { get; private set; }
+        private bool _hasDownloadedMapReturn;
+        private Vector3 _downloadedMapReturnPos;
+        private float _downloadedMapReturnYaw;
 
         // Actions posted from network callback threads to run on the Unity main thread.
         private readonly System.Collections.Concurrent.ConcurrentQueue<Action> _mainThread
@@ -166,6 +173,16 @@ namespace FIHMapEditor
 
         private bool _devicesDisabled = false;
 
+        public EditorController() : this(new FileMapRepository()) { }
+
+        internal EditorController(IMapRepository maps)
+        {
+            Maps = maps ?? throw new ArgumentNullException(nameof(maps));
+            Features = new EditorFeatureRegistry();
+            Markers = new MarkerEditingService(Session);
+            MapEditorApi.Attach(Features);
+        }
+
         public void Initialize()
         {
             EditorConfig.Load();
@@ -180,6 +197,10 @@ namespace FIHMapEditor
             Gizmo = new GizmoController();
             Xray = new InvisibleVisualizer();
             PlayMode = new PlayModeController(Finder);
+            RespawnZoneGuard.OnRespawnFinished = () =>
+            {
+                if (Mode == EditorMode.Play) PlayMode.RespawnAtCustomPoint();
+            };
             BlankCanvas = new BlankCanvasController(Finder);
             LevelEdits = new LevelEditManager();
             Undo = new UndoSystem();
@@ -223,6 +244,8 @@ namespace FIHMapEditor
             _mapsHub = new MapsHubRenderer(this);
             _hud = new HudRenderer(this);
             _timesViewer = new TimesViewerRenderer(this);
+
+            Features.Initialize(new EditorFeatureContext(this));
 
             MapEditorPlugin.Logger.LogInfo("EditorController initialized");
         }
@@ -350,6 +373,7 @@ namespace FIHMapEditor
                     LevelEdits.EnforceEdits(dragging);
                 }
 
+                Features.Update();
                 UpdateAutosave();
             }
             catch (Exception ex)
@@ -428,6 +452,7 @@ namespace FIHMapEditor
         private void OnLeftGameScene()
         {
             if (CursorFree) SetCursorFree(false);
+            PlacedManager.WipeAll();
             Mode = EditorMode.Off;
             Mechanics.ResetState();
             Multiplayer.OnSceneLeft();
@@ -492,6 +517,8 @@ namespace FIHMapEditor
             if (Input.WasKeyPressed("toggleEditor", s.ToggleEditorKey))
             {
                 if (Mode == EditorMode.Editor) SetMode(EditorMode.Off);
+                else if (Mode == EditorMode.Play && ReadOnly) ExitDownloadedPlayOnlyMap();
+                else if (Mode == EditorMode.Play) SetMode(EditorMode.Editor);
                 else if (Mode == EditorMode.Off)
                 {
                     // Play-only: the editor key opens the leaderboard window instead —
@@ -500,7 +527,7 @@ namespace FIHMapEditor
                     if (ReadOnly) _timesViewer.Toggle();
                     else SetMode(EditorMode.Editor);
                 }
-                // In Play mode F6 is ignored; use P to leave play first.
+                // Editable maps may return directly from Play to the editor menu.
             }
 
             if (Input.WasKeyPressed("togglePlay", s.TogglePlayKey))
@@ -1943,6 +1970,7 @@ namespace FIHMapEditor
                     ShowToast($"PLAY — {EditorConfig.Settings.RestartRunKey} / pad X: retry (last coin), Shift+{EditorConfig.Settings.RestartRunKey} / LB+X: full restart, {EditorConfig.Settings.TogglePlayKey}: editor");
                 }
 
+                Features.ModeChanged(old, newMode);
                 MapEditorPlugin.Logger.LogInfo($"[MODE] {old} → {newMode}");
             }
             catch (Exception ex)
@@ -2044,13 +2072,38 @@ namespace FIHMapEditor
 
         private float _readOnlyToastAt = -99f;
 
-        // The times-viewer's discard button: throw away the play-only map and hand the
-        // user a fresh, unlocked editor.
+        // The times-viewer's compatibility action uses the same unload-and-return path
+        // as F6 while playing a downloaded map.
         public void DiscardPlayOnlyMap()
         {
-            NewMap();
-            SetMode(EditorMode.Editor);
-            ShowToast("Play-only map discarded — empty editor ready");
+            ExitDownloadedPlayOnlyMap();
+        }
+
+        private void CaptureDownloadedMapReturn()
+        {
+            var player = Finder.FindPlayerTransform();
+            if (player == null) { _hasDownloadedMapReturn = false; return; }
+            _downloadedMapReturnPos = player.position;
+            _downloadedMapReturnYaw = player.eulerAngles.y;
+            _hasDownloadedMapReturn = true;
+        }
+
+        public void ExitDownloadedPlayOnlyMap()
+        {
+            if (!ReadOnly) return;
+            Vector3 returnPos = _downloadedMapReturnPos;
+            float returnYaw = _downloadedMapReturnYaw;
+            bool restorePosition = _hasDownloadedMapReturn;
+
+            SetMode(EditorMode.Off);
+            NewMap(silent: true); // despawn objects, restore level edits/base, clear markers/session
+            _hasDownloadedMapReturn = false;
+
+            if (restorePosition)
+                PlayMode.TeleportToPosition(returnPos, returnYaw);
+            ShowToast(restorePosition
+                ? "Downloaded map unloaded — returned to previous position"
+                : "Downloaded map unloaded");
         }
         // Returns true (and nags, throttled) when the current map is play-only, so edit
         // operations can early-return. Selection/teleport/play stay allowed.
@@ -2119,7 +2172,7 @@ namespace FIHMapEditor
             try
             {
                 RefreshSnapshot();
-                MapSerializer.SaveAutosave(_workingSnapshot);
+                Maps.SaveAutosave(_workingSnapshot);
                 LastAutosaveTime = Time.unscaledTime;
                 _autosaveDirtySince = Time.unscaledTime; // keep autosaving while still dirty
                 MapEditorPlugin.Logger.LogInfo($"[MAP] Autosaved ({reason}).");
@@ -2166,6 +2219,13 @@ namespace FIHMapEditor
             Undo.Clear();
             ClearPendingUndo();
             RefreshSnapshot();
+
+            // WipeAll may destroy the downloaded platform currently beneath the player.
+            // Unity then omits OnCollisionExit, leaving GroundContact convinced the
+            // player is grounded forever (and re-arming jump in mid-air). Destroy is
+            // deferred, so purge dead contacts a couple of frames after this swap.
+            GroundContactFix.ScheduleAfterMapSwap();
+
             // A user-invoked "New map" wipes the co-edit session for everyone (DELETEs
             // for every synced key). The SILENT call — the editor's first-open default
             // init — must never broadcast: it races the initial seed from peers and
@@ -2183,7 +2243,7 @@ namespace FIHMapEditor
             try
             {
                 RefreshSnapshot();
-                MapSerializer.Save(_workingSnapshot, CurrentFileName);
+                Maps.Save(_workingSnapshot, CurrentFileName);
                 Dirty = false;
                 _autosaveDirtySince = -1f;
                 ShowToast($"Saved \"{MapName}\" ({PlacedManager.Count} objects)");
@@ -2202,15 +2262,7 @@ namespace FIHMapEditor
             if (ReadOnlyBlock()) return false;
             if (string.IsNullOrWhiteSpace(name)) name = MapName;
             MapName = name.Trim();
-            string fileName = MapSerializer.SanitizeFileName(MapName);
-
-            // Never silently overwrite a different existing map: suffix until unique.
-            if (MapSerializer.Exists(fileName) && fileName != CurrentFileName)
-            {
-                int i = 2;
-                while (MapSerializer.Exists($"{fileName}_{i}")) i++;
-                fileName = $"{fileName}_{i}";
-            }
+            string fileName = Maps.CreateAvailableName(MapName, CurrentFileName);
 
             CurrentFileName = fileName;
             return SaveOverwrite();
@@ -2220,7 +2272,7 @@ namespace FIHMapEditor
         {
             try
             {
-                var map = MapSerializer.Load(fileName);
+                var map = Maps.Load(fileName);
                 ApplyMapFile(map, resetDirty: true);
                 // Autosave slots are recovery buffers, never a save target.
                 CurrentFileName = fileName.StartsWith(MapSerializer.AUTOSAVE_NAME) ? null : fileName;
@@ -2299,10 +2351,18 @@ namespace FIHMapEditor
                 {
                     try
                     {
+                        bool playOnlyDownload = !map.Editable
+                            && !EditorConfig.Settings.OwnerTokens.ContainsKey(map.MapId ?? "");
+                        if (playOnlyDownload) CaptureDownloadedMapReturn();
+                        else _hasDownloadedMapReturn = false;
                         ApplyMapFile(map, resetDirty: true);
                         CurrentFileName = null;   // an online map isn't a local file yet
                         ShowToast($"Loaded \"{MapName}\"{(ReadOnly ? " (play-only)" : "")} — {LoadReport}");
-                        if (ReadOnly && Mode == EditorMode.Editor)
+                        // A play-only download must always activate PlayModeController.
+                        // Downloads can start from the Off-mode map browser as well as
+                        // Editor; leaving Mode Off makes data-driven reset zones inert
+                        // even though native RespawnOnTouch objects still function.
+                        if (ReadOnly && Mode != EditorMode.Play)
                         {
                             SetMode(EditorMode.Play);
                             ShowToast($"\"{MapName}\" is play-only — straight into Play. {EditorConfig.Settings.TogglePlayKey}: stop playing");
@@ -2657,6 +2717,7 @@ namespace FIHMapEditor
                 _autosaveDirtySince = -1f;
             }
             RefreshSnapshot();
+            Features.MapApplied(map);
             // Swapping the whole working map (load / online download) must reach the
             // other editors like any other change: the per-key diff turns it into
             // DELETEs of the old content + upserts of the new. After a mere scene
@@ -3326,11 +3387,7 @@ namespace FIHMapEditor
             var cam = Finder.FindCameraTransform();
             if (t == null) return;
             Undo.Push("spawn change", CaptureMarkersState());
-            Spawn = new SpawnPointData
-            {
-                Pos = VecUtil.ToArray(t.position),
-                Yaw = cam != null ? cam.eulerAngles.y : t.eulerAngles.y,
-            };
+            Markers.SetSpawn(VecUtil.ToArray(t.position), cam != null ? cam.eulerAngles.y : t.eulerAngles.y);
             SetDirty();
             ShowToast("Map spawn placed here");
         }
@@ -3338,7 +3395,7 @@ namespace FIHMapEditor
         public void ClearSpawn()
         {
             if (Spawn != null) Undo.Push("spawn removal", CaptureMarkersState());
-            Spawn = null;
+            Markers.ClearSpawn();
             if (SelectionSys.Current.Marker == "spawn") SelectionSys.Deselect();
             SetDirty();
         }
@@ -3349,12 +3406,7 @@ namespace FIHMapEditor
             var t = Finder.FindPlayerTransform();
             if (t == null) return;
             Undo.Push("goal change", CaptureMarkersState());
-            var size = Goal?.Size ?? new float[] { 4f, 4f, 4f };
-            Goal = new GoalZoneData
-            {
-                Center = VecUtil.ToArray(t.position + Vector3.up * 1f),
-                Size = size,
-            };
+            Markers.SetGoal(VecUtil.ToArray(t.position + Vector3.up * 1f));
             SetDirty();
             ShowToast("Goal placed here");
         }
@@ -3362,7 +3414,7 @@ namespace FIHMapEditor
         public void ClearGoal()
         {
             if (Goal != null) Undo.Push("goal removal", CaptureMarkersState());
-            Goal = null;
+            Markers.ClearGoal();
             if (SelectionSys.Current.Marker == "goal") SelectionSys.Deselect();
             SetDirty();
         }
@@ -3374,13 +3426,8 @@ namespace FIHMapEditor
             var cam = Finder.FindCameraTransform();
             if (t == null) return;
             Undo.Push("checkpoint add", CaptureMarkersState());
-            Checkpoints.Add(new CheckpointData
-            {
-                Uid = Guid.NewGuid().ToString("N"),
-                Pos = VecUtil.ToArray(t.position),
-                Yaw = cam != null ? cam.eulerAngles.y : t.eulerAngles.y,
-                Radius = 1.5f,
-            });
+            Markers.AddCheckpoint(VecUtil.ToArray(t.position),
+                cam != null ? cam.eulerAngles.y : t.eulerAngles.y, box: false);
             SelectionSys.SelectMarker("checkpoint", Checkpoints.Count - 1);
             SetDirty();
             ShowToast($"Checkpoint #{Checkpoints.Count} placed here");
@@ -3395,13 +3442,8 @@ namespace FIHMapEditor
             var cam = Finder.FindCameraTransform();
             if (t == null) return;
             Undo.Push("checkpoint add", CaptureMarkersState());
-            Checkpoints.Add(new CheckpointData
-            {
-                Uid = Guid.NewGuid().ToString("N"),
-                Pos = VecUtil.ToArray(t.position + Vector3.up * 1f),
-                Yaw = cam != null ? cam.eulerAngles.y : t.eulerAngles.y,
-                Size = new float[] { 4f, 4f, 4f },
-            });
+            Markers.AddCheckpoint(VecUtil.ToArray(t.position + Vector3.up * 1f),
+                cam != null ? cam.eulerAngles.y : t.eulerAngles.y, box: true);
             SelectionSys.SelectMarker("checkpoint", Checkpoints.Count - 1);
             SetDirty();
             ShowToast($"Box checkpoint #{Checkpoints.Count} placed here — scale/rotate it with the gizmo");
@@ -3413,12 +3455,7 @@ namespace FIHMapEditor
             var t = Finder.FindPlayerTransform();
             if (t == null) return;
             Undo.Push("reset-trigger add", CaptureMarkersState());
-            ResetZones.Add(new ResetZoneData
-            {
-                Uid = Guid.NewGuid().ToString("N"),
-                Center = VecUtil.ToArray(t.position + Vector3.up * 1f),
-                Size = new float[] { 4f, 4f, 4f },
-            });
+            Markers.AddResetZone(VecUtil.ToArray(t.position + Vector3.up * 1f));
             SelectionSys.SelectMarker("reset", ResetZones.Count - 1);
             SetDirty();
             ShowToast($"Reset trigger #{ResetZones.Count} placed here (invisible in play)");
@@ -3433,12 +3470,7 @@ namespace FIHMapEditor
             var t = Finder.FindPlayerTransform();
             if (t == null) return;
             Undo.Push("ball placement", CaptureMarkersState());
-            Ball = new BallData
-            {
-                Uid = Ball?.Uid ?? Guid.NewGuid().ToString("N"),
-                Center = VecUtil.ToArray(t.position + Vector3.up * 1f),
-                Radius = Ball?.Radius ?? 0.5f,
-            };
+            Markers.PlaceBall(VecUtil.ToArray(t.position + Vector3.up * 1f));
             SelectionSys.SelectMarker("ball", 0);
             SetDirty();
             ShowToast("Ball kickoff point placed — scale it with the gizmo to size the ball");
@@ -3447,7 +3479,7 @@ namespace FIHMapEditor
         public void RemoveBall()
         {
             if (Ball != null) Undo.Push("ball removal", CaptureMarkersState());
-            Ball = null;
+            Markers.RemoveBall();
             if (SelectionSys.Current.Marker == "ball") SelectionSys.Deselect();
             SetDirty();
         }
@@ -3458,13 +3490,7 @@ namespace FIHMapEditor
             var t = Finder.FindPlayerTransform();
             if (t == null) return;
             Undo.Push("goal box add", CaptureMarkersState());
-            SoccerGoals.Add(new SoccerGoalData
-            {
-                Uid = Guid.NewGuid().ToString("N"),
-                Center = VecUtil.ToArray(t.position + Vector3.up * 1f),
-                Size = new float[] { 4f, 4f, 4f },
-                Team = Mathf.Clamp(team, 0, 1),
-            });
+            Markers.AddSoccerGoal(VecUtil.ToArray(t.position + Vector3.up * 1f), team);
             SelectionSys.SelectMarker("soccergoal", SoccerGoals.Count - 1);
             SetDirty();
             ShowToast($"Goal (Team {(team == 0 ? "A" : "B")}) added — scale/rotate it with the gizmo");
@@ -3482,13 +3508,7 @@ namespace FIHMapEditor
             float yaw = cam != null ? cam.eulerAngles.y + 180f : 0f;   // face back at the camera
 
             Undo.Push("scoreboard placement", CaptureMarkersState());
-            Scoreboard = new ScoreboardData
-            {
-                Uid = Scoreboard?.Uid ?? Guid.NewGuid().ToString("N"),
-                Pos = VecUtil.ToArray(basePos + Vector3.up * 1.5f),
-                Rot = new float[] { 0f, yaw, 0f },
-                Scale = Scoreboard?.Scale ?? 2f,
-            };
+            Markers.PlaceScoreboard(VecUtil.ToArray(basePos + Vector3.up * 1.5f), new float[] { 0f, yaw, 0f });
             SelectionSys.SelectMarker("scoreboard", 0);
             SetDirty();
             ShowToast("Scoreboard placed — move/rotate/scale it with the gizmo");
@@ -3500,7 +3520,7 @@ namespace FIHMapEditor
             if (ReadOnlyBlock()) return;
             if (index < 0 || index >= SoccerGoals.Count) return;
             Undo.Push("goal team change", CaptureMarkersState());
-            SoccerGoals[index].Team = 1 - SoccerGoals[index].Team;
+            Markers.ToggleSoccerGoalTeam(index);
             SetDirty();
         }
 

@@ -1,0 +1,26 @@
+{
+  "folders": [
+    {
+      "name": "FIH Map Editor",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "dotnet.defaultSolution": "FIHMapEditor.slnx",
+    "files.exclude": {
+      "**/bin": true,
+      "**/obj": true
+    },
+    "search.exclude": {
+      "**/bin": true,
+      "**/obj": true,
+      "**/lib": true
+    }
+  },
+  "extensions": {
+    "recommendations": [
+      "ms-dotnettools.csdevkit",
+      "ms-dotnettools.csharp"
+    ]
+  }
+}

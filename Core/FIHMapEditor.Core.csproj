@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <DefineConstants>FIH_CORE</DefineConstants>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\MapData.cs" Link="Maps\MapData.cs" />
+    <Compile Include="Maps\MapSession.cs" />
+    <Compile Include="Maps\MapMigrations.cs" />
+    <Compile Include="Editing\MarkerEditingService.cs" />
+  </ItemGroup>
+</Project>

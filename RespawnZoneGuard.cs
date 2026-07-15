@@ -1,47 +1,48 @@
 using System;
-using System.Collections.Generic;
 using UnityEngine;
 
 namespace FIHMapEditor
 {
-    // The base level is sprinkled with EHS.RespawnZones.RespawnOnTouch volumes —
-    // invisible triggers with OnTriggerEnter/OnCollisionEnter that start the game's
-    // pipe-respawn sequence on contact. On custom maps the MOD owns respawning
-    // (spawn / checkpoints / reset zones / R); if the player lands in or falls through
-    // one of these zones (easy after a cross-map teleport with a huge Y delta — the
-    // trainer never hits them because it only teleports to places you already stood),
-    // the game starts a pipe respawn that the custom map then interrupts, leaving
-    // GameManager.IsBeingRespawned stuck true → jump permanently blocked.
-    //
-    // Fix: while a custom map is applied, disable every touch-respawn zone at the
-    // component level so its trigger/collision callbacks never run. A scene reload
-    // recreates them enabled, so vanilla play is untouched.
+    // Touch-respawn zones created or restored during custom-map loading miss the
+    // game's original scene-initialization pass. Rebind all of them to the current
+    // respawn services whenever a map is applied or play mode begins.
     public static class RespawnZoneGuard
     {
+        public static Action OnRespawnFinished;
+        // Name retained because older feature extensions may call it. Its corrected
+        // behavior is initialization, not suppression.
         public static void DisableAll()
         {
             try
             {
-                int n = 0;
-                foreach (var z in UnityEngine.Object.FindObjectsOfType<EHS.RespawnZones.RespawnOnTouch>(true))
+                var post = UnityEngine.Object.FindObjectOfType<EHS.Bootstraps.PostBootstrapGame>();
+                var refs = post?.GameRefs;
+                var pipes = refs?.RespawnPipesZones;
+                if (post == null || refs == null || pipes == null)
                 {
-                    if (z == null || !z.enabled) continue;
-                    z.enabled = false;
-                    n++;
+                    MapEditorPlugin.Logger.LogWarning(
+                        "[RESPAWN] Cannot bind touch zones: live respawn services unavailable.");
+                    return;
                 }
-                if (n > 0)
-                    MapEditorPlugin.Logger.LogInfo(
-                        $"[RESPAWN] Disabled {n} touch-respawn zone(s) — the custom map owns respawning.");
+
+                int count = 0;
+                foreach (var zone in UnityEngine.Object.FindObjectsOfType<EHS.RespawnZones.RespawnOnTouch>(true))
+                {
+                    if (zone == null) continue;
+                    zone.postBootstrapGame = post;
+                    zone.respawnZones = pipes;
+                    zone.enabled = true;
+                    count++;
+                }
+                MapEditorPlugin.Logger.LogInfo(
+                    $"[RESPAWN] Bound {count} touch-respawn zone(s) to live respawn services.");
             }
             catch (Exception ex)
             {
-                MapEditorPlugin.Logger.LogWarning($"[RESPAWN] Zone disable error: {ex.Message}");
+                MapEditorPlugin.Logger.LogWarning($"[RESPAWN] Zone binding error: {ex.Message}");
             }
         }
 
-        // Transition-only watch of the game's respawn state — at most 2 log lines per
-        // respawn, so it can stay on. If the jump ever locks up again, the log shows
-        // whether a game respawn started and whether it ever finished.
         private static bool _lastRespawning;
         private static float _respawnSince;
 
@@ -49,10 +50,10 @@ namespace FIHMapEditor
         {
             try
             {
-                bool r = EHS.GameManager.IsBeingRespawned;
-                if (r == _lastRespawning) return;
-                _lastRespawning = r;
-                if (r)
+                bool respawning = EHS.GameManager.IsBeingRespawned;
+                if (respawning == _lastRespawning) return;
+                _lastRespawning = respawning;
+                if (respawning)
                 {
                     _respawnSince = Time.unscaledTime;
                     MapEditorPlugin.Logger.LogInfo("[RESPAWN] Game respawn STARTED.");
@@ -61,6 +62,11 @@ namespace FIHMapEditor
                 {
                     MapEditorPlugin.Logger.LogInfo(
                         $"[RESPAWN] Game respawn finished ({Time.unscaledTime - _respawnSince:0.0}s).");
+                    try { OnRespawnFinished?.Invoke(); }
+                    catch (Exception ex)
+                    {
+                        MapEditorPlugin.Logger.LogWarning($"[RESPAWN] Custom destination handoff failed: {ex.Message}");
+                    }
                 }
             }
             catch { }

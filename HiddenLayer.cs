@@ -47,15 +47,11 @@ namespace FIHMapEditor
                 MapEditorPlugin.Logger.LogInfo($"[HIDDEN] Reserved layer {Layer} ('{LayerMask.LayerToName(Layer)}') as the no-collision sink.");
             }
 
-            // Belt and suspenders: ignore this layer against every other layer (8 to
-            // 31; Unity 0-7 are reserved and already set by the game). Even if the
-            // game's matrix later changes, the ball/ground we drop in here stays
-            // inert.
-            for (int other = 8; other < 32; other++)
-            {
-                if (other == Layer) continue;
+            // Ignore against ALL layers. The player and several gameplay bodies use
+            // Unity's built-in layers 0-7; omitting those left "hidden" level colliders
+            // physically active. Ignore self too, so hidden colliders cannot interact.
+            for (int other = 0; other < 32; other++)
                 Physics.IgnoreLayerCollision(Layer, other, true);
-            }
         }
 
         // Move a collider to the reserved layer (no-op if not initialised or null).

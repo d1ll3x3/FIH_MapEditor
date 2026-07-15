@@ -164,7 +164,7 @@ namespace FIHMapEditor
                 y += ROWS * 26 + 12;
             }
 
-            // Footer: play hint + the discard action (was the double-F6 shortcut).
+            // Footer: play hint plus the same unload-and-return action used by F6 in Play.
             float fy = H - 66;
             GUI.Label(new Rect(15, fy, W - 30, 20),
                 $"{EditorConfig.Settings.TogglePlayKey}: play the map  |  {EditorConfig.Settings.ToggleEditorKey}: close this window",
@@ -173,7 +173,7 @@ namespace FIHMapEditor
             bool confirming = Time.unscaledTime < _discardConfirmUntil;
             GUI.backgroundColor = confirming ? Color.red : new Color(0.7f, 0.35f, 0.3f);
             if (_win.Button(new Rect(15, fy, 260, 26),
-                confirming ? "SURE? Map will be discarded" : "Discard map (open empty editor)"))
+                confirming ? "SURE? Download will be unloaded" : "Unload downloaded map"))
             {
                 if (confirming) { _c.DiscardPlayOnlyMap(); Close(); }
                 else _discardConfirmUntil = Time.unscaledTime + 3f;

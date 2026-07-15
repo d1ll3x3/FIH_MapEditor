@@ -75,7 +75,7 @@ namespace FIHMapEditor
 
         public void Refresh()
         {
-            _maps = MapSerializer.ListMaps();
+            _maps = new List<MapFileInfo>(_c.Maps.List());
             _top = 0;
         }
 
@@ -199,7 +199,7 @@ namespace FIHMapEditor
                 {
                     if (confirming)
                     {
-                        try { MapSerializer.Delete(m.FileName); _c.ShowToast($"Deleted: {m.MapName}"); }
+                        try { _c.Maps.Delete(m.FileName); _c.ShowToast($"Deleted: {m.MapName}"); }
                         catch (Exception ex) { _c.ShowToast($"Error deleting: {ex.Message}"); }
                         _deleteConfirm = null;
                         Refresh();

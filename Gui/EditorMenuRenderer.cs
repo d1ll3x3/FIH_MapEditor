@@ -29,6 +29,7 @@ namespace FIHMapEditor
         private bool _favsOnly = false;       // show starred entries only
         private int _catalogTop = 0;
         private const int CATALOG_ROWS = 15;
+        private string _netBoostForce, _netBoostAngle, _netCannonForce, _netCannonAngle, _netAirBlock;
 
         // List state
         private string _listFilter = "";
@@ -269,6 +270,7 @@ namespace FIHMapEditor
                 GUI.Label(new Rect(444, y + 3, W - 459, 20), "Stamp: click places copies", _styleSmall);
             }
             y += 28;
+            DrawNetworkPlacementTuning(ref y);
 
             // Category filter — wraps onto extra rows so no category is ever dropped.
             float cx = 15;
@@ -342,6 +344,45 @@ namespace FIHMapEditor
         // Filtering the whole catalog is O(entries × favorites) — too much to redo on
         // every OnGUI event (IMGUI runs Layout + Repaint + input passes per frame), so
         // the result is cached and only rebuilt when an input to the filter changes.
+        private void DrawNetworkPlacementTuning(ref float y)
+        {
+            var p = _c.PlacedManager;
+            _netBoostForce ??= p.NetworkBoostForce.ToString("0.##");
+            _netBoostAngle ??= p.NetworkBoostAngle.ToString("0.##");
+            _netCannonForce ??= p.NetworkCannonForce.ToString("0.##");
+            _netCannonAngle ??= p.NetworkCannonAngle.ToString("0.##");
+            _netAirBlock ??= p.NetworkCannonAirControlBlock.ToString("0.##");
+
+            if (_win.ToggleButton(new Rect(15, y, 112, 22), "NET TUNING", p.OverrideNetworkMechanicSettings))
+                p.OverrideNetworkMechanicSettings = !p.OverrideNetworkMechanicSettings;
+            float x = 132;
+            DrawNetField("Pad F", ref _netBoostForce, ref x, y);
+            DrawNetField("Ang", ref _netBoostAngle, ref x, y);
+            DrawNetField("Can F", ref _netCannonForce, ref x, y);
+            DrawNetField("Ang", ref _netCannonAngle, ref x, y);
+            DrawNetField("Air", ref _netAirBlock, ref x, y);
+            if (_win.Button(new Rect(x, y, 48, 22), "SET"))
+            {
+                p.NetworkBoostForce = Mathf.Clamp(ParseFloat(_netBoostForce, p.NetworkBoostForce), 0f, 200f);
+                p.NetworkBoostAngle = Mathf.Clamp(ParseFloat(_netBoostAngle, p.NetworkBoostAngle), -89f, 89f);
+                p.NetworkCannonForce = Mathf.Clamp(ParseFloat(_netCannonForce, p.NetworkCannonForce), 0f, 200f);
+                p.NetworkCannonAngle = Mathf.Clamp(ParseFloat(_netCannonAngle, p.NetworkCannonAngle), -89f, 89f);
+                p.NetworkCannonAirControlBlock = Mathf.Clamp(ParseFloat(_netAirBlock, p.NetworkCannonAirControlBlock), 0f, 10f);
+                p.OverrideNetworkMechanicSettings = true;
+                _c.ShowToast("Network mechanic placement tuning set");
+            }
+            y += 28;
+        }
+
+        private void DrawNetField(string label, ref string value, ref float x, float y)
+        {
+            float lw = label.Length * 7f + 5f;
+            GUI.Label(new Rect(x, y + 3, lw, 20), label, _styleSmall);
+            x += lw;
+            value = _win.TextField(new Rect(x, y, 40, 22), "net" + label, value);
+            x += 44;
+        }
+
         private List<CatalogEntry> _filteredCache;
         private string _filteredCacheKey;
 

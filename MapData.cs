@@ -1,5 +1,7 @@
 using System.Collections.Generic;
+#if !FIH_CORE
 using UnityEngine;
+#endif
 
 namespace FIHMapEditor
 {
@@ -164,6 +166,7 @@ namespace FIHMapEditor
         public ScoreboardData Scoreboard { get; set; }
     }
 
+#if !FIH_CORE
     public static class VecUtil
     {
         public static float[] ToArray(Vector3 v) => new[] { v.x, v.y, v.z };
@@ -204,4 +207,5 @@ namespace FIHMapEditor
             return false;
         }
     }
+#endif
 }
