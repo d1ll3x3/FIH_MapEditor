@@ -30,6 +30,8 @@ namespace FIHMapEditor
 
         private bool EnsureCreated()
         {
+            // Create lazily because shader lookup before the game scene is initialized can
+            // incorrectly report that an otherwise available built-in shader is missing.
             if (_go != null) return true;
             if (_initFailed) return false;
             try
@@ -47,6 +49,8 @@ namespace FIHMapEditor
                     return false;
                 }
 
+                // Visual helpers survive scene reloads and are explicitly hidden/reused by
+                // their owner, avoiding allocation every selection frame.
                 _go = new GameObject(_name);
                 UnityEngine.Object.DontDestroyOnLoad(_go);
                 _lr = _go.AddComponent<LineRenderer>();

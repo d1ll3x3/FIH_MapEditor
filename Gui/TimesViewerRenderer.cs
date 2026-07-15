@@ -45,6 +45,8 @@ namespace FIHMapEditor
             Visible = true;
             _top = 0;
             _discardConfirmUntil = 0f;
+            // Cache per-map while the window is repeatedly toggled; Refresh remains an explicit
+            // forced network request.
             if (_c.Leaderboard.Configured && !string.IsNullOrEmpty(_c.MapId) && _fetchedFor != _c.MapId)
             {
                 _fetchedFor = _c.MapId;
@@ -77,6 +79,8 @@ namespace FIHMapEditor
             InitStyles();
             _win.BeginFrame();
 
+            // IMGUI state is global. Always restore the matrix so scaling this standalone
+            // window does not resize the HUD or another window drawn later in OnGUI.
             var prevMatrix = GUI.matrix;
             float scale = EditorConfig.UiScale;
             if (!Mathf.Approximately(scale, 1f))
@@ -171,6 +175,8 @@ namespace FIHMapEditor
                 _styleSmall);
             fy += 26;
             bool confirming = Time.unscaledTime < _discardConfirmUntil;
+            // Destructive action uses a short second-click confirmation without a modal that
+            // could trap cursor/input state in Off mode.
             GUI.backgroundColor = confirming ? Color.red : new Color(0.7f, 0.35f, 0.3f);
             if (_win.Button(new Rect(15, fy, 260, 26),
                 confirming ? "SURE? Download will be unloaded" : "Unload downloaded map"))

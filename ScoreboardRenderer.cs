@@ -66,6 +66,8 @@ namespace FIHMapEditor
 
         private LineRenderer GetLine(int index)
         {
+            // Pool one renderer per active segment. Scores change frequently; rebuilding the
+            // hierarchy for every digit would create avoidable Unity/IL2CPP allocations.
             while (_pool.Count <= index)
             {
                 var go = new GameObject($"FIH_ScoreSeg{_pool.Count}");

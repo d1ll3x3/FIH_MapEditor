@@ -5,6 +5,8 @@ namespace FIHMapEditor
     /// <summary>Unity-independent state for the map currently being edited.</summary>
     public sealed class MapSession
     {
+        // This is working state, not a serialized DTO. EditorController exposes compatibility
+        // forwarding properties while callers are gradually migrated to this owner.
         public string Name { get; set; } = "Untitled";
         public string MapId { get; set; }
         public bool Editable { get; set; } = true;
@@ -24,6 +26,8 @@ namespace FIHMapEditor
 
         public void Reset(string mapId)
         {
+            // Allocate fresh lists rather than clearing old ones. Play mode and sync code may
+            // still hold a snapshot/list reference while a whole-map transition completes.
             Name = "Untitled";
             MapId = mapId;
             Editable = true;
@@ -44,6 +48,9 @@ namespace FIHMapEditor
 
         public void ApplyMetadata(MapFile map)
         {
+            // The caller must normalize the map first. This method deliberately adopts the
+            // supplied marker lists: it represents replacing the entire working session, not
+            // merging a partial multiplayer update.
             Name = map.Name ?? "Untitled";
             MapId = map.MapId;
             Editable = map.Editable;

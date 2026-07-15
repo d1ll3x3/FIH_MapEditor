@@ -75,6 +75,8 @@ namespace FIHMapEditor
 
         public void Refresh()
         {
+            // Replace the snapshot so drawing never enumerates a collection that a filesystem
+            // refresh is mutating.
             _maps = new List<MapFileInfo>(_c.Maps.List());
             _top = 0;
         }
@@ -96,6 +98,7 @@ namespace FIHMapEditor
             InitStyles();
             _win.BeginFrame();
 
+            // GUI.matrix is shared by all IMGUI renderers; scope UI scaling to this window.
             var prevMatrix = GUI.matrix;
             float scale = EditorConfig.UiScale;
             if (!Mathf.Approximately(scale, 1f))
@@ -232,6 +235,8 @@ namespace FIHMapEditor
                 _uploadEditable ? "Others: can edit" : "Others: play only", _uploadEditable))
                 _uploadEditable = !_uploadEditable;
 
+            // OnlineMapService serializes requests; disabling the button prevents duplicate
+            // uploads from two IMGUI frames while an earlier request is in flight.
             bool canUpload = _c.OnlineMaps.Configured && !_c.OnlineMaps.Busy;
             GUI.backgroundColor = canUpload ? new Color(0.3f, 0.7f, 0.4f) : new Color(0.4f, 0.4f, 0.4f);
             if (_win.Button(new Rect(315, y, 130, 26), _c.OnlineMaps.Busy ? "…" : "UPLOAD") && canUpload)
@@ -264,6 +269,8 @@ namespace FIHMapEditor
             {
                 var m = maps[i];
                 bool mine = _c.OwnsOnlineMap(m.MapId);
+                // Ownership is proven by a locally stored secret token, not merely matching
+                // the display name or Steam ID shown by the public listing.
 
                 if (mine) GUI.color = new Color(0.6f, 1f, 0.7f);
                 GUI.Label(new Rect(20, ry, 420, 20), Truncate(m.Name ?? "Untitled", 40), _styleRow);

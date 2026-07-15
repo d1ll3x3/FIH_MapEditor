@@ -18,6 +18,8 @@ namespace FIHMapEditor
         bool HasMapContent();
         MapFile BuildMapFile();
 
+        // Transport callbacks may run off-thread; implementations marshal mutations through
+        // RunOnMainThread before touching Unity objects or the working session.
         void ApplyRemoteObjectUpsert(MapObjectData data);
         void ApplyRemoteObjectDelete(string uid);
         void ApplyRemoteCheckpointUpsert(CheckpointData data);

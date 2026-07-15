@@ -36,7 +36,8 @@ namespace FIHMapEditor
 
         public bool Configured => Supabase.Configured;
 
-        // Published list for the GUI (swapped atomically).
+        // Published list for the GUI (swapped atomically). Never mutate a published list
+        // in place: the IMGUI thread may be enumerating it while a request completes.
         public volatile List<OnlineMapInfo> Maps = new List<OnlineMapInfo>();
         public volatile bool Loading;
         public volatile string Error;
@@ -100,6 +101,8 @@ namespace FIHMapEditor
 
         private async Task DownloadAsync(string mapId, Action<MapFile> onLoaded, Action<string> onError)
         {
+            // These callbacks run on the Task continuation thread. EditorController wraps them
+            // in RunOnMainThread before applying map data or showing Unity UI.
             try
             {
                 string payload = JsonSerializer.Serialize(new Dictionary<string, object> { ["p_map_id"] = mapId });

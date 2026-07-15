@@ -31,6 +31,9 @@ namespace FIHMapEditor
                 var rb = _finder.GetCachedPlayerRigidbody() ?? _finder.FindPlayer()?.GetComponent<Rigidbody>();
                 if (rb == null) return;
 
+                // Preserve the game's exact physics configuration. Network ownership and
+                // respawn sequences may legitimately leave a player kinematic, so Exit must
+                // restore observed values rather than assume the usual gameplay defaults.
                 _wasKinematic = rb.isKinematic;
                 _wasGravity = rb.useGravity;
                 _wasCollisions = rb.detectCollisions;
@@ -60,6 +63,7 @@ namespace FIHMapEditor
                     rb.detectCollisions = _wasCollisions;
                     rb.isKinematic = _wasKinematic;
 
+                    // Do not carry editor movement into gameplay as residual momentum.
                     if (!rb.isKinematic)
                     {
                         rb.linearVelocity = Vector3.zero;
@@ -104,7 +108,8 @@ namespace FIHMapEditor
 
         private Vector3 CalculateFlyVelocity(Transform cameraTransform)
         {
-            // Horizontal movement relative to where the camera looks.
+            // Horizontal movement follows camera yaw, while vertical input remains world-up.
+            // Removing pitch prevents looking down from turning forward movement into descent.
             Vector3 forward = cameraTransform.forward;
             Vector3 right = cameraTransform.right;
             forward.y = 0;

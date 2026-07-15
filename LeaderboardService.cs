@@ -47,6 +47,8 @@ namespace FIHMapEditor
 
         private Board GetOrAdd(string mapId)
         {
+            // Creation is requested by main-thread UI/play code. Background tasks receive the
+            // selected Board instance and only publish its volatile fields.
             if (!_boards.TryGetValue(mapId, out var b))
             {
                 b = new Board();

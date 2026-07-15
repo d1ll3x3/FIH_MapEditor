@@ -7,6 +7,7 @@ using BepInEx;
 
 namespace FIHMapEditor
 {
+    /// <summary>Lightweight list-row metadata; map contents are loaded only on demand.</summary>
     public class MapFileInfo
     {
         public string FileName;      // file name without extension
@@ -16,6 +17,10 @@ namespace FIHMapEditor
         public bool IsAutosave;
     }
 
+    /// <summary>
+    /// JSON and path policy for local maps. Higher-level code should normally use
+    /// IMapRepository; online transport uses ToJson/FromJson directly.
+    /// </summary>
     public static class MapSerializer
     {
         public const string EXTENSION = ".fihmap.json";
@@ -41,6 +46,7 @@ namespace FIHMapEditor
             return name.Length == 0 ? "unnamed" : name;
         }
 
+        // fileName is a repository slot (already sanitized), never a user-supplied path.
         public static string PathFor(string fileName) => Path.Combine(MapsDir, fileName + EXTENSION);
 
         // In-memory (de)serialization for the online map library (upload/download).
@@ -84,6 +90,8 @@ namespace FIHMapEditor
             string json = File.ReadAllText(PathFor(fileName));
             var map = JsonSerializer.Deserialize<MapFile>(json, Options);
             if (map == null) throw new InvalidDataException("Map file deserialized to null");
+            // Forward-compatible best effort: System.Text.Json ignores unknown members. Warn
+            // instead of refusing so a newer map may still be usable by an older editor.
             if (map.FormatVersion > MapFile.CURRENT_FORMAT_VERSION)
                 MapEditorPlugin.Logger.LogWarning(
                     $"Map '{fileName}' has format v{map.FormatVersion} (newer than v{MapFile.CURRENT_FORMAT_VERSION}); loading anyway.");
@@ -106,6 +114,8 @@ namespace FIHMapEditor
                 if (!Directory.Exists(MapsDir)) return result;
                 foreach (var file in Directory.GetFiles(MapsDir, "*" + EXTENSION))
                 {
+                    // List view reads only enough JSON for a label/count. A malformed map stays
+                    // visible as a deletable row rather than making the whole hub fail.
                     var info = new MapFileInfo
                     {
                         FileName = Path.GetFileName(file).Replace(EXTENSION, ""),

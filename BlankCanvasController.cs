@@ -12,6 +12,8 @@ namespace FIHMapEditor
         private readonly GameObjectFinder _finder;
         private readonly List<Renderer> _disabledRenderers = new List<Renderer>();
         private readonly List<Collider> _disabledColliders = new List<Collider>();
+        // Parallel to _disabledColliders: >=0 means moved to HiddenLayer; -1 means the
+        // fallback disabled the component and it must be re-registered on restore.
         private readonly List<int> _disabledColliderLayers = new List<int>();
 
         public bool IsActive { get; private set; }
@@ -73,6 +75,9 @@ namespace FIHMapEditor
             if (t.GetComponentInParent<Canvas>() != null) return true;
             if (t.GetComponentInParent<Camera>() != null) return true;
 
+            // Protection is deliberately conservative. Accidentally retaining a decorative
+            // object is preferable to disabling a bootstrap/network manager and corrupting
+            // the scene until restart.
             string rootName = root.name;
             if (rootName.StartsWith("FIH", StringComparison.OrdinalIgnoreCase)) return true;
             // FishNet network objects must remain scene roots, so editor-spawned pads
@@ -128,6 +133,8 @@ namespace FIHMapEditor
 
         public void OnSceneChanged()
         {
+            // Scene destruction owns the old components; never attempt to restore wrappers
+            // whose native Unity objects belonged to the previous scene.
             _disabledRenderers.Clear();
             _disabledColliders.Clear();
             _disabledColliderLayers.Clear();

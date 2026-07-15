@@ -14,11 +14,14 @@ namespace FIHMapEditor
             => _session.Spawn = new SpawnPointData { Pos = position, Yaw = yaw };
 
         public void SetGoal(float[] center)
+            // Moving/replacing a goal preserves its edited dimensions.
             => _session.Goal = new GoalZoneData { Center = center,
                 Size = _session.Goal?.Size ?? new[] { 4f, 4f, 4f } };
 
         public CheckpointData AddCheckpoint(float[] position, float yaw, bool box)
         {
+            // Coin checkpoints use Radius; box checkpoints use Size. A null Size is therefore
+            // meaningful and must survive serialization.
             var item = new CheckpointData { Uid = Guid.NewGuid().ToString("N"), Pos = position,
                 Yaw = yaw, Radius = 1.5f, Size = box ? new[] { 4f, 4f, 4f } : null };
             _session.Checkpoints.Add(item);
@@ -34,6 +37,8 @@ namespace FIHMapEditor
         }
 
         public void PlaceBall(float[] center)
+            // There is one ball marker per map. Repositioning it keeps identity and radius so
+            // multiplayer treats the operation as an update rather than delete-plus-create.
             => _session.Ball = new BallData { Uid = _session.Ball?.Uid ?? Guid.NewGuid().ToString("N"),
                 Center = center, Radius = _session.Ball?.Radius ?? 0.5f };
 
@@ -46,6 +51,7 @@ namespace FIHMapEditor
         }
 
         public void PlaceScoreboard(float[] position, float[] rotation)
+            // As with the ball, preserve stable identity and user-edited scale on reposition.
             => _session.Scoreboard = new ScoreboardData {
                 Uid = _session.Scoreboard?.Uid ?? Guid.NewGuid().ToString("N"), Pos = position,
                 Rot = rotation, Scale = _session.Scoreboard?.Scale ?? 2f };
