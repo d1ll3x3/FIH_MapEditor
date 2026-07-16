@@ -38,6 +38,14 @@ namespace FIHMapEditor
         public float[] CannonTarget;      // landing point (cannons + aimed pads)
         public float[] CannonLaunchPos;   // custom hold/launch point; null = above the collider
 
+        // Settings captured for a real FishNet-spawned interactable. Nullable keeps
+        // ordinary scenery and legacy locally-simulated mechanics out of the JSON.
+        public float? NetworkBoostForce;
+        public float? NetworkBoostAngle;
+        public float? NetworkCannonForce;
+        public float? NetworkCannonAngle;
+        public float? NetworkCannonAirControlBlock;
+
         // Original material colors, captured the first time a tint is applied so
         // tint "0" can restore them exactly.
         public Dictionary<int, Color> OriginalColors;
@@ -61,6 +69,11 @@ namespace FIHMapEditor
                 CannonTimer = Mechanic == MechanicType.Cannon ? CannonTimer : (float?)null,
                 CannonTarget = Mechanic != MechanicType.None ? (float[])CannonTarget?.Clone() : null,
                 CannonLaunchPos = Mechanic == MechanicType.Cannon ? (float[])CannonLaunchPos?.Clone() : null,
+                NetworkBoostForce = NetworkBoostForce,
+                NetworkBoostAngle = NetworkBoostAngle,
+                NetworkCannonForce = NetworkCannonForce,
+                NetworkCannonAngle = NetworkCannonAngle,
+                NetworkCannonAirControlBlock = NetworkCannonAirControlBlock,
             };
         }
     }
@@ -320,17 +333,27 @@ namespace FIHMapEditor
                     throw new InvalidOperationException($"selected source '{sourceName}' has no NetworkObject");
                 var nob = UnityEngine.Object.Instantiate(prefab, position, rotation);
 
+                float? placedPadForce = null;
+                float? placedPadAngle = null;
+                float? placedCannonForce = null;
+                float? placedCannonAngle = null;
+                float? placedCannonAirBlock = null;
+
                 var padSpawner = spawner.TryCast<NetworkSpawnerPointBoostPad>();
                 if (padSpawner != null)
                 {
                     var pad = nob.gameObject.GetComponentInChildren<NetworkedInteractableBoostPad>(true);
                     var sourceData = pad?.dataEditor;
+                    placedPadForce = restore?.NetworkBoostForce
+                        ?? (OverrideNetworkMechanicSettings ? NetworkBoostForce
+                            : sourceData?.boostForce ?? MechanicsDetector.DEFAULT_BOOST_FORCE);
+                    placedPadAngle = restore?.NetworkBoostAngle
+                        ?? (OverrideNetworkMechanicSettings ? NetworkBoostAngle
+                            : sourceData?.targetAngle ?? 45f);
                     padSpawner.boostPadData = new NetworkDataBoostPad
                     {
-                        boostForce = OverrideNetworkMechanicSettings ? NetworkBoostForce
-                            : sourceData?.boostForce ?? MechanicsDetector.DEFAULT_BOOST_FORCE,
-                        targetAngle = OverrideNetworkMechanicSettings ? NetworkBoostAngle
-                            : sourceData?.targetAngle ?? 45f,
+                        boostForce = placedPadForce.Value,
+                        targetAngle = placedPadAngle.Value,
                     };
                 }
                 var cannonSpawner = spawner.TryCast<NetworkSpawnerPointCannon>();
@@ -338,14 +361,20 @@ namespace FIHMapEditor
                 {
                     var cannon = nob.gameObject.GetComponentInChildren<NetworkedInteractableCannon>(true);
                     var sourceData = cannon?.dataEditor;
+                    placedCannonAngle = restore?.NetworkCannonAngle
+                        ?? (OverrideNetworkMechanicSettings ? NetworkCannonAngle
+                            : sourceData?.launchAngle ?? 45f);
+                    placedCannonForce = restore?.NetworkCannonForce
+                        ?? (OverrideNetworkMechanicSettings ? NetworkCannonForce
+                            : sourceData?.launchForce ?? 20f);
+                    placedCannonAirBlock = restore?.NetworkCannonAirControlBlock
+                        ?? (OverrideNetworkMechanicSettings ? NetworkCannonAirControlBlock
+                            : sourceData?.blockAirControlDuration ?? 0.5f);
                     cannonSpawner.cannonData = new NetworkDataCannon
                     {
-                        launchAngle = OverrideNetworkMechanicSettings ? NetworkCannonAngle
-                            : sourceData?.launchAngle ?? 45f,
-                        launchForce = OverrideNetworkMechanicSettings ? NetworkCannonForce
-                            : sourceData?.launchForce ?? 20f,
-                        blockAirControlDuration = OverrideNetworkMechanicSettings ? NetworkCannonAirControlBlock
-                            : sourceData?.blockAirControlDuration ?? 0.5f,
+                        launchAngle = placedCannonAngle.Value,
+                        launchForce = placedCannonForce.Value,
+                        blockAirControlDuration = placedCannonAirBlock.Value,
                     };
                 }
 
@@ -366,6 +395,11 @@ namespace FIHMapEditor
                     // The real EHS/FishNet components own behavior. Do not also run the
                     // editor's legacy local simulation or the effect would fire twice.
                     Mechanic = MechanicType.None,
+                    NetworkBoostForce = placedPadForce,
+                    NetworkBoostAngle = placedPadAngle,
+                    NetworkCannonForce = placedCannonForce,
+                    NetworkCannonAngle = placedCannonAngle,
+                    NetworkCannonAirControlBlock = placedCannonAirBlock,
                 };
                 if (restore != null)
                 {

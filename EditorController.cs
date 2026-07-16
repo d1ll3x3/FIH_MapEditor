@@ -2427,6 +2427,11 @@ namespace FIHMapEditor
                     if (data.CannonTimer.HasValue) existing.CannonTimer = data.CannonTimer.Value;
                     if (data.CannonTarget != null) existing.CannonTarget = (float[])data.CannonTarget.Clone();
                     existing.CannonLaunchPos = data.CannonLaunchPos != null ? (float[])data.CannonLaunchPos.Clone() : null;
+                    existing.NetworkBoostForce = data.NetworkBoostForce;
+                    existing.NetworkBoostAngle = data.NetworkBoostAngle;
+                    existing.NetworkCannonForce = data.NetworkCannonForce;
+                    existing.NetworkCannonAngle = data.NetworkCannonAngle;
+                    existing.NetworkCannonAirControlBlock = data.NetworkCannonAirControlBlock;
                 }
                 else
                 {

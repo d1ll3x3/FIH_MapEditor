@@ -129,6 +129,14 @@ namespace FIHMapEditor
         public float? CannonTimer { get; set; }
         public float[] CannonTarget { get; set; }    // landing point (cannons + pads)
         public float[] CannonLaunchPos { get; set; } // where the cannon holds/launches from; null = auto
+
+        // v11: exact FishNet spawner data used by real network interactables. These are
+        // per-object values, not the editor's global "next placement" defaults.
+        public float? NetworkBoostForce { get; set; }
+        public float? NetworkBoostAngle { get; set; }
+        public float? NetworkCannonForce { get; set; }
+        public float? NetworkCannonAngle { get; set; }
+        public float? NetworkCannonAirControlBlock { get; set; }
     }
 
     public class MapFile
@@ -140,7 +148,7 @@ namespace FIHMapEditor
         // (CheckpointData.Size/Rot). v9: soccer mode (Ball + SoccerGoals). v10: placeable
         // 3D scoreboard. Older files load fine — missing fields stay at defaults and
         // Uids are backfilled on load.
-        public const int CURRENT_FORMAT_VERSION = 10;
+        public const int CURRENT_FORMAT_VERSION = 11;
 
         public int FormatVersion { get; set; } = CURRENT_FORMAT_VERSION;
         // Stable per-map identity for the leaderboard and the online map library. Minted
