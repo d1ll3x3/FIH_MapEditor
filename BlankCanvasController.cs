@@ -139,6 +139,7 @@ namespace FIHMapEditor
             _disabledColliders.Clear();
             _disabledColliderLayers.Clear();
             IsActive = false;
+            HiddenLayer.ClearTrackedOriginals();
         }
     }
 }

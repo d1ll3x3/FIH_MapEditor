@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace FIHMapEditor
@@ -18,6 +19,10 @@ namespace FIHMapEditor
     {
         public static int Layer { get; private set; } = -1;
         private static bool _initialized;
+        // Wipe-clean changes the live scene source itself. Unity then copies that layer
+        // when the catalog source is instantiated, so remember the source collider's real
+        // layer and translate it back onto editor-owned clones.
+        private static readonly Dictionary<int, int> _originalLayers = new Dictionary<int, int>();
 
         public static void EnsureInitialized()
         {
@@ -60,6 +65,7 @@ namespace FIHMapEditor
         {
             if (c == null || Layer < 0) return -1;
             int original = c.gameObject.layer;
+            _originalLayers[c.GetInstanceID()] = original;
             c.gameObject.layer = Layer;
             return original;
         }
@@ -68,6 +74,32 @@ namespace FIHMapEditor
         {
             if (c == null || originalLayer < 0) return;
             c.gameObject.layer = originalLayer;
+            _originalLayers.Remove(c.GetInstanceID());
+        }
+
+        public static int RestoreInheritedColliderLayers(GameObject source, GameObject clone)
+        {
+            if (source == null || clone == null || Layer < 0) return 0;
+            var sourceColliders = source.GetComponentsInChildren<Collider>(true);
+            var cloneColliders = clone.GetComponentsInChildren<Collider>(true);
+            int restored = 0;
+            int count = Mathf.Min(sourceColliders.Length, cloneColliders.Length);
+            for (int i = 0; i < count; i++)
+            {
+                var sourceCollider = sourceColliders[i];
+                var cloneCollider = cloneColliders[i];
+                if (sourceCollider == null || cloneCollider == null
+                    || cloneCollider.gameObject.layer != Layer) continue;
+                if (!_originalLayers.TryGetValue(sourceCollider.GetInstanceID(), out int original)) continue;
+                cloneCollider.gameObject.layer = original;
+                restored++;
+            }
+            return restored;
+        }
+
+        public static void ClearTrackedOriginals()
+        {
+            _originalLayers.Clear();
         }
     }
 }

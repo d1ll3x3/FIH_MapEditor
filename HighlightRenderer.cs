@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace FIHMapEditor
@@ -127,6 +128,28 @@ namespace FIHMapEditor
                 _lr.SetPosition(1, b);
                 _lr.startWidth = 0.05f;
                 _lr.endWidth = 0.05f;
+                _lr.startColor = color;
+                _lr.endColor = color;
+                if (_lr.material != null)
+                {
+                    if (_lr.material.HasProperty("_BaseColor")) _lr.material.SetColor("_BaseColor", color);
+                    else if (_lr.material.HasProperty("_Color")) _lr.material.color = color;
+                }
+                _go.SetActive(true);
+            }
+            catch { }
+        }
+
+        // Arbitrary world-space polyline, used for sampled trajectory previews.
+        public void ShowPath(IReadOnlyList<Vector3> points, Color color)
+        {
+            if (points == null || points.Count < 2 || !EnsureCreated()) { Hide(); return; }
+            try
+            {
+                _lr.positionCount = points.Count;
+                for (int i = 0; i < points.Count; i++) _lr.SetPosition(i, points[i]);
+                _lr.startWidth = 0.07f;
+                _lr.endWidth = 0.07f;
                 _lr.startColor = color;
                 _lr.endColor = color;
                 if (_lr.material != null)

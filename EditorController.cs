@@ -129,6 +129,12 @@ namespace FIHMapEditor
         private readonly List<LineBox> _resetBoxes = new List<LineBox>();
         private readonly List<LineBox> _cannonTargetBoxes = new List<LineBox>();
         private readonly List<LineBox> _cannonLines = new List<LineBox>();
+        private readonly List<LineBox> _networkArcLines = new List<LineBox>();
+        private readonly LineBox _autoLaunchStartMarker = new LineBox("FIH_AutoLaunchStart");
+        private readonly LineBox _autoLaunchEndMarker = new LineBox("FIH_AutoLaunchEnd");
+        private readonly LineBox _autoLaunchGuide = new LineBox("FIH_AutoLaunchGuide");
+        public Vector3? AutoLaunchStart { get; private set; }
+        public Vector3? AutoLaunchEnd { get; private set; }
         private readonly LineBox _ballRing = new LineBox("FIH_Line_Ball");
         private readonly List<LineBox> _soccerGoalBoxes = new List<LineBox>();
         private readonly List<LineBox> _cannonLaunchBoxes = new List<LineBox>();
@@ -1171,6 +1177,168 @@ namespace FIHMapEditor
                                              new Color(0.75f, 0.45f, 1f, 0.5f));
                 }
             }
+
+            UpdateNetworkMechanicArcPreviews();
+
+            if (AutoLaunchStart.HasValue)
+                _autoLaunchStartMarker.ShowRing(AutoLaunchStart.Value + Vector3.up * 0.15f, 0.7f,
+                    new Color(0.2f, 1f, 0.45f, 0.95f));
+            else
+                _autoLaunchStartMarker.Hide();
+            if (AutoLaunchEnd.HasValue)
+                _autoLaunchEndMarker.ShowRing(AutoLaunchEnd.Value + Vector3.up * 0.15f, 0.7f,
+                    new Color(1f, 0.75f, 0.15f, 0.95f));
+            else
+                _autoLaunchEndMarker.Hide();
+            if (AutoLaunchStart.HasValue && AutoLaunchEnd.HasValue)
+                _autoLaunchGuide.ShowLine(AutoLaunchStart.Value, AutoLaunchEnd.Value,
+                    new Color(0.7f, 0.7f, 0.7f, 0.55f));
+            else
+                _autoLaunchGuide.Hide();
+        }
+
+        private void UpdateNetworkMechanicArcPreviews()
+        {
+            var networkMechanics = new List<PlacedObject>();
+            foreach (var placed in PlacedManager.Placed)
+                if (placed?.Root != null && (placed.NetworkBoostForce.HasValue || placed.NetworkCannonForce.HasValue))
+                    networkMechanics.Add(placed);
+
+            while (_networkArcLines.Count < networkMechanics.Count)
+                _networkArcLines.Add(new LineBox($"FIH_Line_NetworkArc{_networkArcLines.Count}"));
+
+            for (int i = 0; i < _networkArcLines.Count; i++)
+            {
+                if (i >= networkMechanics.Count)
+                {
+                    _networkArcLines[i].Hide();
+                    continue;
+                }
+
+                var placed = networkMechanics[i];
+                var bounds = MechanicsController.ComputeColliderBounds(placed.Root);
+                Vector3 start = bounds.center + Vector3.up * Mathf.Max(0.1f, bounds.extents.y);
+                float force = placed.NetworkBoostForce ?? placed.NetworkCannonForce ?? 20f;
+                float angle = placed.NetworkBoostAngle ?? placed.NetworkCannonAngle ?? 45f;
+                Vector3 velocity;
+
+                if (placed.NetworkBoostForce.HasValue)
+                {
+                    // Variants such as Candyland rotate the functional pad component
+                    // independently of the NetworkObject root. Ask the actual game component
+                    // for the same direction it uses on contact instead of guessing from
+                    // root.forward and targetAngle.
+                    var pad = placed.Root.GetComponentInChildren<
+                        EHS.Interactables.BoostPad.NetworkedInteractableBoostPad>(true);
+                    Vector3 shootDirection = pad != null ? pad.FindShootDirection() : Vector3.zero;
+                    if (shootDirection.sqrMagnitude > 0.001f)
+                    {
+                        velocity = shootDirection.normalized * force;
+                        var triggerBounds = MechanicsController.ComputeColliderBounds(pad.gameObject);
+                        if (triggerBounds.size.sqrMagnitude > 0.001f)
+                            start = triggerBounds.center;
+                    }
+                    else
+                    {
+                        velocity = LaunchVelocityFromRoot(placed.Root.transform, force, angle);
+                    }
+                }
+                else
+                {
+                    // The barrel can be rotated independently of the network root.
+                    // Use the same direction as the native cannon launch routine.
+                    var cannon = placed.Root.GetComponentInChildren<
+                        EHS.Interactables.Cannon.NetworkedInteractableCannon>(true);
+                    Vector3 shootDirection = cannon != null ? cannon.FindShootDirection() : Vector3.zero;
+                    if (shootDirection.sqrMagnitude > 0.001f)
+                    {
+                        velocity = shootDirection.normalized * force;
+                        if (cannon.visualCannonBarrel != null)
+                            start = cannon.visualCannonBarrel.position;
+                        else if (cannon.cannonCollider != null)
+                            start = cannon.cannonCollider.bounds.center;
+                    }
+                    else
+                    {
+                        velocity = LaunchVelocityFromRoot(placed.Root.transform, force, angle);
+                    }
+                }
+
+                var points = new List<Vector3> { start };
+                Vector3 previous = start;
+                Vector3 point = start;
+                Vector3? landingTarget = placed.CannonTarget != null
+                    ? VecUtil.ToVector3(placed.CannonTarget) : (Vector3?)null;
+                Vector3 landingFlatDirection = landingTarget.HasValue
+                    ? Vector3.ProjectOnPlane(landingTarget.Value - start, Vector3.up)
+                    : Vector3.zero;
+                float landingFlatDistance = landingFlatDirection.magnitude;
+                if (landingFlatDistance > 0.001f) landingFlatDirection /= landingFlatDistance;
+                float damping = Finder.GetCachedPlayerRigidbody()?.linearDamping ?? 0f;
+                const float step = 0.05f;
+                for (int sample = 1; sample <= 100; sample++)
+                {
+                    // Unity applies gravity and linear damping continuously. Numerical
+                    // integration is closer than the previous drag-free parabola and also
+                    // lets the collision test follow the displayed curve segment-by-segment.
+                    velocity += Physics.gravity * step;
+                    if (damping > 0f) velocity /= 1f + damping * step;
+                    point += velocity * step;
+
+                    // An auto-aim target represents the landing point, not merely a point
+                    // that the infinite parabola happens to pass. End the guide only after
+                    // it reaches the target horizontally while travelling downwards.
+                    if (landingTarget.HasValue && landingFlatDistance > 0.001f
+                        && velocity.y < 0f
+                        && Vector3.Dot(Vector3.ProjectOnPlane(point - start, Vector3.up),
+                            landingFlatDirection) >= landingFlatDistance)
+                    {
+                        points.Add(landingTarget.Value);
+                        break;
+                    }
+
+                    Vector3 segment = point - previous;
+                    if (segment.sqrMagnitude > 0.0001f)
+                    {
+                        // RaycastAll avoids the IL2CPP out-parameter overload and lets us skip
+                        // the mechanic's own collider surrounding the launch point.
+                        RaycastHit? firstWorldHit = null;
+                        foreach (var hit in Physics.RaycastAll(previous, segment.normalized,
+                                     segment.magnitude, Physics.DefaultRaycastLayers,
+                                     QueryTriggerInteraction.Ignore))
+                        {
+                            if (PlacedManager.FromTransform(hit.transform) == placed) continue;
+                            // Launch origins often sit inside a surrounding map collider.
+                            // Ignoring the first 0.2 seconds prevents a zero-length preview.
+                            if (sample <= 4) continue;
+                            if (!firstWorldHit.HasValue || hit.distance < firstWorldHit.Value.distance)
+                                firstWorldHit = hit;
+                        }
+                        if (firstWorldHit.HasValue)
+                        {
+                            points.Add(firstWorldHit.Value.point);
+                            break;
+                        }
+                    }
+                    points.Add(point);
+                    previous = point;
+                }
+
+                Color color = placed.NetworkBoostForce.HasValue
+                    ? new Color(0.2f, 1f, 0.45f, 0.9f)
+                    : new Color(0.3f, 0.75f, 1f, 0.9f);
+                _networkArcLines[i].ShowPath(points, color);
+            }
+        }
+
+        private static Vector3 LaunchVelocityFromRoot(Transform root, float force, float angle)
+        {
+            Vector3 forward = Vector3.ProjectOnPlane(root.forward, Vector3.up);
+            if (forward.sqrMagnitude < 0.001f) forward = Vector3.forward;
+            forward.Normalize();
+            float radians = angle * Mathf.Deg2Rad;
+            return forward * (Mathf.Cos(radians) * force)
+                 + Vector3.up * (Mathf.Sin(radians) * force);
         }
 
         private void HideMarkerVisuals()
@@ -1181,6 +1349,10 @@ namespace FIHMapEditor
             foreach (var box in _resetBoxes) box.Hide();
             foreach (var box in _cannonTargetBoxes) box.Hide();
             foreach (var box in _cannonLines) box.Hide();
+            foreach (var line in _networkArcLines) line.Hide();
+            _autoLaunchStartMarker.Hide();
+            _autoLaunchEndMarker.Hide();
+            _autoLaunchGuide.Hide();
             foreach (var box in _cannonLaunchBoxes) box.Hide();
             foreach (var box in _multiBoxes) box.Hide();
             _ballRing.Hide();
@@ -2799,6 +2971,247 @@ namespace FIHMapEditor
             SetDirty();
         }
 
+        public void SetAutoLaunchPoint(bool start)
+        {
+            var player = Finder.FindPlayerTransform();
+            if (player == null) { ShowToast("Player not found"); return; }
+            if (start)
+            {
+                AutoLaunchStart = player.position;
+                ShowToast("Automatic launch point set");
+            }
+            else
+            {
+                AutoLaunchEnd = player.position;
+                ShowToast("Automatic landing point set");
+            }
+        }
+
+        public void ClearAutoLaunchPoints()
+        {
+            AutoLaunchStart = null;
+            AutoLaunchEnd = null;
+        }
+
+        public void CreateAutoAimedNetworkMechanic(float apexHeight)
+        {
+            if (ReadOnlyBlock()) return;
+            if (!AutoLaunchStart.HasValue || !AutoLaunchEnd.HasValue)
+            {
+                ShowToast("Set both launch and landing points first");
+                return;
+            }
+
+            var entry = StampEntry;
+            string requested = ObjectCatalog.CleanName(entry?.DisplayName ?? "").ToLowerInvariant();
+            bool isPad = requested.StartsWith("networkedinteractable_", StringComparison.OrdinalIgnoreCase)
+                && (requested.Contains("boostpad") || requested.Contains("booster"));
+            bool isCannon = requested.StartsWith("networkedinteractable_", StringComparison.OrdinalIgnoreCase)
+                && requested.Contains("cannon");
+            if (!isPad && !isCannon)
+            {
+                ShowToast("Choose a NetworkedInteractable pad or cannon with STAMP first");
+                return;
+            }
+
+            var source = Catalog.GetLiveSource(entry);
+            if (source == null)
+            {
+                ShowToast($"Source object \"{entry.DisplayName}\" not found");
+                return;
+            }
+
+            Vector3 start = AutoLaunchStart.Value;
+            Vector3 end = AutoLaunchEnd.Value;
+            Vector3 velocity = SolveBallisticVelocity(start, end, apexHeight);
+            Vector3 flatVelocity = Vector3.ProjectOnPlane(velocity, Vector3.up);
+            if (flatVelocity.sqrMagnitude < 0.001f)
+            {
+                ShowToast("Launch and landing points need some horizontal separation");
+                return;
+            }
+
+            float force = velocity.magnitude;
+            float angle = Mathf.Atan2(velocity.y, flatVelocity.magnitude) * Mathf.Rad2Deg;
+            if (force > 200f)
+            {
+                ShowToast($"Required force {force:0.#} exceeds the supported maximum of 200");
+                return;
+            }
+
+            Quaternion rotation = Quaternion.LookRotation(flatVelocity.normalized, Vector3.up);
+            var data = new MapObjectData
+            {
+                Uid = Guid.NewGuid().ToString("N"),
+                Source = entry.SourcePath,
+                SourceName = entry.DisplayName,
+                Pos = VecUtil.ToArray(start),
+                Rot = VecUtil.ToArray(rotation.eulerAngles),
+                Scale = VecUtil.ToArray(source.transform.localScale),
+                Tint = TintColor.None,
+                NetworkBoostForce = isPad ? force : (float?)null,
+                NetworkBoostAngle = isPad ? angle : (float?)null,
+                NetworkCannonForce = isCannon ? force : (float?)null,
+                NetworkCannonAngle = isCannon ? angle : (float?)null,
+                NetworkCannonAirControlBlock = isCannon
+                    ? PlacedManager.NetworkCannonAirControlBlock : (float?)null,
+                CannonTarget = VecUtil.ToArray(end),
+            };
+
+            var placed = PlacedManager.Spawn(source, entry.SourcePath, entry.DisplayName,
+                start, rotation, source.transform.localScale, TintColor.None, restore: data);
+            if (placed == null)
+            {
+                ShowToast($"Failed to create \"{entry.DisplayName}\"");
+                return;
+            }
+
+            // The configured targetAngle is interpreted by each prefab's functional child,
+            // not necessarily by its NetworkObject root. Calibrate the spawned native
+            // direction against the ballistic direction we actually need. This is important
+            // for themed variants and ensures the endpoint is reached after the apex.
+            for (int calibration = 0; calibration < 2; calibration++)
+            {
+                if (!TryGetActualLaunchState(placed, out Vector3 measuredStart,
+                        out Vector3 measuredDirection)) break;
+
+                Vector3 desiredVelocity = SolveBallisticVelocity(measuredStart, end, apexHeight);
+                Vector3 desiredDirection = desiredVelocity.normalized;
+                Vector3 measuredFlat = Vector3.ProjectOnPlane(measuredDirection, Vector3.up);
+                Vector3 desiredFlat = Vector3.ProjectOnPlane(desiredDirection, Vector3.up);
+                if (measuredFlat.sqrMagnitude < 0.001f || desiredFlat.sqrMagnitude < 0.001f) break;
+
+                float measuredElevation = Mathf.Atan2(measuredDirection.y, measuredFlat.magnitude)
+                    * Mathf.Rad2Deg;
+                float desiredElevation = Mathf.Atan2(desiredDirection.y, desiredFlat.magnitude)
+                    * Mathf.Rad2Deg;
+                float elevationError = desiredElevation - measuredElevation;
+                float yawError = Vector3.SignedAngle(measuredFlat, desiredFlat, Vector3.up);
+                if (Mathf.Abs(elevationError) < 0.05f && Mathf.Abs(yawError) < 0.05f) break;
+
+                var calibrated = placed.ToData();
+                if (isPad)
+                    calibrated.NetworkBoostAngle = Mathf.Clamp(
+                        (calibrated.NetworkBoostAngle ?? angle) + elevationError, -89f, 89f);
+                else
+                    calibrated.NetworkCannonAngle = Mathf.Clamp(
+                        (calibrated.NetworkCannonAngle ?? angle) + elevationError, -89f, 89f);
+                Quaternion calibratedRotation = Quaternion.AngleAxis(yawError, Vector3.up)
+                    * placed.Root.transform.rotation;
+                calibrated.Rot = VecUtil.ToArray(calibratedRotation.eulerAngles);
+
+                string calibratedUid = placed.Uid;
+                if (!ReplacePlacedFromData(calibratedUid, calibrated, false)) break;
+                placed = PlacedManager.FindByUid(calibratedUid);
+                angle = isPad
+                    ? placed.NetworkBoostAngle ?? angle
+                    : placed.NetworkCannonAngle ?? angle;
+            }
+
+            // Finally solve the magnitude from the real trigger/barrel and the now-calibrated
+            // native direction. The solver only accepts a descending arrival.
+            if (TryGetActualLaunchState(placed, out Vector3 actualStart, out Vector3 actualDirection)
+                && TrySolveLaunchSpeed(actualStart, end, actualDirection, out float correctedForce))
+            {
+                correctedForce = Mathf.Clamp(correctedForce, 0f, 200f);
+                if (Mathf.Abs(correctedForce - force) > 0.01f)
+                {
+                    var corrected = placed.ToData();
+                    if (isPad) corrected.NetworkBoostForce = correctedForce;
+                    else corrected.NetworkCannonForce = correctedForce;
+                    string uid = placed.Uid;
+                    if (ReplacePlacedFromData(uid, corrected, false))
+                    {
+                        placed = PlacedManager.FindByUid(uid);
+                        force = correctedForce;
+                    }
+                }
+            }
+
+            Undo.Push($"auto-place {entry.DisplayName}", () =>
+            {
+                if (SelectionSys.Current.Placed == placed) SelectionSys.Deselect();
+                PlacedManager.Delete(placed);
+                SetDirty();
+            });
+            SelectionSys.Select(placed);
+            SetDirty();
+            ClearAutoLaunchPoints();
+            ShowToast($"Created {(isPad ? "boost pad" : "cannon")}: force {force:0.##}, angle {angle:0.##}°");
+        }
+
+        private static bool TryGetActualLaunchState(PlacedObject placed,
+            out Vector3 start, out Vector3 direction)
+        {
+            start = placed.Root.transform.position;
+            direction = Vector3.zero;
+
+            if (placed.NetworkBoostForce.HasValue)
+            {
+                var pad = placed.Root.GetComponentInChildren<
+                    EHS.Interactables.BoostPad.NetworkedInteractableBoostPad>(true);
+                if (pad == null) return false;
+                direction = pad.FindShootDirection();
+                var bounds = MechanicsController.ComputeColliderBounds(pad.gameObject);
+                if (bounds.size.sqrMagnitude > 0.001f) start = bounds.center;
+            }
+            else if (placed.NetworkCannonForce.HasValue)
+            {
+                var cannon = placed.Root.GetComponentInChildren<
+                    EHS.Interactables.Cannon.NetworkedInteractableCannon>(true);
+                if (cannon == null) return false;
+                direction = cannon.FindShootDirection();
+                if (cannon.visualCannonBarrel != null) start = cannon.visualCannonBarrel.position;
+                else if (cannon.cannonCollider != null) start = cannon.cannonCollider.bounds.center;
+            }
+
+            if (direction.sqrMagnitude < 0.001f) return false;
+            direction.Normalize();
+            return true;
+        }
+
+        private static bool TrySolveLaunchSpeed(Vector3 start, Vector3 end,
+            Vector3 direction, out float speed)
+        {
+            speed = 0f;
+            Vector3 flatDirection = Vector3.ProjectOnPlane(direction, Vector3.up);
+            float horizontalFactor = flatDirection.magnitude;
+            if (horizontalFactor < 0.001f) return false;
+            flatDirection /= horizontalFactor;
+
+            Vector3 delta = end - start;
+            float distance = Vector3.Dot(Vector3.ProjectOnPlane(delta, Vector3.up), flatDirection);
+            if (distance <= 0.01f) return false;
+
+            float denominator = 2f * horizontalFactor * horizontalFactor
+                * (distance * direction.y / horizontalFactor - delta.y);
+            if (denominator <= 0.001f) return false;
+
+            float gravity = Mathf.Max(0.01f, Mathf.Abs(Physics.gravity.y));
+            speed = Mathf.Sqrt(gravity * distance * distance / denominator);
+            if (float.IsNaN(speed) || float.IsInfinity(speed)) return false;
+
+            // There can be an ascending intersection with the same height. Only accept
+            // solutions where the player has passed the apex and is landing at the target.
+            float flightTime = distance / (speed * horizontalFactor);
+            float terminalVerticalVelocity = speed * direction.y - gravity * flightTime;
+            return terminalVerticalVelocity < -0.01f;
+        }
+
+        private static Vector3 SolveBallisticVelocity(Vector3 start, Vector3 end, float apexHeight)
+        {
+            float gravity = Mathf.Max(0.01f, Mathf.Abs(Physics.gravity.y));
+            float apex = Mathf.Max(start.y, end.y) + Mathf.Clamp(apexHeight, 0.25f, 100f);
+            float verticalVelocity = Mathf.Sqrt(2f * gravity * Mathf.Max(0.01f, apex - start.y));
+            float timeUp = verticalVelocity / gravity;
+            float timeDown = Mathf.Sqrt(2f * Mathf.Max(0.01f, apex - end.y) / gravity);
+            float totalTime = timeUp + timeDown;
+            Vector3 horizontal = end - start;
+            horizontal.y = 0f;
+            Vector3 horizontalVelocity = horizontal / Mathf.Max(0.01f, totalTime);
+            return horizontalVelocity + Vector3.up * verticalVelocity;
+        }
+
         public void DuplicateSelected()
         {
             if (ReadOnlyBlock()) return;
@@ -3269,6 +3682,57 @@ namespace FIHMapEditor
 
             SetDirty();
             ShowToast($"Deleted: {name}");
+        }
+
+        public void ApplySelectedNetworkMechanicSettings(PlacedObject placed,
+            float force, float angle, float airControlBlock)
+        {
+            if (ReadOnlyBlock() || placed?.Root == null) return;
+            bool isPad = placed.NetworkBoostForce.HasValue;
+            bool isCannon = placed.NetworkCannonForce.HasValue;
+            if (!isPad && !isCannon) return;
+
+            var oldData = placed.ToData();
+            var newData = placed.ToData();
+            if (isPad)
+            {
+                newData.NetworkBoostForce = Mathf.Clamp(force, 0f, 200f);
+                newData.NetworkBoostAngle = Mathf.Clamp(angle, -89f, 89f);
+            }
+            else
+            {
+                newData.NetworkCannonForce = Mathf.Clamp(force, 0f, 200f);
+                newData.NetworkCannonAngle = Mathf.Clamp(angle, -89f, 89f);
+                newData.NetworkCannonAirControlBlock = Mathf.Clamp(airControlBlock, 0f, 10f);
+            }
+
+            string uid = placed.Uid;
+            Undo.Push("network mechanic settings", () => ReplacePlacedFromData(uid, oldData, true));
+            if (ReplacePlacedFromData(uid, newData, true))
+            {
+                SetDirty();
+                ShowToast($"{(isPad ? "Boost pad" : "Cannon")} settings applied");
+            }
+        }
+
+        private bool ReplacePlacedFromData(string uid, MapObjectData data, bool select)
+        {
+            var source = Catalog.ResolveSource(data.Source, data.SourceName);
+            if (source == null)
+            {
+                ShowToast($"Source \"{data.SourceName}\" is not loaded");
+                return false;
+            }
+
+            var current = PlacedManager.FindByUid(uid);
+            if (current != null) PlacedManager.Delete(current);
+            var replacement = PlacedManager.Spawn(source, data.Source, data.SourceName,
+                VecUtil.ToVector3(data.Pos), Quaternion.Euler(VecUtil.ToVector3(data.Rot)),
+                VecUtil.ToVector3(data.Scale, Vector3.one), data.Tint, restore: data);
+            if (replacement == null) return false;
+            if (select) SelectionSys.Select(replacement);
+            SetDirty();
+            return true;
         }
 
         public void WipeCustomObjects()

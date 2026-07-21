@@ -67,7 +67,9 @@ namespace FIHMapEditor
                 Mechanic = Mechanic,
                 BoostForce = Mechanic == MechanicType.BoostPad ? BoostForce : (float?)null,
                 CannonTimer = Mechanic == MechanicType.Cannon ? CannonTimer : (float?)null,
-                CannonTarget = Mechanic != MechanicType.None ? (float[])CannonTarget?.Clone() : null,
+                CannonTarget = (Mechanic != MechanicType.None
+                    || NetworkBoostForce.HasValue || NetworkCannonForce.HasValue)
+                    ? (float[])CannonTarget?.Clone() : null,
                 CannonLaunchPos = Mechanic == MechanicType.Cannon ? (float[])CannonLaunchPos?.Clone() : null,
                 NetworkBoostForce = NetworkBoostForce,
                 NetworkBoostAngle = NetworkBoostAngle,
@@ -156,6 +158,11 @@ namespace FIHMapEditor
                 // Instantiate under an INACTIVE parent so Awake doesn't run on any
                 // component before we strip the networking ones.
                 var clone = UnityEngine.Object.Instantiate(source, GetSpawnRoot().transform);
+                int inheritedLayersRestored = HiddenLayer.RestoreInheritedColliderLayers(source, clone);
+                if (inheritedLayersRestored > 0)
+                    MapEditorPlugin.Logger.LogInfo(
+                        $"[PLACE] '{sourceName}' inherited wipe-clean physics layers; restored " +
+                        $"{inheritedLayersRestored} collider layer(s) on the clone.");
                 StripComponents(clone);
 
                 clone.name = $"{ObjectCatalog.CleanName(sourceName)} {ObjectCatalog.CLONE_MARKER}";

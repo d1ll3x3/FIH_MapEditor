@@ -28,8 +28,10 @@ namespace FIHMapEditor
         private bool _solidOnly = false;      // hide collider-less decoration (SM meshes...)
         private bool _favsOnly = false;       // show starred entries only
         private int _catalogTop = 0;
-        private const int CATALOG_ROWS = 15;
+        // Two rows are reserved for the readable network-mechanic settings panel.
+        private const int CATALOG_ROWS = 11;
         private string _netBoostForce, _netBoostAngle, _netCannonForce, _netCannonAngle, _netAirBlock;
+        private string _autoArcApex = "5";
 
         // List state
         private string _listFilter = "";
@@ -64,6 +66,7 @@ namespace FIHMapEditor
         // Mechanics row state: numeric box re-seeded when the selection changes.
         private string _mechTimerField;
         private int _mechFieldsForId = -1;
+        private string _selectedNetForce, _selectedNetAngle, _selectedNetAirBlock;
 
         // KEYS tab fly tuning fields (lazy-seeded from config).
         private string _flySpeedField, _flyBoostField;
@@ -353,15 +356,28 @@ namespace FIHMapEditor
             _netCannonAngle ??= p.NetworkCannonAngle.ToString("0.##");
             _netAirBlock ??= p.NetworkCannonAirControlBlock.ToString("0.##");
 
-            if (_win.ToggleButton(new Rect(15, y, 112, 22), "NET TUNING", p.OverrideNetworkMechanicSettings))
+            GUI.Box(new Rect(10, y - 2, W - 20, 130), "");
+
+            GUI.Label(new Rect(18, y + 3, 190, 20), "Network Pad & Cannon Settings", _styleTitle);
+            if (_win.ToggleButton(new Rect(430, y, 130, 22),
+                    p.OverrideNetworkMechanicSettings ? "Custom values: ON" : "Custom values: OFF",
+                    p.OverrideNetworkMechanicSettings))
                 p.OverrideNetworkMechanicSettings = !p.OverrideNetworkMechanicSettings;
-            float x = 132;
-            DrawNetField("Pad F", ref _netBoostForce, ref x, y);
-            DrawNetField("Ang", ref _netBoostAngle, ref x, y);
-            DrawNetField("Can F", ref _netCannonForce, ref x, y);
-            DrawNetField("Ang", ref _netCannonAngle, ref x, y);
-            DrawNetField("Air", ref _netAirBlock, ref x, y);
-            if (_win.Button(new Rect(x, y, 48, 22), "SET"))
+            GUI.Label(new Rect(565, y + 3, 95, 20), "new placements", _styleSmall);
+            y += 25;
+
+            GUI.Label(new Rect(18, y + 3, 76, 20), "Boost Pad:", _styleSmall);
+            DrawNetField("Force", "padforce", ref _netBoostForce, 96, y, 58);
+            DrawNetField("Angle °", "padangle", ref _netBoostAngle, 215, y, 58);
+            GUI.Label(new Rect(338, y + 3, 70, 20), "Cannon:", _styleSmall);
+            DrawNetField("Force", "cannonforce", ref _netCannonForce, 405, y, 58);
+            DrawNetField("Angle °", "cannonangle", ref _netCannonAngle, 524, y, 58);
+            y += 25;
+
+            GUI.Label(new Rect(18, y + 3, 390, 20),
+                "Cannon air-control lock after launch (seconds):", _styleSmall);
+            _netAirBlock = _win.TextField(new Rect(405, y, 58, 22), "netairblock", _netAirBlock);
+            if (_win.Button(new Rect(480, y, 175, 22), "Apply to New Placements"))
             {
                 p.NetworkBoostForce = Mathf.Clamp(ParseFloat(_netBoostForce, p.NetworkBoostForce), 0f, 200f);
                 p.NetworkBoostAngle = Mathf.Clamp(ParseFloat(_netBoostAngle, p.NetworkBoostAngle), -89f, 89f);
@@ -369,18 +385,39 @@ namespace FIHMapEditor
                 p.NetworkCannonAngle = Mathf.Clamp(ParseFloat(_netCannonAngle, p.NetworkCannonAngle), -89f, 89f);
                 p.NetworkCannonAirControlBlock = Mathf.Clamp(ParseFloat(_netAirBlock, p.NetworkCannonAirControlBlock), 0f, 10f);
                 p.OverrideNetworkMechanicSettings = true;
-                _c.ShowToast("Network mechanic placement tuning set");
+                _c.ShowToast("Pad and cannon settings will be used for new placements");
             }
             y += 28;
+
+            GUI.Label(new Rect(18, y + 3, 190, 20), "Automatic Start → Landing:", _styleSmall);
+            if (_win.Button(new Rect(205, y, 105, 22), "Set Start Here"))
+                _c.SetAutoLaunchPoint(start: true);
+            if (_win.Button(new Rect(315, y, 105, 22), "Set End Here"))
+                _c.SetAutoLaunchPoint(start: false);
+            GUI.Label(new Rect(430, y + 3, 72, 20), "Apex +m", _styleSmall);
+            _autoArcApex = _win.TextField(new Rect(502, y, 52, 22), "autoarcapex", _autoArcApex);
+            if (_win.Button(new Rect(560, y, 95, 22), "Create"))
+                _c.CreateAutoAimedNetworkMechanic(ParseFloat(_autoArcApex, 5f));
+            y += 25;
+
+            string pointStatus = $"Start: {FormatPoint(_c.AutoLaunchStart)}   End: {FormatPoint(_c.AutoLaunchEnd)}";
+            GUI.Label(new Rect(18, y + 3, 520, 20), pointStatus, _styleSmall);
+            if (_win.Button(new Rect(560, y, 95, 22), "Clear Points"))
+                _c.ClearAutoLaunchPoints();
+            y += 29;
         }
 
-        private void DrawNetField(string label, ref string value, ref float x, float y)
+        private static string FormatPoint(Vector3? point)
+            => point.HasValue
+                ? $"{point.Value.x:0.#},{point.Value.y:0.#},{point.Value.z:0.#}"
+                : "not set";
+
+        private void DrawNetField(string label, string id, ref string value,
+                                  float x, float y, float fieldWidth)
         {
-            float lw = label.Length * 7f + 5f;
-            GUI.Label(new Rect(x, y + 3, lw, 20), label, _styleSmall);
-            x += lw;
-            value = _win.TextField(new Rect(x, y, 40, 22), "net" + label, value);
-            x += 44;
+            float labelWidth = label.Length * 7f + 6f;
+            GUI.Label(new Rect(x, y + 3, labelWidth, 20), label, _styleSmall);
+            value = _win.TextField(new Rect(x + labelWidth, y, fieldWidth, 22), "net" + id, value);
         }
 
         private List<CatalogEntry> _filteredCache;
@@ -963,16 +1000,43 @@ namespace FIHMapEditor
         private void DrawMechanicsRow(Selection sel, ref float y)
         {
             if (_c.SelectionSys.IsMulti) return;
-            if (!sel.IsPlaced || sel.Placed.Mechanic == MechanicType.None) return;
+            if (!sel.IsPlaced) return;
             var placed = sel.Placed;
+            bool networkPad = placed.NetworkBoostForce.HasValue;
+            bool networkCannon = placed.NetworkCannonForce.HasValue;
+            if (placed.Mechanic == MechanicType.None && !networkPad && !networkCannon) return;
 
             if (_mechFieldsForId != placed.Id)
             {
                 _mechFieldsForId = placed.Id;
                 _mechTimerField = placed.CannonTimer.ToString("0.##");
+                _selectedNetForce = (placed.NetworkBoostForce ?? placed.NetworkCannonForce ?? 20f).ToString("0.##");
+                _selectedNetAngle = (placed.NetworkBoostAngle ?? placed.NetworkCannonAngle ?? 45f).ToString("0.##");
+                _selectedNetAirBlock = (placed.NetworkCannonAirControlBlock ?? 0.5f).ToString("0.##");
             }
 
-            if (placed.Mechanic == MechanicType.BoostPad)
+            if (networkPad || networkCannon)
+            {
+                GUI.Label(new Rect(15, y + 3, 145, 20),
+                    networkPad ? "Network Boost Pad:" : "Network Cannon:", _styleSmall);
+                GUI.Label(new Rect(165, y + 3, 42, 20), "Force", _styleSmall);
+                _selectedNetForce = _win.TextField(new Rect(207, y, 58, 22), "selectednetforce", _selectedNetForce);
+                GUI.Label(new Rect(275, y + 3, 48, 20), "Angle°", _styleSmall);
+                _selectedNetAngle = _win.TextField(new Rect(326, y, 58, 22), "selectednetangle", _selectedNetAngle);
+                if (networkCannon)
+                {
+                    GUI.Label(new Rect(394, y + 3, 58, 20), "Air lock", _styleSmall);
+                    _selectedNetAirBlock = _win.TextField(new Rect(454, y, 58, 22),
+                        "selectednetair", _selectedNetAirBlock);
+                }
+                if (_win.Button(new Rect(525, y, 130, 22), "Apply & Respawn"))
+                    _c.ApplySelectedNetworkMechanicSettings(placed,
+                        ParseFloat(_selectedNetForce, 20f),
+                        ParseFloat(_selectedNetAngle, 45f),
+                        ParseFloat(_selectedNetAirBlock, 0.5f));
+                y += 28;
+            }
+            else if (placed.Mechanic == MechanicType.BoostPad)
             {
                 // Pads are always aimed: the violet ring is exactly where you land.
                 GUI.Label(new Rect(15, y + 3, 200, 20), "Boost pad — landing target:", _styleSmall);
