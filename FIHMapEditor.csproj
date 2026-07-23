@@ -24,6 +24,11 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Optional pre-generated catalog thumbnails distributed beside the plugin DLL. -->
+    <Content Include="previews-v1\**\*.rgba" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Reference Include="UnityEngine.CoreModule">
       <HintPath>lib\UnityEngine.CoreModule.dll</HintPath>
       <Private>false</Private>
@@ -34,6 +39,18 @@
     </Reference>
     <Reference Include="UnityEngine.AssetBundleModule">
       <HintPath>lib\UnityEngine.AssetBundleModule.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.Addressables">
+      <HintPath>lib\Unity.Addressables.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="Unity.ResourceManager">
+      <HintPath>lib\Unity.ResourceManager.dll</HintPath>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="UnityEngine.ImageConversionModule">
+      <HintPath>lib\UnityEngine.ImageConversionModule.dll</HintPath>
       <Private>false</Private>
     </Reference>
     <Reference Include="UnityEngine.IMGUIModule">

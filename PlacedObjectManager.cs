@@ -707,7 +707,37 @@ namespace FIHMapEditor
             try
             {
                 if (root == null) return;
-                if (root.GetComponentInChildren<Collider>(true) != null) return;
+                // Raw Addressable prefabs often contain disabled colliders, colliders
+                // under inactive pool branches, or trigger-only interaction volumes.
+                // Placement requires an active, enabled, non-trigger collider.
+                int usableSolids = 0;
+                int disabledSolids = 0;
+                int triggers = 0;
+                foreach (var collider in root.GetComponentsInChildren<Collider>(true))
+                {
+                    if (collider == null) continue;
+                    if (collider.isTrigger) { triggers++; continue; }
+                    if (!collider.enabled || !collider.gameObject.activeInHierarchy)
+                    {
+                        disabledSolids++;
+                        collider.enabled = true;
+                        for (var current = collider.transform;
+                             current != null && current != root.transform;
+                             current = current.parent)
+                            current.gameObject.SetActive(true);
+                    }
+                    if (collider.gameObject.layer == HiddenLayer.Layer)
+                        collider.gameObject.layer = 0;
+                    if (collider.enabled && collider.gameObject.activeInHierarchy) usableSolids++;
+                }
+                if (usableSolids > 0)
+                {
+                    if (disabledSolids > 0 || EditorConfig.VerboseLogs)
+                        MapEditorPlugin.Logger.LogInfo(
+                            $"[PLACE] '{root.name}' physics normalized: {usableSolids} usable solid, " +
+                            $"{disabledSolids} re-enabled, {triggers} trigger collider(s).");
+                    return;
+                }
 
                 var rt = root.transform;
                 Bounds? localAabb = null;
@@ -734,10 +764,12 @@ namespace FIHMapEditor
                 var bc = root.AddComponent<BoxCollider>();
                 bc.center = la.center;
                 bc.size = la.size;
+                if (root.layer == HiddenLayer.Layer) root.layer = 0;
 
-                if (EditorConfig.VerboseLogs)
-                    MapEditorPlugin.Logger.LogInfo(
-                        $"[PLACE] '{root.name}' had no colliders — added 1 box collider (AABB {la.size.x:0.#}x{la.size.y:0.#}x{la.size.z:0.#}) for raycast picking + play-mode physics.");
+                MapEditorPlugin.Logger.LogInfo(
+                    $"[PLACE] '{root.name}' had no usable solid collider " +
+                    $"({triggers} trigger-only) — added 1 box collider " +
+                    $"(AABB {la.size.x:0.#}x{la.size.y:0.#}x{la.size.z:0.#}).");
             }
             catch (Exception ex)
             {

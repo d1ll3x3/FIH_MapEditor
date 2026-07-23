@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using EHS;
 using Steamworks;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -178,6 +179,9 @@ namespace FIHMapEditor
         public string ToastMessage => Time.unscaledTime < _toastUntil ? _toastMessage : "";
 
         private bool _devicesDisabled = false;
+        private bool _rightMouseLook = false;
+        private float _normalMouseSensitivity;
+        private bool _mouseSensitivityOverridden;
 
         public EditorController() : this(new FileMapRepository()) { }
 
@@ -299,6 +303,11 @@ namespace FIHMapEditor
         {
             try
             {
+                Catalog?.UpdateAddressableDiscovery();
+                // Preview work is deliberately paused outside the visible Catalog tab.
+                // Generating a thumbnail involves asset loading and a GPU readback.
+                Catalog?.Previews?.Update(_menu?.WantsCatalogPreviews == true,
+                    Catalog?.Entries, Catalog?.ScanVersion ?? -1);
                 // Run any work network callbacks handed back to the main thread.
                 while (_mainThread.TryDequeue(out var action))
                 {
@@ -394,7 +403,15 @@ namespace FIHMapEditor
             {
                 if (!InGameScene) return;
 
-                if (Mode == EditorMode.Editor && CursorFree)
+                if (Mode == EditorMode.Editor && CursorFree && _rightMouseLook)
+                {
+                    // OnGUI runs after Update (often several times per frame). Keep its
+                    // cursor policy consistent with RMB camera-look or this callback
+                    // immediately redraws the pointer hidden by UpdateRightMouseLook.
+                    Cursor.lockState = CursorLockMode.Locked;
+                    Cursor.visible = false;
+                }
+                else if (Mode == EditorMode.Editor && CursorFree)
                 {
                     // The game re-locks the cursor aggressively; force it free every pass.
                     Cursor.lockState = CursorLockMode.None;
@@ -578,6 +595,8 @@ namespace FIHMapEditor
             {
                 SetCursorFree(!CursorFree);
             }
+
+            UpdateRightMouseLook(acceptInput);
 
             // While a cannon holds (or test-launches) the player, fly must not move it.
             if (acceptInput && (!CursorFree || !AnyTextFieldFocused()) && !Mechanics.IsControllingPlayer)
@@ -1814,6 +1833,19 @@ namespace FIHMapEditor
 
         private void HandleWorldClick()
         {
+            // RMB owns the pointer while rotating the editor camera. Test the physical
+            // button as well as our state flag so the very first/last transition frame
+            // cannot leak a left click through to stamping, picking, or a gizmo handle.
+            if (_rightMouseLook || UnityEngine.Input.GetMouseButton(1))
+            {
+                if (Gizmo.IsDragging)
+                {
+                    Gizmo.CancelDrag();
+                    ClearPendingUndo();
+                }
+                return;
+            }
+
             // Ongoing gizmo drag owns the mouse until release.
             if (Gizmo.IsDragging)
             {
@@ -2153,6 +2185,7 @@ namespace FIHMapEditor
 
         public void SetCursorFree(bool free)
         {
+            EndRightMouseLook();
             CursorFree = free;
             try
             {
@@ -2985,6 +3018,73 @@ namespace FIHMapEditor
                 AutoLaunchEnd = player.position;
                 ShowToast("Automatic landing point set");
             }
+        }
+
+        private void UpdateRightMouseLook(bool acceptInput)
+        {
+            bool held = acceptInput && CursorFree && !MapsHubOpen
+                && UnityEngine.Input.GetMouseButton(1);
+
+            if (held && !_rightMouseLook)
+            {
+                // Do not steal a right-click that began over an editor window.
+                if (_menu.ContainsMouse()) return;
+                try
+                {
+                    if (UnityEngine.InputSystem.Mouse.current != null)
+                        UnityEngine.InputSystem.InputSystem.EnableDevice(
+                            UnityEngine.InputSystem.Mouse.current);
+                    Cursor.lockState = CursorLockMode.Locked;
+                    Cursor.visible = false;
+                    _normalMouseSensitivity = SettingsGeneral.MouseSensitivity;
+                    SettingsGeneral.MouseSensitivity = _normalMouseSensitivity
+                        * Mathf.Clamp(EditorConfig.Settings.EditorLookSensitivity, 0.5f, 5f);
+                    _mouseSensitivityOverridden = true;
+                    _rightMouseLook = true;
+                }
+                catch (Exception ex)
+                {
+                    MapEditorPlugin.Logger.LogWarning($"[CAMERA] Could not begin RMB look: {ex.Message}");
+                }
+            }
+            else if (held && _rightMouseLook)
+            {
+                // The game's camera/input code can re-apply its own cursor state while
+                // looking. Enforce this every frame so the pointer cannot flash back on
+                // screen halfway through an RMB drag.
+                Cursor.lockState = CursorLockMode.Locked;
+                Cursor.visible = false;
+            }
+            else if (!held && _rightMouseLook)
+            {
+                EndRightMouseLook();
+            }
+        }
+
+        private void EndRightMouseLook()
+        {
+            if (!_rightMouseLook) return;
+            try
+            {
+                if (_mouseSensitivityOverridden)
+                {
+                    SettingsGeneral.MouseSensitivity = _normalMouseSensitivity;
+                    _mouseSensitivityOverridden = false;
+                }
+                if (_devicesDisabled && UnityEngine.InputSystem.Mouse.current != null)
+                    UnityEngine.InputSystem.InputSystem.DisableDevice(
+                        UnityEngine.InputSystem.Mouse.current);
+                if (CursorFree)
+                {
+                    Cursor.lockState = CursorLockMode.None;
+                    Cursor.visible = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[CAMERA] Could not end RMB look: {ex.Message}");
+            }
+            _rightMouseLook = false;
         }
 
         public void ClearAutoLaunchPoints()

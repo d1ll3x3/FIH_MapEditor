@@ -21,6 +21,8 @@ namespace FIHMapEditor
         // KEYS tab: id of the action currently listening for a key, or null.
         private string _listeningBind = null;
         public bool IsCapturingBind => _listeningBind != null;
+        public bool WantsCatalogPreviews => _tab == Tab.Catalog
+            && _c.Mode == EditorMode.Editor && _c.CursorFree && !_c.MapsHubOpen;
 
         // Catalog state
         private string _filter = "";
@@ -28,8 +30,10 @@ namespace FIHMapEditor
         private bool _solidOnly = false;      // hide collider-less decoration (SM meshes...)
         private bool _favsOnly = false;       // show starred entries only
         private int _catalogTop = 0;
-        // Two rows are reserved for the readable network-mechanic settings panel.
-        private const int CATALOG_ROWS = 11;
+        private const int CATALOG_COLUMNS = 3;
+        private const int CATALOG_GRID_ROWS = 2;
+        private const int CATALOG_PAGE_SIZE = CATALOG_COLUMNS * CATALOG_GRID_ROWS;
+        private const float CATALOG_CARD_HEIGHT = 174f;
         private string _netBoostForce, _netBoostAngle, _netCannonForce, _netCannonAngle, _netAirBlock;
         private string _autoArcApex = "5";
 
@@ -69,7 +73,7 @@ namespace FIHMapEditor
         private string _selectedNetForce, _selectedNetAngle, _selectedNetAirBlock;
 
         // KEYS tab fly tuning fields (lazy-seeded from config).
-        private string _flySpeedField, _flyBoostField;
+        private string _flySpeedField, _flyBoostField, _lookSensitivityField;
 
         // Wipe / revert confirmations
         private float _wipeConfirmUntil = 0f;
@@ -298,12 +302,13 @@ namespace FIHMapEditor
             y += 28;
 
             var entries = FilteredEntries();
-            var listRect = new Rect(10, y, W - 20, CATALOG_ROWS * 26 + 4);
+            var listRect = new Rect(10, y, W - 20, CATALOG_GRID_ROWS * CATALOG_CARD_HEIGHT + 4);
             GUI.Box(listRect, "");
 
             float scroll = _win.ScrollDeltaOver(listRect);
             if (scroll != 0)
-                _catalogTop = Mathf.Clamp(_catalogTop + (scroll < 0 ? 3 : -3), 0, Mathf.Max(0, entries.Count - CATALOG_ROWS));
+                _catalogTop = Mathf.Clamp(_catalogTop + (scroll < 0 ? CATALOG_COLUMNS : -CATALOG_COLUMNS),
+                    0, Mathf.Max(0, entries.Count - CATALOG_PAGE_SIZE));
 
             if (!_c.Catalog.HasScanned)
             {
@@ -314,31 +319,47 @@ namespace FIHMapEditor
                 GUI.Label(new Rect(25, y + 10, 400, 22), "No results for this filter", _styleRow);
             }
 
-            float ry = y + 4;
-            for (int i = _catalogTop; i < entries.Count && i < _catalogTop + CATALOG_ROWS; i++)
+            const float cardWidth = 216f;
+            for (int i = _catalogTop; i < entries.Count && i < _catalogTop + CATALOG_PAGE_SIZE; i++)
             {
                 var e = entries[i];
+                int slot = i - _catalogTop;
+                int column = slot % CATALOG_COLUMNS;
+                int row = slot / CATALOG_COLUMNS;
+                float cardX = 14 + column * 219f;
+                float cardY = y + 4 + row * CATALOG_CARD_HEIGHT;
+                GUI.Box(new Rect(cardX, cardY, cardWidth, CATALOG_CARD_HEIGHT - 4), "");
+
+                var preview = _c.Catalog.Previews.Request(e);
+                GUI.Box(new Rect(cardX + 6, cardY + 6, 122, 122), "");
+                if (preview != null)
+                    GUI.DrawTexture(new Rect(cardX + 10, cardY + 10, 114, 114), preview,
+                        ScaleMode.ScaleToFit, true);
+                else
+                    GUI.Label(new Rect(cardX + 58, cardY + 56, 42, 20), "...", _styleSmall);
+
                 bool fav = IsFavorite(e.DisplayName);
                 GUI.color = fav ? new Color(1f, 0.85f, 0.2f) : new Color(1f, 1f, 1f, 0.35f);
-                if (_win.Button(new Rect(16, ry + 1, 26, 22), "★"))
+                if (_win.Button(new Rect(cardX + 136, cardY + 8, 70, 26), fav ? "★ FAV" : "☆ FAV"))
                     ToggleFavorite(e.DisplayName);
                 GUI.color = Color.white;
 
                 string size = $"{e.BoundsSize.x:0.#}×{e.BoundsSize.y:0.#}×{e.BoundsSize.z:0.#}";
-                GUI.Label(new Rect(48, ry, 422, 24), $"{Truncate(e.DisplayName, 30)}  ({size})", _styleRow);
-                if (_win.Button(new Rect(480, ry + 1, 85, 22), "PLACE"))
+                GUI.Label(new Rect(cardX + 8, cardY + 130, cardWidth - 16, 20),
+                    Truncate(e.DisplayName, 23), _styleRow);
+                GUI.Label(new Rect(cardX + 8, cardY + 150, 120, 18), size, _styleSmall);
+                if (_win.Button(new Rect(cardX + 136, cardY + 42, 70, 34), "PLACE"))
                     _c.PlaceEntry(e);
                 bool isStamp = _c.StampEntry == e;
-                if (_win.ToggleButton(new Rect(570, ry + 1, 85, 22), "STAMP", isStamp))
+                if (_win.ToggleButton(new Rect(cardX + 136, cardY + 84, 70, 34), "STAMP", isStamp))
                 {
                     _c.StampEntry = isStamp ? null : e;
                     // Picking a stamp means you want to place: flip the master switch on.
                     if (_c.StampEntry != null) _c.MousePlaceEnabled = true;
                 }
-                ry += 26;
             }
 
-            y += CATALOG_ROWS * 26 + 10;
+            y += CATALOG_GRID_ROWS * CATALOG_CARD_HEIGHT + 10;
             GUI.Label(new Rect(15, y, W - 30, 20),
                 $"{entries.Count} objects  |  mouse wheel: scroll  |  PLACE: in front of you  |  STAMP: click in the world",
                 _styleSmall);
@@ -435,6 +456,7 @@ namespace FIHMapEditor
             var rest = new List<CatalogEntry>();
             foreach (var e in _c.Catalog.Entries)
             {
+                if (ObjectCatalog.IsFihNamed(e.DisplayName)) continue;
                 bool fav = favSet.Contains(e.DisplayName);
                 if (_favsOnly && !fav) continue;
                 if (_category != "" && e.Category != _category) continue;
@@ -1178,6 +1200,7 @@ namespace FIHMapEditor
             // Fly tuning values live here too — they pair with the fly binds.
             _flySpeedField ??= EditorConfig.Settings.FlySpeed.ToString("0.#");
             _flyBoostField ??= EditorConfig.Settings.FlySpeedBoost.ToString("0.#");
+            _lookSensitivityField ??= EditorConfig.Settings.EditorLookSensitivity.ToString("0.#");
             GUI.Label(new Rect(15, y + 4, 80, 20), "Fly speed:", _styleSmall);
             _flySpeedField = _win.TextField(new Rect(95, y, 60, 22), "flyspeed", _flySpeedField);
             GUI.Label(new Rect(170, y + 4, 60, 20), "Turbo ×:", _styleSmall);
@@ -1192,12 +1215,26 @@ namespace FIHMapEditor
                 _c.ShowToast($"Fly speed {EditorConfig.Settings.FlySpeed:0.#} m/s, turbo ×{EditorConfig.Settings.FlySpeedBoost:0.#}");
             }
 
+            y += 32;
+            GUI.Label(new Rect(15, y + 4, 105, 20), "RMB look speed:", _styleSmall);
+            _lookSensitivityField = _win.TextField(new Rect(120, y, 55, 22), "lookspeedx", _lookSensitivityField);
+            GUI.Label(new Rect(180, y + 4, 20, 20), "x", _styleSmall);
+            if (_win.Button(new Rect(205, y, 50, 22), "Set"))
+            {
+                EditorConfig.Settings.EditorLookSensitivity = Mathf.Clamp(
+                    ParseFloat(_lookSensitivityField, 2f), 0.5f, 5f);
+                _lookSensitivityField = EditorConfig.Settings.EditorLookSensitivity.ToString("0.#");
+                EditorConfig.Save();
+                _c.ShowToast($"RMB camera sensitivity x{EditorConfig.Settings.EditorLookSensitivity:0.#}");
+            }
+
             if (_win.Button(new Rect(430, y, 180, 24), "Reset Defaults"))
             {
                 EditorConfig.ResetToDefaults();
                 _listeningBind = null;
                 _flySpeedField = null;
                 _flyBoostField = null;
+                _lookSensitivityField = null;
                 _c.ShowToast("Keys reset to defaults");
             }
             y += 32;

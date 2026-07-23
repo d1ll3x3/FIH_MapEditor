@@ -5,6 +5,10 @@ using System.Text;
 using System.Text.Json;
 using Il2CppInterop.Runtime;
 using UnityEngine;
+using UnityEngine.AddressableAssets;
+using UnityEngine.AddressableAssets.ResourceLocators;
+using UnityEngine.ResourceManagement.AsyncOperations;
+using UnityEngine.ResourceManagement.ResourceLocations;
 using UnityEngine.SceneManagement;
 
 namespace FIHMapEditor
@@ -36,9 +40,18 @@ namespace FIHMapEditor
         // SourcePath prefix for entries that come from prefab assets (game files)
         // instead of the scene hierarchy.
         public const string ASSET_PREFIX = "asset://";
+        public const string ADDRESSABLE_PREFIX = "addressable://";
         public const string ASSET_CATEGORY = "GameFiles";
 
+        private readonly Dictionary<string, IResourceLocation> _addressableLocations =
+            new Dictionary<string, IResourceLocation>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, AsyncOperationHandle<GameObject>> _addressableHandles =
+            new Dictionary<string, AsyncOperationHandle<GameObject>>(StringComparer.OrdinalIgnoreCase);
+        private float _addressableRetryAt = -1f;
+        private bool _addressableDiscoveryComplete;
+
         public List<CatalogEntry> Entries { get; } = new List<CatalogEntry>();
+        public ObjectPreviewRenderer Previews { get; }
         public List<string> Categories { get; } = new List<string>();
         public List<DecorPickable> ColliderlessRoots { get; } = new List<DecorPickable>();
         public bool HasScanned { get; private set; }
@@ -86,6 +99,7 @@ namespace FIHMapEditor
                 foreach (var e in pulled)
                 {
                     if (e == null) continue;
+                    if (IsFihNamed(e.DisplayName)) continue;
                     if (!string.IsNullOrEmpty(e.SourcePath))
                     {
                         // Already have this object (or a duplicate within the pull).
@@ -172,6 +186,7 @@ namespace FIHMapEditor
                 foreach (var c in cached)
                 {
                     if (string.IsNullOrEmpty(c.Key) || _seen.ContainsKey(c.Key)) continue;
+                    if (IsFihNamed(c.Name)) continue;
                     var entry = new CatalogEntry
                     {
                         DisplayName = c.Name,
@@ -229,6 +244,7 @@ namespace FIHMapEditor
         public ObjectCatalog(GameObjectFinder finder)
         {
             _finder = finder;
+            Previews = new ObjectPreviewRenderer(this);
         }
 
         public void Clear()
@@ -398,8 +414,17 @@ namespace FIHMapEditor
                 }
 
                 ScanInactiveSceneObjects(seen, playerRoot);
+                ScanAddressableAssets(seen);
                 ScanPrefabAssets(seen);
                 ScanMechanicsAssemblies(seen);
+                PruneFihNamedEntries();
+
+                // The editor catalog is asset-backed once Addressables discovery has
+                // completed. Scene hierarchy scanning remains above only to support
+                // legacy source resolution/auditing during migration; those transient
+                // entries are not offered for new placement.
+                if (_addressableDiscoveryComplete)
+                    PruneCatalogToAddressables();
 
                 // Interactables (boost pads, cannons...) get their own category so they
                 // are easy to find. Subtree-only check: assembly PIECES (visual mesh,
@@ -734,7 +759,8 @@ namespace FIHMapEditor
             try
             {
                 if (candidate == null || !candidate.activeInHierarchy) return;
-                if (entry.SourcePath != null && entry.SourcePath.StartsWith(ASSET_PREFIX)) return;
+                if (entry.SourcePath != null && (entry.SourcePath.StartsWith(ASSET_PREFIX)
+                    || entry.SourcePath.StartsWith(ADDRESSABLE_PREFIX))) return;
 
                 bool currentBad = entry.Source == null
                     || !entry.Source.activeInHierarchy
@@ -913,6 +939,12 @@ namespace FIHMapEditor
         // exact path → path ignoring #indices → catalog entry by leaf name.
         public GameObject ResolveSource(string path, string sourceName)
         {
+            if (!string.IsNullOrEmpty(path) && path.StartsWith(ADDRESSABLE_PREFIX))
+            {
+                var asset = LoadAddressable(path.Substring(ADDRESSABLE_PREFIX.Length));
+                if (asset != null) return asset;
+                path = null;
+            }
             if (!string.IsNullOrEmpty(path) && path.StartsWith(ASSET_PREFIX))
             {
                 var asset = FindPrefabAssetByName(path.Substring(ASSET_PREFIX.Length));
@@ -943,15 +975,278 @@ namespace FIHMapEditor
             return null;
         }
 
+        // Preferred asset source. Enumerating locations does not load bundle contents;
+        // individual prefab templates are loaded lazily when placed or previewed.
+        private void ScanAddressableAssets(Dictionary<string, CatalogEntry> seen)
+        {
+            try
+            {
+                int added = 0;
+                var gameObjectType = Il2CppType.Of<GameObject>();
+                var locatorEnumerable = Addressables.ResourceLocators
+                    .TryCast<Il2CppSystem.Collections.IEnumerable>();
+                var locatorEnumerator = locatorEnumerable?.GetEnumerator();
+                while (locatorEnumerator != null && locatorEnumerator.MoveNext())
+                {
+                    var locator = locatorEnumerator.Current?.TryCast<
+                        UnityEngine.AddressableAssets.ResourceLocators.IResourceLocator>();
+                    if (locator == null) continue;
+                    var map = locator.TryCast<ResourceLocationMap>();
+                    if (map == null || map.Locations == null) continue;
+
+                    // ResourceLocationMap.AllLocations uses SelectMany over native
+                    // UnsafeLists. Its boxed IL2CPP enumerator throws a false
+                    // "collection modified" error. Enumerate dictionary keys, then
+                    // index each IList directly instead.
+                    var keyEnumerable = map.Locations.Keys
+                        .TryCast<Il2CppSystem.Collections.IEnumerable>();
+                    var keyEnumerator = keyEnumerable?.GetEnumerator();
+                    while (keyEnumerator != null && keyEnumerator.MoveNext())
+                    {
+                        var locationKey = keyEnumerator.Current;
+                        if (locationKey == null || !map.Locations.TryGetValue(locationKey, out var locations)
+                            || locations == null) continue;
+                        var indexedLocations = locations.TryCast<Il2CppSystem.Collections.IList>();
+                        var locationCollection = locations.TryCast<Il2CppSystem.Collections.ICollection>();
+                        if (indexedLocations == null || locationCollection == null) continue;
+                        for (int i = 0; i < locationCollection.Count; i++)
+                        {
+                            var location = indexedLocations[i]?.TryCast<IResourceLocation>();
+                            if (AddAddressableLocation(location, gameObjectType, seen)) added++;
+                        }
+                    }
+                }
+                MapEditorPlugin.Logger.LogInfo(
+                    $"[CATALOG] Addressables discovered {_addressableLocations.Count} prefab location(s), +{added} catalog entries.");
+                _addressableDiscoveryComplete = _addressableLocations.Count > 0;
+                _addressableRetryAt = -1f;
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[CATALOG] Addressables scan failed: {ex.Message}");
+                // Addressables can still be registering locations during scene startup.
+                // Retry from Update after the native collection has settled.
+                _addressableRetryAt = Time.unscaledTime + 2f;
+            }
+        }
+
+        private bool AddAddressableLocation(IResourceLocation location, Il2CppSystem.Type gameObjectType,
+            Dictionary<string, CatalogEntry> seen)
+        {
+            if (location == null || location.ResourceType == null) return false;
+            string typeName = location.ResourceType.FullName ?? location.ResourceType.Name;
+            if (typeName != gameObjectType.FullName && typeName != "UnityEngine.GameObject") return false;
+
+            string address = location.PrimaryKey;
+            if (string.IsNullOrWhiteSpace(address) || _addressableLocations.ContainsKey(address)) return false;
+            _addressableLocations[address] = location;
+            string display = Path.GetFileNameWithoutExtension(address.Replace('\\', '/'));
+            if (string.IsNullOrWhiteSpace(display)) display = address;
+            display = CleanName(display);
+            if (display.IndexOf("FIH", StringComparison.OrdinalIgnoreCase) >= 0) return false;
+            string key = "addressable|" + address;
+            if (seen.ContainsKey(key)) return false;
+
+            foreach (var candidate in Entries)
+            {
+                if (candidate.DisplayName != display || (candidate.SourcePath != null
+                    && candidate.SourcePath.StartsWith(ADDRESSABLE_PREFIX))) continue;
+                candidate.SourcePath = ADDRESSABLE_PREFIX + address;
+                candidate.Source = null;
+                candidate.Category = ASSET_CATEGORY;
+                seen[key] = candidate;
+                _sourcesUpgraded = true;
+                return false;
+            }
+
+            var entry = new CatalogEntry
+            {
+                DisplayName = display,
+                SourcePath = ADDRESSABLE_PREFIX + address,
+                BoundsSize = Vector3.one,
+                Category = ASSET_CATEGORY,
+                HasCollider = true,
+            };
+            seen[key] = entry;
+            Entries.Add(entry);
+            return true;
+        }
+
+        public void UpdateAddressableDiscovery()
+        {
+            if (_addressableRetryAt < 0f || Time.unscaledTime < _addressableRetryAt) return;
+            int before = Entries.Count;
+            _addressableRetryAt = Time.unscaledTime + 5f;
+            ScanAddressableAssets(_seen);
+            if (_addressableDiscoveryComplete) PruneCatalogToAddressables();
+            if (Entries.Count == before) return;
+
+            Entries.Sort((a, b) => string.CompareOrdinal(a.DisplayName, b.DisplayName));
+            Categories.Clear();
+            foreach (var entry in Entries)
+                if (!Categories.Contains(entry.Category)) Categories.Add(entry.Category);
+            Categories.Sort();
+            ScanVersion++;
+            SaveCache();
+        }
+
+        private void PruneCatalogToAddressables()
+        {
+            int removed = 0;
+            for (int i = Entries.Count - 1; i >= 0; i--)
+            {
+                var entry = Entries[i];
+                bool addressable = entry?.SourcePath != null
+                    && entry.SourcePath.StartsWith(ADDRESSABLE_PREFIX);
+                bool fihNamed = entry?.DisplayName != null
+                    && entry.DisplayName.IndexOf("FIH", StringComparison.OrdinalIgnoreCase) >= 0;
+                if (addressable && !fihNamed) continue;
+                Entries.RemoveAt(i);
+                removed++;
+            }
+            if (removed == 0) return;
+
+            var staleKeys = new List<string>();
+            foreach (var pair in _seen)
+                if (pair.Value == null || !Entries.Contains(pair.Value)) staleKeys.Add(pair.Key);
+            foreach (var key in staleKeys) _seen.Remove(key);
+            _sourcesUpgraded = true;
+            ScanVersion++;
+            MapEditorPlugin.Logger.LogInfo(
+                $"[CATALOG] Asset-only mode omitted {removed} scene/resident entries; " +
+                $"{Entries.Count} Addressables entries remain.");
+        }
+
+        private void PruneFihNamedEntries()
+        {
+            for (int i = Entries.Count - 1; i >= 0; i--)
+                if (IsFihNamed(Entries[i]?.DisplayName)) Entries.RemoveAt(i);
+
+            var staleKeys = new List<string>();
+            foreach (var pair in _seen)
+                if (pair.Value == null || IsFihNamed(pair.Value.DisplayName)) staleKeys.Add(pair.Key);
+            foreach (var key in staleKeys) _seen.Remove(key);
+        }
+
+        public static bool IsFihNamed(string name)
+            => !string.IsNullOrEmpty(name)
+                && name.IndexOf("FIH", StringComparison.OrdinalIgnoreCase) >= 0;
+
+        public void OmitUnplaceable(CatalogEntry entry)
+        {
+            if (entry == null || !Entries.Remove(entry)) return;
+
+            var staleKeys = new List<string>();
+            foreach (var pair in _seen)
+                if (ReferenceEquals(pair.Value, entry)) staleKeys.Add(pair.Key);
+            foreach (var key in staleKeys) _seen.Remove(key);
+
+            // Force the GUI's filtered-list cache to rebuild before its next draw.
+            ScanVersion++;
+            bool categoryStillUsed = false;
+            foreach (var remaining in Entries)
+                if (remaining.Category == entry.Category) { categoryStillUsed = true; break; }
+            if (!categoryStillUsed) Categories.Remove(entry.Category);
+        }
+
         public GameObject GetLiveSource(CatalogEntry entry)
         {
             if (entry.Source != null) return entry.Source;
-            if (entry.SourcePath != null && entry.SourcePath.StartsWith(ASSET_PREFIX))
+            if (entry.SourcePath != null && entry.SourcePath.StartsWith(ADDRESSABLE_PREFIX))
+            {
+                entry.Source = LoadAddressable(entry.SourcePath.Substring(ADDRESSABLE_PREFIX.Length));
+                if (entry.Source != null)
+                {
+                    var bounds = ComputeAssetBounds(entry.Source);
+                    if (bounds.size != Vector3.zero) entry.BoundsSize = bounds.size;
+                    entry.HasCollider = HasSolidCollider(entry.Source);
+                }
+            }
+            else if (entry.SourcePath != null && entry.SourcePath.StartsWith(ASSET_PREFIX))
                 entry.Source = FindPrefabAssetByName(entry.SourcePath.Substring(ASSET_PREFIX.Length));
             else
                 entry.Source = ResolvePath(entry.SourcePath, exactIndices: true)
                             ?? ResolvePath(entry.SourcePath, exactIndices: false);
             return entry.Source;
+        }
+
+        // Preview rendering must not retain every browsed Addressable. Placement uses
+        // GetLiveSource and keeps its handle intentionally; previews borrow an otherwise
+        // unloaded prefab just long enough to render its thumbnail.
+        internal GameObject GetPreviewSource(CatalogEntry entry,
+            out AsyncOperationHandle<GameObject> temporaryHandle, out bool hasTemporaryHandle)
+        {
+            temporaryHandle = default;
+            hasTemporaryHandle = false;
+            if (entry == null) return null;
+            if (entry.Source != null) return entry.Source;
+            if (entry.SourcePath == null || !entry.SourcePath.StartsWith(ADDRESSABLE_PREFIX))
+                return GetLiveSource(entry);
+
+            string address = entry.SourcePath.Substring(ADDRESSABLE_PREFIX.Length);
+            if (!_addressableLocations.TryGetValue(address, out var location))
+            {
+                if (_addressableRetryAt < 0f) _addressableRetryAt = Time.unscaledTime + 0.25f;
+                return null;
+            }
+            if (_addressableHandles.TryGetValue(address, out var retained) && retained.IsValid())
+                return retained.Result;
+
+            temporaryHandle = Addressables.LoadAssetAsync<GameObject>(location);
+            var prefab = temporaryHandle.WaitForCompletion();
+            if (prefab == null)
+            {
+                if (temporaryHandle.IsValid()) Addressables.Release(temporaryHandle);
+                temporaryHandle = default;
+                return null;
+            }
+            hasTemporaryHandle = true;
+            return prefab;
+        }
+
+        internal void ReleasePreviewSource(AsyncOperationHandle<GameObject> handle, bool temporary)
+        {
+            if (temporary && handle.IsValid()) Addressables.Release(handle);
+        }
+
+        public static bool HasSolidCollider(GameObject source)
+        {
+            if (source == null) return false;
+            foreach (var collider in source.GetComponentsInChildren<Collider>(true))
+                if (collider != null && !collider.isTrigger) return true;
+            return false;
+        }
+
+        private GameObject LoadAddressable(string address)
+        {
+            try
+            {
+                if (!_addressableLocations.TryGetValue(address, out var location))
+                {
+                    // Cache files can contain an address before discovery finishes. The
+                    // main Update loop retries discovery; never mutate catalog rows here
+                    // while IMGUI may be iterating them.
+                    if (_addressableRetryAt < 0f) _addressableRetryAt = Time.unscaledTime + 0.25f;
+                    return null;
+                }
+                if (_addressableHandles.TryGetValue(address, out var retained) && retained.IsValid())
+                    return retained.Result;
+
+                var handle = Addressables.LoadAssetAsync<GameObject>(location);
+                var prefab = handle.WaitForCompletion();
+                if (prefab == null)
+                {
+                    if (handle.IsValid()) Addressables.Release(handle);
+                    return null;
+                }
+                _addressableHandles[address] = handle;
+                return prefab;
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[CATALOG] Could not load addressable '{address}': {ex.Message}");
+                return null;
+            }
         }
 
         private static GameObject ResolvePath(string path, bool exactIndices)
