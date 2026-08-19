@@ -237,7 +237,7 @@ namespace FIHMapEditor
 
             // OnlineMapService serializes requests; disabling the button prevents duplicate
             // uploads from two IMGUI frames while an earlier request is in flight.
-            bool canUpload = _c.OnlineMaps.Configured && !_c.OnlineMaps.Busy;
+            bool canUpload = _c.OnlineMaps.Configured && !_c.OnlineMaps.Busy && !_c.ReadOnly;
             GUI.backgroundColor = canUpload ? new Color(0.3f, 0.7f, 0.4f) : new Color(0.4f, 0.4f, 0.4f);
             if (_win.Button(new Rect(315, y, 130, 26), _c.OnlineMaps.Busy ? "…" : "UPLOAD") && canUpload)
                 _c.UploadCurrentMap(_uploadEditable);

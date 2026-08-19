@@ -2508,6 +2508,7 @@ namespace FIHMapEditor
         public void UploadCurrentMap(bool editable)
         {
             if (!OnlineMaps.Configured) { ShowToast("Online maps not configured"); return; }
+            if (ReadOnly) { ShowToast("Play-only maps cannot be uploaded"); return; }
             if (!HasWorkingContent()) { ShowToast("Nothing to upload — the map is empty"); return; }
             // A play-only map without a spawn would "play from wherever you stand" —
             // trivially cheatable. Force the author to define the intended start.
@@ -2519,29 +2520,45 @@ namespace FIHMapEditor
             if (string.IsNullOrEmpty(MapId)) MapId = Guid.NewGuid().ToString("N");
 
             var (sid, name) = SteamIdentity();
-            AuthorName = name;
-            AuthorSteamId = sid;
-            Editable = editable;
 
-            // Reuse our token if we've uploaded this map before, else mint one.
-            if (!EditorConfig.Settings.OwnerTokens.TryGetValue(MapId, out string token))
+            // Reuse our token if we've uploaded this map before, else mint a candidate token.
+            // Do NOT persist the candidate token until the server confirms the upload.
+            string uploadMapId = MapId;
+            if (!EditorConfig.Settings.OwnerTokens.TryGetValue(uploadMapId, out string token))
             {
                 token = Guid.NewGuid().ToString("N");
-                EditorConfig.Settings.OwnerTokens[MapId] = token;
-                EditorConfig.Save();
             }
 
-            RefreshSnapshot();
-            var map = _workingSnapshot;
+            var map = BuildMapFile();
+            map.AuthorName = name;
+            map.AuthorSteamId = sid;
+            map.Editable = editable;
+
             ShowToast("Uploading map…");
             OnlineMaps.Upload(map, token, result => RunOnMainThread(() =>
             {
                 if (result == "inserted" || result == "updated")
+                {
+                    EditorConfig.Settings.OwnerTokens[uploadMapId] = token;
+                    EditorConfig.Save();
+
+                    AuthorName = name;
+                    AuthorSteamId = sid;
+                    Editable = editable;
+                    RefreshReadOnly();
+                    RefreshSnapshot();
+
                     ShowToast($"Map uploaded ({(editable ? "editable" : "play-only")}) — \"{MapName}\"");
+                    OnlineMaps.RefreshList(force: true);
+                }
                 else if (result == "forbidden")
+                {
                     ShowToast("Upload rejected: this map id belongs to someone else");
+                }
                 else
+                {
                     ShowToast($"Upload failed: {result}");
+                }
             }));
         }
 
@@ -2596,6 +2613,13 @@ namespace FIHMapEditor
                     EditorConfig.Settings.OwnerTokens.Remove(mapId);
                     EditorConfig.Save();
                     ShowToast("Online map deleted");
+                    OnlineMaps.RefreshList(force: true);
+                }
+                else if (result == "forbidden")
+                {
+                    EditorConfig.Settings.OwnerTokens.Remove(mapId);
+                    EditorConfig.Save();
+                    ShowToast("Delete rejected: you do not own this map");
                     OnlineMaps.RefreshList(force: true);
                 }
                 else ShowToast($"Delete failed: {result}");

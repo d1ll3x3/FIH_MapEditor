@@ -21,12 +21,22 @@ namespace FIHMapEditor.Tests
         public void ApplyMetadataCopiesMapFacingState()
         {
             var checkpoints = new List<CheckpointData> { new CheckpointData { Uid = "cp" } };
-            var map = new MapFile { Name = "Course", MapId = "map", Editable = false, Checkpoints = checkpoints };
+            var map = new MapFile
+            {
+                Name = "Course",
+                MapId = "map",
+                Editable = false,
+                AuthorName = "OriginalCreator",
+                AuthorSteamId = 123456789,
+                Checkpoints = checkpoints
+            };
             var session = new MapSession();
             session.ApplyMetadata(map);
             Assert.Equal("Course", session.Name);
             Assert.Equal("map", session.MapId);
             Assert.False(session.Editable);
+            Assert.Equal("OriginalCreator", session.AuthorName);
+            Assert.Equal(123456789, session.AuthorSteamId);
             Assert.Same(checkpoints, session.Checkpoints);
         }
     }
