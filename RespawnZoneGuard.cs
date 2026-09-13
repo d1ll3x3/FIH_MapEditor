@@ -29,7 +29,7 @@ namespace FIHMapEditor
                 foreach (var zone in UnityEngine.Object.FindObjectsOfType<EHS.RespawnZones.RespawnOnTouch>(true))
                 {
                     if (zone == null) continue;
-                    zone.postBootstrapGame = post;
+                    // No postBootstrapGame to set: the final-game RespawnOnTouch removed it.
                     zone.respawnZones = pipes;
                     zone.enabled = true;
                     count++;

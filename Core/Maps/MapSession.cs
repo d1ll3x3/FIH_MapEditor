@@ -12,6 +12,7 @@ namespace FIHMapEditor
         public bool Editable { get; set; } = true;
         public string AuthorName { get; set; }
         public long AuthorSteamId { get; set; }
+        public long OwnerSteamId { get; set; }
         public string CurrentFileName { get; set; }
         public MapBaseMode BaseMode { get; set; } = MapBaseMode.Overlay;
         public SpawnPointData Spawn { get; set; }
@@ -21,6 +22,7 @@ namespace FIHMapEditor
         public BallData Ball { get; set; }
         public List<SoccerGoalData> SoccerGoals { get; set; } = new List<SoccerGoalData>();
         public ScoreboardData Scoreboard { get; set; }
+        public List<VoiceTriggerData> VoiceTriggers { get; set; } = new List<VoiceTriggerData>();
         public bool Dirty { get; set; }
         public string LoadReport { get; set; } = "";
 
@@ -33,6 +35,7 @@ namespace FIHMapEditor
             Editable = true;
             AuthorName = null;
             AuthorSteamId = 0;
+            OwnerSteamId = 0;
             CurrentFileName = null;
             BaseMode = MapBaseMode.Overlay;
             Spawn = null;
@@ -42,6 +45,7 @@ namespace FIHMapEditor
             Ball = null;
             SoccerGoals = new List<SoccerGoalData>();
             Scoreboard = null;
+            VoiceTriggers = new List<VoiceTriggerData>();
             Dirty = false;
             LoadReport = "";
         }
@@ -56,6 +60,7 @@ namespace FIHMapEditor
             Editable = map.Editable;
             AuthorName = map.AuthorName;
             AuthorSteamId = map.AuthorSteamId;
+            OwnerSteamId = map.OwnerSteamId;
             BaseMode = map.BaseMode;
             Spawn = map.Spawn;
             Goal = map.Goal;
@@ -64,6 +69,7 @@ namespace FIHMapEditor
             Ball = map.Ball;
             SoccerGoals = map.SoccerGoals ?? new List<SoccerGoalData>();
             Scoreboard = map.Scoreboard;
+            VoiceTriggers = map.VoiceTriggers ?? new List<VoiceTriggerData>();
         }
     }
 }

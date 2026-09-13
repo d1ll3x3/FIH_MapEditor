@@ -20,6 +20,7 @@ namespace FIHMapEditor
             : Marker == "spawn" ? "Spawn point"
             : Marker == "checkpoint" ? $"Checkpoint #{MarkerIndex + 1}"
             : Marker == "reset" ? $"Reset trigger #{MarkerIndex + 1}"
+            : Marker == "voice" ? $"Voice trigger #{MarkerIndex + 1}"
             : Marker == "cannontarget" ? $"Launch target (obj #{MarkerIndex:000})"
             : Marker == "cannonlaunch" ? $"Launch point (obj #{MarkerIndex:000})"
             : Marker == "ball" ? "Soccer ball (kickoff)"

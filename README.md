@@ -131,6 +131,25 @@ Note: the ball is simulated **locally** on each client (like all mod objects), s
 multiplayer each player sees their own ball — the co-edit sync shares the *layout* (ball
 point, goals), not the live physics.
 
+## Voice lines
+
+Play your own recordings when a player walks into a zone, from the **Voice lines**
+section of the TOOLS tab:
+
+- **Add Voice Trigger Here** places a violet box — move, rotate and scale it with the
+  gizmo like a reset zone. It plays only in **Play mode**, for the player who walks in,
+  through the game's voice channel (the in-game voice volume applies).
+- Select it and, in the SELECT tab, pick its clip with `<` / `>`, or **Browse…** for any
+  file on your PC (it is copied into the `Audio` folder). **Preview** plays it; the toggle
+  switches between **Once per run** and **Every time you enter**.
+- Clips are `.ogg`, `.mp3`, `.wav` or `.flac`, up to **1 MB** each (about a minute of
+  voice in OGG). Files dropped into `BepInEx/plugins/FIHMapEditor/Audio` also appear after
+  **Rescan Audio Folder**.
+- **Only the map's owner** can add, move, change or delete voice triggers — also in
+  co-edit, where other players see and hear them but can't edit them.
+- Publishing the map uploads its clips too; players who download it get them
+  automatically (the backend setup below includes the clip store).
+
 ## Map base
 
 - **Overlay**: build on top of the original level.
@@ -288,6 +307,96 @@ uses [Supabase](https://supabase.com) (free tier):
    grant execute on function public.delete_map to anon;
    ```
 
+   And, for voice lines, the clip store. Clips are addressed by the SHA-256 of their
+   bytes; only a map's owner (its `owner_token`) can attach clips to it, the server
+   re-hashes every upload, and the 1 MB cap is enforced in the database itself:
+
+   ```sql
+   create table public.voice_clips (
+     hash       text        primary key check (hash ~ '^[0-9a-f]{64}$'),
+     data       bytea       not null check (octet_length(data) <= 1048576),
+     created_at timestamptz not null default now()
+   );
+
+   -- Which maps use which clip: the ownership check for uploads, and what makes a clip
+   -- downloadable. Deleting a map drops its links.
+   create table public.map_voice_clips (
+     map_id text not null references public.maps(map_id) on delete cascade,
+     hash   text not null references public.voice_clips(hash),
+     primary key (map_id, hash)
+   );
+
+   -- No direct table access at all: everything goes through the RPCs below.
+   alter table public.voice_clips enable row level security;
+   alter table public.map_voice_clips enable row level security;
+   revoke all on public.voice_clips, public.map_voice_clips from anon, authenticated;
+
+   -- p_data = null asks "attach an already-stored clip": 'ok', or 'missing' so the
+   -- client sends the bytes. Returns ok / missing / not_found / forbidden / bad_hash /
+   -- bad_data / too_large.
+   create or replace function public.upload_voice_clip(
+     p_map_id text, p_owner_token text, p_hash text, p_data text)
+   returns text language plpgsql security definer set search_path = public as $$
+   declare existing_token text; v_bytes bytea;
+   begin
+     select owner_token into existing_token from public.maps where map_id = p_map_id;
+     if existing_token is null then return 'not_found'; end if;
+     if existing_token <> p_owner_token then return 'forbidden'; end if;
+     if p_hash !~ '^[0-9a-f]{64}$' then return 'bad_hash'; end if;
+
+     if p_data is null then
+       if not exists (select 1 from public.voice_clips where hash = p_hash) then
+         return 'missing';
+       end if;
+     else
+       begin
+         v_bytes := decode(p_data, 'base64');
+       exception when others then
+         return 'bad_data';
+       end;
+       if octet_length(v_bytes) > 1048576 then return 'too_large'; end if;
+       if encode(sha256(v_bytes), 'hex') <> p_hash then return 'bad_hash'; end if;
+       insert into public.voice_clips (hash, data) values (p_hash, v_bytes)
+         on conflict (hash) do nothing;
+     end if;
+
+     insert into public.map_voice_clips (map_id, hash) values (p_map_id, p_hash)
+       on conflict do nothing;
+     return 'ok';
+   end; $$;
+   revoke all on function public.upload_voice_clip(text, text, text, text) from public;
+   grant execute on function public.upload_voice_clip(text, text, text, text) to anon;
+
+   -- After a re-upload, drop links to clips the map no longer uses.
+   create or replace function public.prune_map_voice_clips(
+     p_map_id text, p_owner_token text, p_keep text[])
+   returns text language plpgsql security definer set search_path = public as $$
+   declare existing_token text;
+   begin
+     select owner_token into existing_token from public.maps where map_id = p_map_id;
+     if existing_token is null then return 'not_found'; end if;
+     if existing_token <> p_owner_token then return 'forbidden'; end if;
+     delete from public.map_voice_clips
+       where map_id = p_map_id and not (hash = any(coalesce(p_keep, '{}')));
+     return 'ok';
+   end; $$;
+   revoke all on function public.prune_map_voice_clips(text, text, text[]) from public;
+   grant execute on function public.prune_map_voice_clips(text, text, text[]) to anon;
+
+   -- Base64 clip, or null when no published map uses that hash.
+   create or replace function public.fetch_voice_clip(p_hash text)
+   returns text language sql stable security definer set search_path = public as $$
+     select encode(c.data, 'base64') from public.voice_clips c
+     where c.hash = p_hash
+       and exists (select 1 from public.map_voice_clips m where m.hash = c.hash);
+   $$;
+   revoke all on function public.fetch_voice_clip(text) from public;
+   grant execute on function public.fetch_voice_clip(text) to anon;
+   ```
+
+   Clips no map links to any more are never served, but stay stored; to reclaim the space:
+   `delete from public.voice_clips c where not exists (select 1 from public.map_voice_clips m where m.hash = c.hash);`
+
 2. Put your project URL and **anon** key into the mod: bake them into `Supabase.cs`
    (`BAKED_URL` / `BAKED_ANON_KEY`) before building — so every user shares one global
    board and map library — or set `SupabaseUrl` / `SupabaseAnonKey` in
@@ -308,12 +417,15 @@ choose whether others can **edit** it or only **play** it:
   not move/delete objects or save them as your own (the HUD shows `🔒 PLAY-ONLY`). This
   is respected by the mod but, since the map data is downloaded, it's a trust-based
   restriction, not encryption.
-- Editing someone else's **editable** map and uploading it creates a **new** map under
-  your name — the original is never overwritten.
+- An **editable** map keeps its original identity when you edit it: uploading it again
+  is rejected unless you are its owner, so the original is never overwritten.
 
 Only you can update or delete your own uploads: the first time you publish a map, the
 mod stores a secret owner token locally. Deleting the mod config loses it (you'd re-upload
 as a new map).
+
+Publishing also uploads the map's voice-line clips (checked against your owner token and
+re-hashed by the server); downloading a map fetches any clip you don't have.
 
 The online library uses the same Supabase backend as the leaderboard (see below) — run
 the same setup once and both work.

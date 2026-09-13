@@ -36,6 +36,14 @@ namespace FIHMapEditor
             return item;
         }
 
+        public VoiceTriggerData AddVoiceTrigger(float[] center)
+        {
+            var item = new VoiceTriggerData { Uid = Guid.NewGuid().ToString("N"), Center = center,
+                Size = new[] { 4f, 4f, 4f } };
+            _session.VoiceTriggers.Add(item);
+            return item;
+        }
+
         public void PlaceBall(float[] center)
             // There is one ball marker per map. Repositioning it keeps identity and radius so
             // multiplayer treats the operation as an update rather than delete-plus-create.

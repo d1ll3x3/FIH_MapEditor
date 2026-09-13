@@ -53,6 +53,12 @@ namespace FIHMapEditor
         // Checkpoints / reset triggers
         private List<CheckpointData> _checkpoints = new List<CheckpointData>();
         private List<ResetZoneData> _resetZones = new List<ResetZoneData>();
+
+        // Voice triggers fire on ENTRY, not every frame the player stays inside; once-per-run
+        // lines are remembered until a full restart.
+        private List<VoiceTriggerData> _voiceTriggers = new List<VoiceTriggerData>();
+        private readonly HashSet<string> _voiceInside = new HashSet<string>();
+        private readonly HashSet<string> _voicePlayed = new HashSet<string>();
         private float _resetCooldownUntil = 0f;
 
         public int ActiveCheckpoint { get; private set; } = -1;
@@ -124,7 +130,8 @@ namespace FIHMapEditor
 
         public void Enter(SpawnPointData spawn, GoalZoneData goal, bool blankMode, string mapName,
                           string mapId, List<CheckpointData> checkpoints = null, List<ResetZoneData> resetZones = null,
-                          BallData ball = null, List<SoccerGoalData> soccerGoals = null)
+                          BallData ball = null, List<SoccerGoalData> soccerGoals = null,
+                          List<VoiceTriggerData> voiceTriggers = null)
         {
             _goal = goal;   // blankMode no longer changes play behaviour; kept for signature stability
             _mapName = mapName ?? "";
@@ -134,6 +141,11 @@ namespace FIHMapEditor
             _resetZones = resetZones ?? new List<ResetZoneData>();
             _ball = ball;
             _soccerGoals = soccerGoals ?? new List<SoccerGoalData>();
+            _voiceTriggers = voiceTriggers ?? new List<VoiceTriggerData>();
+            _voiceInside.Clear();
+            _voicePlayed.Clear();
+            // Pick up clips dropped into the Audio folder since the last run.
+            if (_voiceTriggers.Count > 0) VoiceLineLibrary.Rescan();
             ActiveCheckpoint = -1;
             NewBest = false;
             SpawnSoccerBall();
@@ -172,6 +184,7 @@ namespace FIHMapEditor
             _goalBeacon.Hide();
             foreach (var ring in _checkpointRings) ring.Hide();
             _soccerBall.Destroy();
+            VoiceLinePlayer.Stop();
         }
 
         // Soccer: (re)create the physics ball at its kickoff point and reset the score.
@@ -247,6 +260,9 @@ namespace FIHMapEditor
             UploadPrompt = UploadPromptState.None;
             // A full restart also resets the match: score to 0 and ball back to centre.
             if (_ball != null) SpawnSoccerBall();
+            // …and replays the map's once-per-run voice lines.
+            _voicePlayed.Clear();
+            _voiceInside.Clear();
         }
 
         // R key: retry from the last collected coin, keeping the run timer going.
@@ -338,6 +354,7 @@ namespace FIHMapEditor
                 UpdateResetZones(pos);
                 // No automatic fall respawn: falling forever is the player's business.
                 // Map makers who want one place a reset trigger where they need it.
+                UpdateVoiceTriggers(pos);
             }
 
             // Soccer runs independently of the run timer — it's a match, not a run.
@@ -704,6 +721,24 @@ namespace FIHMapEditor
                     ActiveCheckpoint = i;
                     break;
                 }
+            }
+        }
+
+        private void UpdateVoiceTriggers(Vector3 playerPos)
+        {
+            foreach (var trigger in _voiceTriggers)
+            {
+                if (trigger?.Center == null || string.IsNullOrEmpty(trigger.Uid)) continue;
+                bool inside = VecUtil.PlayerTouchesObb(playerPos, VecUtil.ToVector3(trigger.Center),
+                    VecUtil.ToVector3(trigger.Size, Vector3.one * 4f), VecUtil.ToRotation(trigger.Rot));
+                if (!inside)
+                {
+                    _voiceInside.Remove(trigger.Uid);
+                    continue;
+                }
+                if (!_voiceInside.Add(trigger.Uid)) continue;   // still inside since last frame
+                if (trigger.OncePerRun && !_voicePlayed.Add(trigger.Uid)) continue;
+                VoiceLinePlayer.Play(trigger.AudioHash, trigger.AudioName);
             }
         }
 

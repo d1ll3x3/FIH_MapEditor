@@ -10,6 +10,8 @@ namespace FIHMapEditor
     {
         EditorMode Mode { get; }
         string MapId { get; }
+        // Owner of the co-edited map; voice-line ops from anyone else are rejected.
+        long OwnerSteamId { get; }
         BallData Ball { get; }
         PlayModeController PlayMode { get; }
 
@@ -38,5 +40,8 @@ namespace FIHMapEditor
         void ApplyRemoteSoccerGoalUpsert(SoccerGoalData data);
         void ApplyRemoteSoccerGoalDelete(string uid);
         void ApplyRemoteScoreboard(ScoreboardData data);
+        void ApplyRemoteOwner(long ownerSteamId);
+        void ApplyRemoteVoiceTriggerUpsert(VoiceTriggerData data);
+        void ApplyRemoteVoiceTriggerDelete(string uid);
     }
 }

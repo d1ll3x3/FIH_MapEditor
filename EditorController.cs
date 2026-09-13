@@ -25,6 +25,7 @@ namespace FIHMapEditor
         public bool Editable { get => Session.Editable; set => Session.Editable = value; }
         public string AuthorName { get => Session.AuthorName; set => Session.AuthorName = value; }
         public long AuthorSteamId { get => Session.AuthorSteamId; set => Session.AuthorSteamId = value; }
+        public long OwnerSteamId { get => Session.OwnerSteamId; set => Session.OwnerSteamId = value; }
         public string CurrentFileName { get => Session.CurrentFileName; set => Session.CurrentFileName = value; }
         public MapBaseMode BaseMode { get => Session.BaseMode; private set => Session.BaseMode = value; }
         public SpawnPointData Spawn { get => Session.Spawn; set => Session.Spawn = value; }
@@ -34,6 +35,7 @@ namespace FIHMapEditor
         public BallData Ball { get => Session.Ball; set => Session.Ball = value; }
         public List<SoccerGoalData> SoccerGoals { get => Session.SoccerGoals; set => Session.SoccerGoals = value; }
         public ScoreboardData Scoreboard { get => Session.Scoreboard; set => Session.Scoreboard = value; }
+        public List<VoiceTriggerData> VoiceTriggers { get => Session.VoiceTriggers; set => Session.VoiceTriggers = value; }
         public bool Dirty { get => Session.Dirty; private set => Session.Dirty = value; }
         public float LastAutosaveTime { get; private set; } = -1f;
         public string LoadReport { get => Session.LoadReport; set => Session.LoadReport = value; }
@@ -66,6 +68,7 @@ namespace FIHMapEditor
         public LeaderboardService Leaderboard { get; private set; }
         public OnlineMapService OnlineMaps { get; private set; }
         public CatalogSyncService CatalogSync { get; private set; }
+        public VoiceClipService VoiceClips { get; private set; }
         public IMapRepository Maps { get; }
         public EditorFeatureRegistry Features { get; }
         public MarkerEditingService Markers { get; }
@@ -108,6 +111,7 @@ namespace FIHMapEditor
         private GameObject _ballProxy;
         private GameObject _soccerGoalProxy;
         private GameObject _scoreboardProxy;
+        private GameObject _voiceProxy;
         private readonly ScoreboardRenderer _scoreboardRenderer = new ScoreboardRenderer();
         private GameObject _cannonTargetProxy;
         private GameObject _cannonLaunchProxy;
@@ -138,6 +142,7 @@ namespace FIHMapEditor
         public Vector3? AutoLaunchEnd { get; private set; }
         private readonly LineBox _ballRing = new LineBox("FIH_Line_Ball");
         private readonly List<LineBox> _soccerGoalBoxes = new List<LineBox>();
+        private readonly List<LineBox> _voiceBoxes = new List<LineBox>();
         private readonly List<LineBox> _cannonLaunchBoxes = new List<LineBox>();
         private readonly List<LineBox> _multiBoxes = new List<LineBox>();
 
@@ -219,6 +224,7 @@ namespace FIHMapEditor
             Leaderboard = new LeaderboardService();
             OnlineMaps = new OnlineMapService();
             CatalogSync = new CatalogSyncService();
+            VoiceClips = new VoiceClipService { Dispatch = RunOnMainThread };
             // Hook the sync service into the catalog so every Scan can push
             // newly discovered entries and pull the community catalog the
             // first time the scene is scanned this session. Pull results merge
@@ -266,6 +272,37 @@ namespace FIHMapEditor
 
         // Local Steam identity for leaderboard uploads/highlighting. Falls back to
         // (0, "player") when Steam is unavailable — a 0 id is never uploaded.
+        // The local Steam account, cached: ownership is checked every frame the menu draws,
+        // and without Steam (offline builds) each lookup throws. Retried every few seconds
+        // in case Steam comes up after the mod.
+        private long _localSteamId;
+        private float _localSteamIdRetryAt;
+        public long LocalSteamId
+        {
+            get
+            {
+                if (_localSteamId == 0 && Time.unscaledTime >= _localSteamIdRetryAt)
+                {
+                    _localSteamIdRetryAt = Time.unscaledTime + 5f;
+                    _localSteamId = SteamIdentity().steamId;
+                }
+                return _localSteamId;
+            }
+        }
+
+        // Voice lines may only be authored by the map's owner — in co-edit too, where the
+        // owner arrives with the map (ApplyRemoteOwner).
+        public bool OwnsCurrentMap => MapOwnership.IsOwner(OwnerSteamId, AuthorSteamId, LocalSteamId,
+            EditorConfig.Settings.OwnerTokens.ContainsKey(MapId ?? ""));
+
+        public bool VoiceEditBlock()
+        {
+            if (ReadOnlyBlock()) return true;
+            if (OwnsCurrentMap) return false;
+            ShowToast("Only the map's owner can add or edit voice lines");
+            return true;
+        }
+
         public (long steamId, string name) SteamIdentity()
         {
             try
@@ -512,7 +549,8 @@ namespace FIHMapEditor
                     || (_workingSnapshot.ResetZones?.Count ?? 0) > 0
                     || _workingSnapshot.Ball != null
                     || (_workingSnapshot.SoccerGoals?.Count ?? 0) > 0
-                    || _workingSnapshot.Scoreboard != null);
+                    || _workingSnapshot.Scoreboard != null
+                    || (_workingSnapshot.VoiceTriggers?.Count ?? 0) > 0);
         }
 
         private void HandlePendingReapply()
@@ -575,7 +613,6 @@ namespace FIHMapEditor
             // press it while a jump bug is live and the log tells us which flag stuck.
             if (Input.WasKeyPressed("jumpDump", KeyCode.F9))
                 GroundContactFix.Dump(Finder.FindPlayer());
-
             // Ctrl-combos: work in editor mode whether the cursor is free or locked.
             if (Mode == EditorMode.Editor && !AnyTextFieldFocused() && Input.IsCtrlHeld())
             {
@@ -739,6 +776,9 @@ namespace FIHMapEditor
                         return sel.MarkerIndex < SoccerGoals.Count ? SoccerGoalProxy().transform : null;
                     case "scoreboard":
                         return Scoreboard != null ? ScoreboardProxy().transform : null;
+                    case "voice":
+                        // No gizmo for non-owners: moving it is editing it.
+                        return sel.MarkerIndex < VoiceTriggers.Count && OwnsCurrentMap ? VoiceProxy().transform : null;
                     case "cannontarget":
                         // MarkerIndex holds the PlacedObject.Id (stable), not a list index.
                         var pc = PlacedManager.FindById(sel.MarkerIndex);
@@ -820,6 +860,16 @@ namespace FIHMapEditor
                 UnityEngine.Object.DontDestroyOnLoad(_scoreboardProxy);
             }
             return _scoreboardProxy;
+        }
+
+        private GameObject VoiceProxy()
+        {
+            if (_voiceProxy == null)
+            {
+                _voiceProxy = new GameObject("FIH_VoiceProxy");
+                UnityEngine.Object.DontDestroyOnLoad(_voiceProxy);
+            }
+            return _voiceProxy;
         }
 
         private GameObject CannonTargetProxy()
@@ -961,6 +1011,26 @@ namespace FIHMapEditor
                     p.position = VecUtil.ToVector3(zone.Center);
                     p.localScale = VecUtil.ToVector3(zone.Size, Vector3.one * 4f);
                     p.rotation = VecUtil.ToRotation(zone.Rot);
+                }
+            }
+
+            if (sel.Marker == "voice" && sel.MarkerIndex < VoiceTriggers.Count)
+            {
+                var trigger = VoiceTriggers[sel.MarkerIndex];
+                var p = VoiceProxy().transform;
+                if (Gizmo.IsDragging)
+                {
+                    trigger.Center = VecUtil.ToArray(p.position);
+                    trigger.Rot = VecUtil.ToArray(p.eulerAngles);
+                    var s = p.localScale;
+                    trigger.Size = VecUtil.ToArray(new Vector3(
+                        Mathf.Max(1f, s.x), Mathf.Max(1f, s.y), Mathf.Max(1f, s.z)));
+                }
+                else
+                {
+                    p.position = VecUtil.ToVector3(trigger.Center);
+                    p.localScale = VecUtil.ToVector3(trigger.Size, Vector3.one * 4f);
+                    p.rotation = VecUtil.ToRotation(trigger.Rot);
                 }
             }
 
@@ -1122,6 +1192,23 @@ namespace FIHMapEditor
                                        VecUtil.ToVector3(zone.Size, Vector3.one * 4f),
                                        VecUtil.ToRotation(zone.Rot),
                                        new Color(1f, 0.25f, 0.25f, 0.9f));
+            }
+
+            // Voice triggers (violet boxes) — editor-only, invisible while playing.
+            while (_voiceBoxes.Count < VoiceTriggers.Count)
+                _voiceBoxes.Add(new LineBox($"FIH_Line_EdVoice{_voiceBoxes.Count}"));
+            for (int i = 0; i < _voiceBoxes.Count; i++)
+            {
+                if (i >= VoiceTriggers.Count || VoiceTriggers[i]?.Center == null)
+                {
+                    _voiceBoxes[i].Hide();
+                    continue;
+                }
+                var trigger = VoiceTriggers[i];
+                _voiceBoxes[i].ShowBox(VecUtil.ToVector3(trigger.Center),
+                                       VecUtil.ToVector3(trigger.Size, Vector3.one * 4f),
+                                       VecUtil.ToRotation(trigger.Rot),
+                                       new Color(0.7f, 0.4f, 1f, 0.9f));
             }
 
             // Soccer: the ball kickoff point (white ring) + goal boxes (blue = team A,
@@ -1366,6 +1453,7 @@ namespace FIHMapEditor
             _spawnBox.Hide();
             foreach (var box in _checkpointBoxes) box.Hide();
             foreach (var box in _resetBoxes) box.Hide();
+            foreach (var box in _voiceBoxes) box.Hide();
             foreach (var box in _cannonTargetBoxes) box.Hide();
             foreach (var box in _cannonLines) box.Hide();
             foreach (var line in _networkArcLines) line.Hide();
@@ -1482,6 +1570,18 @@ namespace FIHMapEditor
                     Rot = (float[])Scoreboard.Rot?.Clone(),
                     Scale = Scoreboard.Scale,
                 };
+            var voices = new List<VoiceTriggerData>();
+            foreach (var v in VoiceTriggers)
+                voices.Add(new VoiceTriggerData
+                {
+                    Uid = v.Uid,
+                    Center = (float[])v.Center?.Clone(),
+                    Size = (float[])v.Size?.Clone(),
+                    Rot = (float[])v.Rot?.Clone(),
+                    AudioHash = v.AudioHash,
+                    AudioName = v.AudioName,
+                    OncePerRun = v.OncePerRun,
+                });
 
             return () =>
             {
@@ -1492,6 +1592,8 @@ namespace FIHMapEditor
                 Ball = ball;
                 SoccerGoals = goals;
                 Scoreboard = scoreboard;
+                // A co-editor's undo must not roll back the owner's voice-line changes.
+                if (OwnsCurrentMap) VoiceTriggers = voices;
                 if (SelectionSys.Current.IsMarker) SelectionSys.Deselect();
                 SetDirty();
             };
@@ -1987,6 +2089,15 @@ namespace FIHMapEditor
                         out float d) && d < markerDist)
                     { marker = "reset"; markerIndex = i; markerDist = d; }
             }
+            for (int i = 0; i < VoiceTriggers.Count; i++)
+            {
+                var trigger = VoiceTriggers[i];
+                if (trigger?.Center == null) continue;
+                if (SelectionSystem.RayIntersectsOBB(ray.Value, VecUtil.ToVector3(trigger.Center),
+                        VecUtil.ToVector3(trigger.Size, Vector3.one * 4f), VecUtil.ToRotation(trigger.Rot),
+                        out float d) && d < markerDist)
+                    { marker = "voice"; markerIndex = i; markerDist = d; }
+            }
             if (Ball?.Center != null)
             {
                 float r = Mathf.Max(0.25f, Ball.Radius);
@@ -2170,7 +2281,7 @@ namespace FIHMapEditor
                     // Re-sweep: some zones are spawnable and may have appeared since load.
                     RespawnZoneGuard.DisableAll();
                     PlayMode.Enter(Spawn, Goal, BaseMode == MapBaseMode.Blank, MapName, MapId,
-                        Checkpoints, ResetZones, Ball, SoccerGoals);
+                        Checkpoints, ResetZones, Ball, SoccerGoals, VoiceTriggers);
                     ShowToast($"PLAY — {EditorConfig.Settings.RestartRunKey} / pad X: retry (last coin), Shift+{EditorConfig.Settings.RestartRunKey} / LB+X: full restart, {EditorConfig.Settings.TogglePlayKey}: editor");
                 }
 
@@ -2349,6 +2460,7 @@ namespace FIHMapEditor
                 Editable = Editable,
                 AuthorName = AuthorName,
                 AuthorSteamId = AuthorSteamId,
+                OwnerSteamId = OwnerSteamId,
                 Name = MapName,
                 BaseMode = BaseMode,
                 GameScene = _lastSceneName,
@@ -2361,6 +2473,7 @@ namespace FIHMapEditor
                 Ball = Ball,
                 SoccerGoals = new List<SoccerGoalData>(SoccerGoals),
                 Scoreboard = Scoreboard,
+                VoiceTriggers = new List<VoiceTriggerData>(VoiceTriggers),
             };
         }
 
@@ -2407,6 +2520,8 @@ namespace FIHMapEditor
             Editable = true;
             AuthorName = null;
             AuthorSteamId = 0;
+            // A fresh map belongs to whoever creates it; 0 without Steam (see MapOwnership).
+            OwnerSteamId = LocalSteamId;
             ReadOnly = false;
             CurrentFileName = null;
             BaseMode = MapBaseMode.Overlay;
@@ -2417,6 +2532,7 @@ namespace FIHMapEditor
             Ball = null;
             SoccerGoals.Clear();
             Scoreboard = null;
+            VoiceTriggers.Clear();
             _unresolvedObjects.Clear();
             Dirty = false;
             _autosaveDirtySince = -1f;
@@ -2532,6 +2648,8 @@ namespace FIHMapEditor
             var map = BuildMapFile();
             map.AuthorName = name;
             map.AuthorSteamId = sid;
+            // Owner-less older maps get the uploader as owner in the published copy too.
+            if (map.OwnerSteamId == 0) map.OwnerSteamId = sid;
             map.Editable = editable;
 
             ShowToast("Uploading map…");
@@ -2544,12 +2662,17 @@ namespace FIHMapEditor
 
                     AuthorName = name;
                     AuthorSteamId = sid;
+                    // The server just accepted our token: stamp older owner-less maps.
+                    if (OwnerSteamId == 0) OwnerSteamId = sid;
                     Editable = editable;
                     RefreshReadOnly();
                     RefreshSnapshot();
 
                     ShowToast($"Map uploaded ({(editable ? "editable" : "play-only")}) — \"{MapName}\"");
                     OnlineMaps.RefreshList(force: true);
+                    // Clips can only be attached once the server knows this map's token.
+                    // Always runs, even with no triggers, so removed clips get unlinked.
+                    VoiceClips.UploadForMap(uploadMapId, token, map.VoiceTriggers, summary => ShowToast(summary, 5f));
                 }
                 else if (result == "forbidden")
                 {
@@ -2869,6 +2992,38 @@ namespace FIHMapEditor
             SetDirty();
         }
 
+        // The co-edited map's owner, as claimed by the owner themself (MultiplayerSync only
+        // lets an editor claim its own id). Voice-line editing rights follow from it.
+        public void ApplyRemoteOwner(long ownerSteamId)
+        {
+            if (ownerSteamId == OwnerSteamId) return;
+            OwnerSteamId = ownerSteamId;
+            if (SelectionSys.Current.Marker == "voice") SelectionSys.Deselect();
+            SetDirty();
+        }
+
+        public void ApplyRemoteVoiceTriggerUpsert(VoiceTriggerData data)
+        {
+            if (string.IsNullOrEmpty(data?.Uid)) return;
+            int idx = VoiceTriggers.FindIndex(v => v.Uid == data.Uid);
+            if (idx >= 0) VoiceTriggers[idx] = data; else VoiceTriggers.Add(data);
+            VoiceClips.EnsureAvailable(data.AudioHash, data.AudioName);
+            SetDirty();
+        }
+
+        public void ApplyRemoteVoiceTriggerDelete(string uid)
+        {
+            int idx = VoiceTriggers.FindIndex(v => v.Uid == uid);
+            if (idx < 0) return;
+            if (SelectionSys.Current.Marker == "voice")
+            {
+                if (SelectionSys.Current.MarkerIndex == idx) SelectionSys.Deselect();
+                else if (SelectionSys.Current.MarkerIndex > idx) SelectionSys.Current.MarkerIndex--;
+            }
+            VoiceTriggers.RemoveAt(idx);
+            SetDirty();
+        }
+
         private void ApplyMapFile(MapFile map, bool resetDirty)
         {
             if (!Catalog.HasScanned) Catalog.Scan();
@@ -2886,6 +3041,11 @@ namespace FIHMapEditor
             Editable = map.Editable;
             AuthorName = map.AuthorName;
             AuthorSteamId = map.AuthorSteamId;
+            OwnerSteamId = map.OwnerSteamId;
+            // Older files carry no owner. Adopt it here — a local load or download, never a
+            // co-edit op — when the fallback rules say this map is ours, so co-editors are
+            // told who owns it instead of each one also looking like the owner.
+            if (OwnerSteamId == 0 && LocalSteamId != 0 && OwnsCurrentMap) OwnerSteamId = LocalSteamId;
             // Play-only maps lock the editor — unless you're the author (you hold its
             // owner token), so you can still update your own non-editable uploads.
             ReadOnly = !map.Editable && !EditorConfig.Settings.OwnerTokens.ContainsKey(MapId);
@@ -2896,12 +3056,18 @@ namespace FIHMapEditor
             Ball = map.Ball;
             SoccerGoals = map.SoccerGoals != null ? new List<SoccerGoalData>(map.SoccerGoals) : new List<SoccerGoalData>();
             Scoreboard = map.Scoreboard;
+            VoiceTriggers = map.VoiceTriggers != null ? new List<VoiceTriggerData>(map.VoiceTriggers) : new List<VoiceTriggerData>();
             // Backfill stable ids on maps saved before multiplayer sync/grouping existed.
             foreach (var cp in Checkpoints) cp.Uid ??= Guid.NewGuid().ToString("N");
             foreach (var z in ResetZones) z.Uid ??= Guid.NewGuid().ToString("N");
             if (Ball != null) Ball.Uid ??= Guid.NewGuid().ToString("N");
             foreach (var g in SoccerGoals) g.Uid ??= Guid.NewGuid().ToString("N");
             if (Scoreboard != null) Scoreboard.Uid ??= Guid.NewGuid().ToString("N");
+            foreach (var v in VoiceTriggers)
+            {
+                v.Uid ??= Guid.NewGuid().ToString("N");
+                VoiceClips.EnsureAvailable(v.AudioHash, v.AudioName);
+            }
             BaseMode = map.BaseMode;
 
             if (BaseMode == MapBaseMode.Blank) BlankCanvas.Apply();
@@ -3696,6 +3862,8 @@ namespace FIHMapEditor
                     SelectionSys.Deselect();
                     return;
                 }
+                // Checked before the undo snapshot so a refused delete leaves no empty step.
+                if (sel.Marker == "voice" && VoiceEditBlock()) return;
                 Undo.Push($"delete of {sel.DisplayName}", CaptureMarkersState());
                 switch (sel.Marker)
                 {
@@ -3740,6 +3908,14 @@ namespace FIHMapEditor
                         Scoreboard = null;
                         SetDirty();
                         ShowToast("Scoreboard removed");
+                        break;
+                    case "voice":
+                        if (sel.MarkerIndex < VoiceTriggers.Count)
+                        {
+                            VoiceTriggers.RemoveAt(sel.MarkerIndex);
+                            SetDirty();
+                            ShowToast("Voice trigger removed");
+                        }
                         break;
                 }
                 SelectionSys.Deselect();
@@ -4052,6 +4228,127 @@ namespace FIHMapEditor
             SelectionSys.SelectMarker("reset", ResetZones.Count - 1);
             SetDirty();
             ShowToast($"Reset trigger #{ResetZones.Count} placed here (invisible in play)");
+        }
+
+        // ──────────────────────────────────────────────────────── voice lines ──
+
+        public void AddVoiceTriggerHere()
+        {
+            if (VoiceEditBlock()) return;
+            var t = Finder.FindPlayerTransform();
+            if (t == null) return;
+            Undo.Push("voice-trigger add", CaptureMarkersState());
+            var trigger = Markers.AddVoiceTrigger(VecUtil.ToArray(t.position + Vector3.up * 1f));
+            // Start with the first usable clip so a fresh trigger is audible straight away.
+            var first = NextUsableClip(-1, 1);
+            if (first != null)
+            {
+                trigger.AudioHash = first.Hash;
+                trigger.AudioName = first.Name;
+            }
+            SelectionSys.SelectMarker("voice", VoiceTriggers.Count - 1);
+            SetDirty();
+            ShowToast(first != null
+                ? $"Voice trigger #{VoiceTriggers.Count} placed — pick its clip in SELECT"
+                : $"Voice trigger placed, but no audio under 1 MB found in {VoiceLineLibrary.Folder}");
+        }
+
+        // Next clip from `from` in `step` direction that other players can receive (the
+        // server refuses anything over 1 MB); null when there is none.
+        private VoiceLineLibrary.Clip NextUsableClip(int from, int step)
+        {
+            var clips = VoiceLineLibrary.Clips;
+            for (int n = 1; n <= clips.Count; n++)
+            {
+                int i = (((from + step * n) % clips.Count) + clips.Count) % clips.Count;
+                if (clips[i].Size <= VoiceLineLibrary.MAX_CLIP_BYTES) return clips[i];
+            }
+            return null;
+        }
+
+        // Step the selected trigger's clip through the Audio folder (the menu has no list
+        // widget, and IMGUI has no file picker under IL2CPP).
+        public void CycleVoiceTriggerClip(int index, int step)
+        {
+            if (VoiceEditBlock()) return;
+            if (index < 0 || index >= VoiceTriggers.Count) return;
+            var trigger = VoiceTriggers[index];
+            var clips = VoiceLineLibrary.Clips;
+            int current = -1;
+            for (int i = 0; i < clips.Count; i++)
+                if (clips[i].Hash == trigger.AudioHash) { current = i; break; }
+            var next = current < 0 ? NextUsableClip(-1, 1) : NextUsableClip(current, step);
+            if (next == null)
+            {
+                ShowToast($"No audio under 1 MB in {VoiceLineLibrary.Folder}");
+                return;
+            }
+            Undo.Push("voice clip change", CaptureMarkersState());
+            trigger.AudioHash = next.Hash;
+            trigger.AudioName = next.Name;
+            SetDirty();
+        }
+
+        private bool _browsingVoiceClip;
+
+        // Pick a clip from anywhere on the PC: it's copied into the Audio folder (so it gets
+        // published with the map) and assigned to the trigger.
+        public void BrowseVoiceTriggerClip(int index)
+        {
+            if (VoiceEditBlock()) return;
+            if (index < 0 || index >= VoiceTriggers.Count) return;
+            if (_browsingVoiceClip)
+            {
+                ShowToast("The file dialog is already open (it may be behind the game window)");
+                return;
+            }
+            _browsingVoiceClip = true;
+            // Resolve by Uid on return: a co-editor may reorder or delete triggers meanwhile.
+            string uid = VoiceTriggers[index].Uid;
+            NativeFileDialog.OpenAudioFile((path, dialogError) => RunOnMainThread(() =>
+            {
+                _browsingVoiceClip = false;
+                if (dialogError != null)
+                {
+                    MapEditorPlugin.Logger.LogWarning($"[VOICE] File dialog failed: {dialogError}");
+                    ShowToast($"File dialog unavailable — drop audio into {VoiceLineLibrary.Folder}");
+                    return;
+                }
+                if (path == null || VoiceEditBlock()) return;
+                int idx = VoiceTriggers.FindIndex(v => v.Uid == uid);
+                if (idx < 0) { ShowToast("That voice trigger was removed"); return; }
+
+                var clip = VoiceLineLibrary.Import(path, out string importError);
+                if (clip == null) { ShowToast(importError); return; }
+                Undo.Push("voice clip change", CaptureMarkersState());
+                VoiceTriggers[idx].AudioHash = clip.Hash;
+                VoiceTriggers[idx].AudioName = clip.Name;
+                SetDirty();
+                ShowToast($"'{clip.Name}' is in the Audio folder and assigned");
+            }));
+        }
+
+        public void ToggleVoiceTriggerOncePerRun(int index)
+        {
+            if (VoiceEditBlock()) return;
+            if (index < 0 || index >= VoiceTriggers.Count) return;
+            Undo.Push("voice trigger repeat change", CaptureMarkersState());
+            VoiceTriggers[index].OncePerRun = !VoiceTriggers[index].OncePerRun;
+            SetDirty();
+        }
+
+        public void PreviewVoiceTrigger(int index)
+        {
+            if (index < 0 || index >= VoiceTriggers.Count) return;
+            var trigger = VoiceTriggers[index];
+            if (string.IsNullOrEmpty(trigger.AudioHash)) { ShowToast("This trigger has no clip yet"); return; }
+            VoiceLinePlayer.Play(trigger.AudioHash, trigger.AudioName);
+        }
+
+        public void RescanVoiceLibrary()
+        {
+            VoiceLineLibrary.Rescan();
+            ShowToast($"{VoiceLineLibrary.Clips.Count} audio clip(s) in {VoiceLineLibrary.Folder}");
         }
 
         // ───────────────────────────────────────────────────────────── soccer ──

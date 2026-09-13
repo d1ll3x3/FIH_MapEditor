@@ -85,6 +85,21 @@ namespace FIHMapEditor
         public float Scale { get; set; } = 1f;
     }
 
+    // Voice trigger (v12): entering the box plays one of the map author's own audio clips
+    // through the game's voice bus, locally for whoever walks in. The clip is referenced by
+    // the SHA-256 of its contents so the same recording is one file however it's named.
+    // Only the map owner may author these (see MapOwnership).
+    public class VoiceTriggerData
+    {
+        public string Uid { get; set; }
+        public float[] Center { get; set; }
+        public float[] Size { get; set; }
+        public float[] Rot { get; set; }         // euler angles; null = axis-aligned
+        public string AudioHash { get; set; }    // null = no clip assigned yet
+        public string AudioName { get; set; }    // original file name, for display only
+        public bool OncePerRun { get; set; } = true;
+    }
+
     // An edit applied to an ORIGINAL level object (not one of our clones): a transform
     // override and/or "deleted" (renderers+colliders disabled). Identified by the same
     // stable hierarchy path used for clone sources.
@@ -146,9 +161,9 @@ namespace FIHMapEditor
         // key). v7: stable Uid + GroupId on objects (grouping, multiplayer sync) and Uid
         // on checkpoints/reset zones; CustomColor. v8: box-shaped checkpoints
         // (CheckpointData.Size/Rot). v9: soccer mode (Ball + SoccerGoals). v10: placeable
-        // 3D scoreboard. Older files load fine — missing fields stay at defaults and
-        // Uids are backfilled on load.
-        public const int CURRENT_FORMAT_VERSION = 11;
+        // 3D scoreboard. v12: voice triggers + OwnerSteamId. Older files load fine — missing
+        // fields stay at defaults and Uids are backfilled on load.
+        public const int CURRENT_FORMAT_VERSION = 12;
 
         public int FormatVersion { get; set; } = CURRENT_FORMAT_VERSION;
         // Stable per-map identity for the leaderboard and the online map library. Minted
@@ -161,6 +176,10 @@ namespace FIHMapEditor
         public bool Editable { get; set; } = true;
         public string AuthorName { get; set; }
         public long AuthorSteamId { get; set; }
+        // Steam account that created the map (v12). Unlike AuthorSteamId it is set at
+        // creation, not on upload, so co-editors can tell the owner apart. 0 = unknown
+        // (older file, or created without Steam) — see MapOwnership for the fallback.
+        public long OwnerSteamId { get; set; }
         public MapBaseMode BaseMode { get; set; } = MapBaseMode.Overlay;
         public string GameScene { get; set; } = "";
         public SpawnPointData Spawn { get; set; }
@@ -172,6 +191,7 @@ namespace FIHMapEditor
         public BallData Ball { get; set; }
         public List<SoccerGoalData> SoccerGoals { get; set; } = new List<SoccerGoalData>();
         public ScoreboardData Scoreboard { get; set; }
+        public List<VoiceTriggerData> VoiceTriggers { get; set; } = new List<VoiceTriggerData>();
     }
 
 #if !FIH_CORE

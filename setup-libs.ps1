@@ -21,7 +21,8 @@ if (-not (Test-Path "lib")) {
 
 # Find game installation. The product folder is "Flipping is Hard Demo" on the demo and
 # "Flipping is Hard" once the demo tag is dropped — search both.
-$gamePath = $null
+# No "$gamePath = $null" reset here: PowerShell variables are case-insensitive, so it
+# would wipe the -GamePath parameter itself and silently fall back to auto-detection.
 if ($GamePath) {
     if (Test-Path "$GamePath\BepInEx") { $gamePath = $GamePath }
     else { Write-Host "ERROR: no BepInEx under -GamePath '$GamePath'" -ForegroundColor Red; exit 1 }
@@ -72,6 +73,7 @@ $dllsToCopy = @(
     "Unity.ResourceManager.dll",
     "UnityEngine.ImageConversionModule.dll",
     "UnityEngine.AudioModule.dll",
+    "FMODUnity.dll",
     "UnityEngine.CoreModule.dll",
     "UnityEngine.IMGUIModule.dll",
     "UnityEngine.InputLegacyModule.dll",

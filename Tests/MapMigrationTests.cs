@@ -21,6 +21,21 @@ namespace FIHMapEditor.Tests
         }
 
         [Fact]
+        public void NormalizeBackfillsVoiceTriggers()
+        {
+            var nullList = new MapFile { VoiceTriggers = null };
+            MapMigrations.Normalize(nullList);
+            Assert.NotNull(nullList.VoiceTriggers);
+
+            var legacy = new MapFile();
+            legacy.VoiceTriggers.Add(new VoiceTriggerData { Uid = null });
+            legacy.VoiceTriggers.Add(new VoiceTriggerData { Uid = "keep" });
+            MapMigrations.Normalize(legacy);
+            Assert.False(string.IsNullOrWhiteSpace(legacy.VoiceTriggers[0].Uid));
+            Assert.Equal("keep", legacy.VoiceTriggers[1].Uid);
+        }
+
+        [Fact]
         public void NetworkMechanicSpawnerSettingsRoundTripThroughJson()
         {
             var original = new MapFile();

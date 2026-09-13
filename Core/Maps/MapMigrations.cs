@@ -21,6 +21,7 @@ namespace FIHMapEditor
             map.Checkpoints ??= new List<CheckpointData>();
             map.ResetZones ??= new List<ResetZoneData>();
             map.SoccerGoals ??= new List<SoccerGoalData>();
+            map.VoiceTriggers ??= new List<VoiceTriggerData>();
             map.Name ??= "Untitled";
             if (string.IsNullOrEmpty(map.MapId)) map.MapId = Guid.NewGuid().ToString("N");
             // Pre-refactor maps identified entries by list position. Generate IDs once on
@@ -29,6 +30,7 @@ namespace FIHMapEditor
             foreach (var item in map.Checkpoints) item.Uid ??= Guid.NewGuid().ToString("N");
             foreach (var item in map.ResetZones) item.Uid ??= Guid.NewGuid().ToString("N");
             foreach (var item in map.SoccerGoals) item.Uid ??= Guid.NewGuid().ToString("N");
+            foreach (var item in map.VoiceTriggers) item.Uid ??= Guid.NewGuid().ToString("N");
             if (map.Ball != null) map.Ball.Uid ??= Guid.NewGuid().ToString("N");
             if (map.Scoreboard != null) map.Scoreboard.Uid ??= Guid.NewGuid().ToString("N");
             return map;

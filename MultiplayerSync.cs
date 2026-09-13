@@ -111,6 +111,10 @@ namespace FIHMapEditor
         private const int K_BALL = 16, K_BALL_CLEAR = 17;
         private const int K_SOCCERGOAL_UPSERT = 18, K_SOCCERGOAL_DELETE = 19;
         private const int K_SCOREBOARD = 20, K_SCOREBOARD_CLEAR = 21;
+        // Voice lines are owner-only (MapOwnership): "owner" travels with the map like
+        // "mapid", and vt: ops are dropped unless they come from that owner.
+        private const int K_OWNER = 22;
+        private const int K_VT_UPSERT = 23, K_VT_DELETE = 24;
 
         private static readonly JsonSerializerOptions JsonOpts = new JsonSerializerOptions
         {
@@ -204,8 +208,16 @@ namespace FIHMapEditor
             _lastLoggedMemberCount = -1;
         }
 
+        // Offline builds (playtests) never initialise Steamworks, so every Steam call throws.
+        // Polling that each frame flooded the log; say it once and check back occasionally in
+        // case Steam comes up later.
+        private const float STEAM_RETRY_SECONDS = 10f;
+        private float _steamRetryAt;
+        private bool _steamUnavailableLogged;
+
         public void Update()
         {
+            if (Time.unscaledTime < _steamRetryAt) return;
             try
             {
                 if (Time.unscaledTime >= _nextLobbyRefreshAt)
@@ -226,6 +238,17 @@ namespace FIHMapEditor
                 {
                     _broadcastAt = -1f;
                     BroadcastPendingDiff();
+                }
+            }
+            // Matched on the message, not the type: under IL2CPP the game's exception arrives
+            // wrapped in an Il2CppException, never as a managed InvalidOperationException.
+            catch (Exception ex) when (ex.Message.Contains("Steamworks is not initialized"))
+            {
+                _steamRetryAt = Time.unscaledTime + STEAM_RETRY_SECONDS;
+                if (!_steamUnavailableLogged)
+                {
+                    _steamUnavailableLogged = true;
+                    MapEditorPlugin.Logger.LogInfo("[COOP] Steam is not available (offline build?) — co-edit disabled until it is.");
                 }
             }
             catch (Exception ex)
@@ -375,11 +398,15 @@ namespace FIHMapEditor
             snap["mapname"] = JsonSerializer.Serialize(map.Name ?? "");
             snap["mapid"] = JsonSerializer.Serialize(map.MapId ?? "");
             snap["editable"] = JsonSerializer.Serialize(map.Editable);
+            snap["owner"] = JsonSerializer.Serialize(map.OwnerSteamId);
             if (map.Ball != null) snap["ball"] = JsonSerializer.Serialize(map.Ball, JsonOpts);
             foreach (var g in map.SoccerGoals)
                 if (!string.IsNullOrEmpty(g.Uid))
                     snap["soccergoal:" + g.Uid] = JsonSerializer.Serialize(g, JsonOpts);
             if (map.Scoreboard != null) snap["scoreboard"] = JsonSerializer.Serialize(map.Scoreboard, JsonOpts);
+            foreach (var vt in map.VoiceTriggers)
+                if (!string.IsNullOrEmpty(vt.Uid))
+                    snap["vt:" + vt.Uid] = JsonSerializer.Serialize(vt, JsonOpts);
             return snap;
         }
 
@@ -398,6 +425,8 @@ namespace FIHMapEditor
             if (key == "ball") return K_BALL;
             if (key.StartsWith("soccergoal:")) return K_SOCCERGOAL_UPSERT;
             if (key == "scoreboard") return K_SCOREBOARD;
+            if (key == "owner") return K_OWNER;
+            if (key.StartsWith("vt:")) return K_VT_UPSERT;
             return -1;
         }
 
@@ -412,7 +441,8 @@ namespace FIHMapEditor
             if (key == "ball") return K_BALL_CLEAR;
             if (key.StartsWith("soccergoal:")) return K_SOCCERGOAL_DELETE;
             if (key == "scoreboard") return K_SCOREBOARD_CLEAR;
-            return -1; // basemode/mapname/mapid/editable are never absent
+            if (key.StartsWith("vt:")) return K_VT_DELETE;
+            return -1; // basemode/mapname/mapid/editable/owner are never absent
         }
 
         // Diffs the live map against what we last sent, bumping this session's own
@@ -691,11 +721,26 @@ namespace FIHMapEditor
                         bool deferVisuals = _c.Mode == EditorMode.Play;
                         _applyingRemote = true;
                         int accepted = 0;
+                        // Owner-only voice lines: an editor may only claim ownership for
+                        // itself (seeds keep the original editor, so relays still pass), and
+                        // "owner" is settled before this batch's vt: ops are judged by it.
+                        long owner = _c.OwnerSteamId;
                         try
                         {
-                            foreach (var op in ops)
+                            foreach (var op in ops.OrderBy(o => o.Key == "owner" ? 0 : 1))
                             {
-                                if (!TryAcceptOp(op)) continue;
+                                if (op.Key == "owner")
+                                {
+                                    long claimed = Deserialize<long>(op.Payload);
+                                    if (claimed != 0 && (ulong)claimed != op.Editor) continue;
+                                    if (!TryAcceptOp(op)) continue;
+                                    owner = claimed;
+                                }
+                                else if (op.Key.StartsWith("vt:") && !MapOwnership.AcceptsPeerChange(owner, op.Editor))
+                                {
+                                    continue;
+                                }
+                                else if (!TryAcceptOp(op)) continue;
                                 accepted++;
                                 if (deferVisuals) _queuedOps.Add(op);
                                 else ApplyVisual(op);
@@ -789,6 +834,9 @@ namespace FIHMapEditor
                     case K_SOCCERGOAL_DELETE: _c.ApplyRemoteSoccerGoalDelete(op.Key.Substring("soccergoal:".Length)); break;
                     case K_SCOREBOARD: _c.ApplyRemoteScoreboard(Deserialize<ScoreboardData>(op.Payload)); break;
                     case K_SCOREBOARD_CLEAR: _c.ApplyRemoteScoreboard(null); break;
+                    case K_OWNER: _c.ApplyRemoteOwner(Deserialize<long>(op.Payload)); break;
+                    case K_VT_UPSERT: _c.ApplyRemoteVoiceTriggerUpsert(Deserialize<VoiceTriggerData>(op.Payload)); break;
+                    case K_VT_DELETE: _c.ApplyRemoteVoiceTriggerDelete(op.Key.Substring(3)); break;
                 }
             }
             catch (Exception ex)

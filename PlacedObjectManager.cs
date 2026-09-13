@@ -649,7 +649,8 @@ namespace FIHMapEditor
                 foreach (var zone in zones)
                 {
                     if (zone == null) continue;
-                    zone.postBootstrapGame = post;
+                    // The final-game RespawnOnTouch dropped its postBootstrapGame field; it
+                    // takes its services from ScenePostInit below.
                     zone.respawnZones = refs.RespawnPipesZones;
                     zone.ScenePostInit(refs);
                     zone.enabled = true;

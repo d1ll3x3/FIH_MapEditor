@@ -521,6 +521,26 @@ namespace FIHMapEditor
                 y += 30;
             }
 
+            // Selected voice trigger: clip, repeat mode, preview.
+            if (sel.Marker == "voice" && sel.MarkerIndex < _c.VoiceTriggers.Count)
+            {
+                var trigger = _c.VoiceTriggers[sel.MarkerIndex];
+                string clipName = string.IsNullOrEmpty(trigger.AudioHash) ? "(no clip)"
+                    : VoiceLineLibrary.Find(trigger.AudioHash) != null ? trigger.AudioName
+                    : _c.VoiceClips.IsDownloading(trigger.AudioHash) ? $"{trigger.AudioName} (downloading)"
+                    : $"{trigger.AudioName} (missing)";
+                GUI.Label(new Rect(15, y + 3, 40, 20), "Clip:", _styleSmall);
+                if (_win.Button(new Rect(55, y, 28, 24), "<")) _c.CycleVoiceTriggerClip(sel.MarkerIndex, -1);
+                GUI.Label(new Rect(88, y + 3, 186, 20), Truncate(clipName, 23), _styleSmall);
+                if (_win.Button(new Rect(278, y, 28, 24), ">")) _c.CycleVoiceTriggerClip(sel.MarkerIndex, 1);
+                if (_win.Button(new Rect(311, y, 80, 24), "Browse…")) _c.BrowseVoiceTriggerClip(sel.MarkerIndex);
+                if (_win.Button(new Rect(396, y, 70, 24), "Preview")) _c.PreviewVoiceTrigger(sel.MarkerIndex);
+                if (_win.ToggleButton(new Rect(471, y, 194, 24),
+                        trigger.OncePerRun ? "Once per run" : "Every time you enter", trigger.OncePerRun))
+                    _c.ToggleVoiceTriggerOncePerRun(sel.MarkerIndex);
+                y += 30;
+            }
+
             DrawMechanicsRow(sel, ref y);
 
             // Gizmo mode (mouse dragging on the axes; 1/2/3 hotkeys)
@@ -724,6 +744,18 @@ namespace FIHMapEditor
             y += 30;
             GUI.Label(new Rect(15, y, W - 30, 20),
                 "Click a ring/box to select it; edit with the gizmo; Del removes it.", _styleSmall);
+            y += 26;
+
+            GUI.Label(new Rect(15, y, 400, 22), "Voice lines (your own recordings):", _styleTitle);
+            y += 26;
+            if (_win.Button(new Rect(15, y, 190, 26), "Add Voice Trigger Here")) _c.AddVoiceTriggerHere();
+            GUI.Label(new Rect(212, y + 5, 120, 20), $"{_c.VoiceTriggers.Count} placed", _styleSmall);
+            if (_win.Button(new Rect(340, y, 190, 26), "Rescan Audio Folder")) _c.RescanVoiceLibrary();
+            GUI.Label(new Rect(537, y + 5, 130, 20), $"{VoiceLineLibrary.Clips.Count} clip(s)", _styleSmall);
+            y += 30;
+            GUI.Label(new Rect(15, y, W - 30, 20), _c.OwnsCurrentMap
+                ? "ogg/mp3/wav/flac in BepInEx/plugins/FIHMapEditor/Audio; plays when a player walks in."
+                : "Only this map's owner can add or edit voice lines.", _styleSmall);
             y += 26;
 
             GUI.Label(new Rect(15, y, 300, 22), "Map base:", _styleTitle);

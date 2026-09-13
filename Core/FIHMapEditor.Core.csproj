@@ -9,6 +9,7 @@
     <Compile Include="..\MapData.cs" Link="Maps\MapData.cs" />
     <Compile Include="Maps\MapSession.cs" />
     <Compile Include="Maps\MapMigrations.cs" />
+    <Compile Include="Maps\MapOwnership.cs" />
     <Compile Include="Editing\MarkerEditingService.cs" />
   </ItemGroup>
 </Project>
