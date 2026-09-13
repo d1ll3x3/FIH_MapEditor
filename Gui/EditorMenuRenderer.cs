@@ -305,10 +305,17 @@ namespace FIHMapEditor
             var listRect = new Rect(10, y, W - 20, CATALOG_GRID_ROWS * CATALOG_CARD_HEIGHT + 4);
             GUI.Box(listRect, "");
 
+            // A rescan (or a cloud pull) can shrink the list under a scrolled-down view;
+            // the filter buttons reset _catalogTop but nothing else does.
+            _catalogTop = Mathf.Clamp(_catalogTop, 0, Mathf.Max(0, entries.Count - CATALOG_PAGE_SIZE));
+
             float scroll = _win.ScrollDeltaOver(listRect);
             if (scroll != 0)
                 _catalogTop = Mathf.Clamp(_catalogTop + (scroll < 0 ? CATALOG_COLUMNS : -CATALOG_COLUMNS),
                     0, Mathf.Max(0, entries.Count - CATALOG_PAGE_SIZE));
+
+            _catalogTop = _win.VScrollbar(new Rect(656, y, 14, listRect.height), "catalogScroll",
+                _catalogTop, entries.Count, CATALOG_PAGE_SIZE, CATALOG_COLUMNS);
 
             if (!_c.Catalog.HasScanned)
             {
@@ -319,14 +326,16 @@ namespace FIHMapEditor
                 GUI.Label(new Rect(25, y + 10, 400, 22), "No results for this filter", _styleRow);
             }
 
-            const float cardWidth = 216f;
+            // Cards are 5px narrower than the grid would allow: the freed strip on the
+            // right (656..670) is where the scrollbar lives.
+            const float cardWidth = 211f;
             for (int i = _catalogTop; i < entries.Count && i < _catalogTop + CATALOG_PAGE_SIZE; i++)
             {
                 var e = entries[i];
                 int slot = i - _catalogTop;
                 int column = slot % CATALOG_COLUMNS;
                 int row = slot / CATALOG_COLUMNS;
-                float cardX = 14 + column * 219f;
+                float cardX = 14 + column * 214f;
                 float cardY = y + 4 + row * CATALOG_CARD_HEIGHT;
                 GUI.Box(new Rect(cardX, cardY, cardWidth, CATALOG_CARD_HEIGHT - 4), "");
 
@@ -340,7 +349,7 @@ namespace FIHMapEditor
 
                 bool fav = IsFavorite(e.DisplayName);
                 GUI.color = fav ? new Color(1f, 0.85f, 0.2f) : new Color(1f, 1f, 1f, 0.35f);
-                if (_win.Button(new Rect(cardX + 136, cardY + 8, 70, 26), fav ? "★ FAV" : "☆ FAV"))
+                if (_win.Button(new Rect(cardX + 131, cardY + 8, 70, 26), fav ? "★ FAV" : "☆ FAV"))
                     ToggleFavorite(e.DisplayName);
                 GUI.color = Color.white;
 
@@ -348,10 +357,10 @@ namespace FIHMapEditor
                 GUI.Label(new Rect(cardX + 8, cardY + 130, cardWidth - 16, 20),
                     Truncate(e.DisplayName, 23), _styleRow);
                 GUI.Label(new Rect(cardX + 8, cardY + 150, 120, 18), size, _styleSmall);
-                if (_win.Button(new Rect(cardX + 136, cardY + 42, 70, 34), "PLACE"))
+                if (_win.Button(new Rect(cardX + 131, cardY + 42, 70, 34), "PLACE"))
                     _c.PlaceEntry(e);
                 bool isStamp = _c.StampEntry == e;
-                if (_win.ToggleButton(new Rect(cardX + 136, cardY + 84, 70, 34), "STAMP", isStamp))
+                if (_win.ToggleButton(new Rect(cardX + 131, cardY + 84, 70, 34), "STAMP", isStamp))
                 {
                     _c.StampEntry = isStamp ? null : e;
                     // Picking a stamp means you want to place: flip the master switch on.
@@ -361,7 +370,7 @@ namespace FIHMapEditor
 
             y += CATALOG_GRID_ROWS * CATALOG_CARD_HEIGHT + 10;
             GUI.Label(new Rect(15, y, W - 30, 20),
-                $"{entries.Count} objects  |  mouse wheel: scroll  |  PLACE: in front of you  |  STAMP: click in the world",
+                $"{entries.Count} objects  |  wheel or drag the bar: scroll  |  PLACE: in front of you  |  STAMP: click in the world",
                 _styleSmall);
         }
 

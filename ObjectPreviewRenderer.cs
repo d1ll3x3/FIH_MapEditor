@@ -78,12 +78,16 @@ namespace FIHMapEditor
                     _retryAfter[entry.SourcePath] = Time.unscaledTime + 2f;
                     return;
                 }
-                if (!ObjectCatalog.HasSolidCollider(source))
-                {
-                    _failed.Add(entry.SourcePath);
-                    _catalog.OmitUnplaceable(entry);
-                    return;
-                }
+                // A missing thumbnail is a rendering outcome, never a statement about the
+                // object: _failed only stops us retrying it. Dropping the entry from the
+                // catalog here made objects vanish from the list one tick at a time while
+                // previews generated, and the next Scan re-added them — the "objects
+                // appear and disappear" churn (which also re-pushed them to the cloud
+                // catalog as fresh discoveries every pass).
+                //
+                // Collider-less sources are rendered too: a preview is visual-only, and
+                // decor without colliders is placeable here (PlacedObjectManager backfills
+                // a box collider on the clone).
                 var texture = Render(source);
                 if (texture != null)
                 {
@@ -93,7 +97,6 @@ namespace FIHMapEditor
                 else
                 {
                     _failed.Add(entry.SourcePath);
-                    _catalog.OmitUnplaceable(entry);
                 }
             }
             catch (Exception ex)

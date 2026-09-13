@@ -25,10 +25,11 @@ echo Deployed to %PLUGINDIR%
 
 rem Optional second deploy: the playtest build, when BepInEx is installed there.
 set PLAYTESTDIR=C:\Program Files (x86)\Steam\steamapps\common\Flipping is Hard Playtest
+if not exist "%PLAYTESTDIR%\BepInEx" set PLAYTESTDIR=D:\playtest\Flipping is Hard Offline Playtest v1.7.002 Fridge
 if exist "%PLAYTESTDIR%\BepInEx" (
     if not exist "%PLAYTESTDIR%\BepInEx\plugins\FIHMapEditor" mkdir "%PLAYTESTDIR%\BepInEx\plugins\FIHMapEditor"
     if not exist "%PLAYTESTDIR%\BepInEx\plugins\FIHMapEditor\Maps" mkdir "%PLAYTESTDIR%\BepInEx\plugins\FIHMapEditor\Maps"
     copy /Y "bin\Debug\net6.0\FIHMapEditor.dll" "%PLAYTESTDIR%\BepInEx\plugins\FIHMapEditor\"
-    echo Also deployed to the playtest install.
+    echo Also deployed to the playtest install: %PLAYTESTDIR%
 )
 endlocal

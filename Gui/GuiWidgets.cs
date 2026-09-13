@@ -21,6 +21,10 @@ namespace FIHMapEditor
         private bool _clickHandledThisFrame = false;
         private string _activeField = null;
         private readonly HashSet<string> _fieldsDrawn = new HashSet<string>();
+        // Scrollbar being dragged, by id (several can share one window), plus where
+        // inside the thumb the grab started so it doesn't jump under the cursor.
+        private string _activeScrollbar = null;
+        private float _scrollGrabOffset;
 
         public bool HasFocusedTextField => _activeField != null;
 
@@ -198,6 +202,85 @@ namespace FIHMapEditor
 
             Rect abs = new Rect(WindowRect.x + localRect.x, WindowRect.y + localRect.y, localRect.width, localRect.height);
             return abs.Contains(CompensatedMouse()) ? scroll : 0f;
+        }
+
+        // Draggable vertical scrollbar over an item list, in window-local coordinates.
+        // Returns the (possibly changed) index of the first visible item. HitTest can't
+        // serve here — it only reports the frame the button goes down — so this follows
+        // HandleDrag: Repaint-gated, CompensatedMouse, explicit press/hold/release state.
+        //
+        // `step` keeps the result aligned to whole rows (pass the column count for a grid).
+        public int VScrollbar(Rect r, string id, int top, int total, int pageSize, int step)
+        {
+            int maxTop = Mathf.Max(0, total - pageSize);
+            if (maxTop == 0)
+            {
+                // Nothing to scroll: empty groove, no thumb, layout unchanged.
+                var prevEmpty = GUI.backgroundColor;
+                GUI.backgroundColor = new Color(0.05f, 0.05f, 0.07f, 1f);
+                GUI.Box(r, "");
+                GUI.backgroundColor = prevEmpty;
+                if (_activeScrollbar == id) _activeScrollbar = null;
+                return 0;
+            }
+
+            top = Mathf.Clamp(top, 0, maxTop);
+            // Thumb height mirrors the visible fraction, floored so it stays grabbable
+            // on a catalog of ~900 entries (6/900 of the track would be sub-pixel).
+            float thumbHeight = Mathf.Max(24f, r.height * pageSize / total);
+            float travel = r.height - thumbHeight;
+            float thumbY = r.y + (maxTop > 0 ? (float)top / maxTop * travel : 0f);
+
+            // The panel behind us is already a GUI.Box, so an ambient-coloured track is
+            // invisible against it: sink the track and light up the thumb. Everything
+            // readable in this UI is opaque over the near-black window (0.13,0.13,0.16).
+            var prev = GUI.backgroundColor;
+            GUI.backgroundColor = new Color(0.05f, 0.05f, 0.07f, 1f);
+            GUI.Box(r, "");
+            var thumb = new Rect(r.x, thumbY, r.width, thumbHeight);
+            GUI.backgroundColor = _activeScrollbar == id
+                ? new Color(0.2f, 0.75f, 0.35f, 1f)   // same green the toggles use while held
+                : new Color(0.62f, 0.66f, 0.76f, 1f);
+            GUI.Box(thumb, "");
+            GUI.backgroundColor = prev;
+
+            if (InputBlocked()) { _activeScrollbar = null; return top; }
+            if (Event.current.type != EventType.Repaint) return top;
+
+            Vector2 m = CompensatedMouse();
+            var absTrack = new Rect(WindowRect.x + r.x, WindowRect.y + r.y, r.width, r.height);
+            var absThumb = new Rect(WindowRect.x + thumb.x, WindowRect.y + thumb.y, thumb.width, thumb.height);
+
+            if (Input.GetMouseButtonDown(0) && _activeScrollbar == null
+                && !_clickHandledThisFrame && absTrack.Contains(m))
+            {
+                // Consume the click either way: the grid sits right next to the bar and
+                // must not treat a scroll press as PLACE/STAMP.
+                _clickHandledThisFrame = true;
+                if (absThumb.Contains(m))
+                {
+                    _activeScrollbar = id;
+                    _scrollGrabOffset = m.y - absThumb.y;
+                }
+                else
+                {
+                    // Bare track: page towards the click, like a standard scrollbar.
+                    top += m.y < absThumb.y ? -pageSize : pageSize;
+                }
+            }
+
+            if (_activeScrollbar == id)
+            {
+                if (!Input.GetMouseButton(0)) _activeScrollbar = null;
+                else if (travel > 0f)
+                {
+                    float local = m.y - _scrollGrabOffset - absTrack.y;
+                    top = Mathf.RoundToInt(Mathf.Clamp01(local / travel) * maxTop);
+                }
+            }
+
+            if (step > 1) top = top / step * step;   // land on a row boundary, never mid-row
+            return Mathf.Clamp(top, 0, maxTop);
         }
     }
 }

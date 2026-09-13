@@ -8,6 +8,7 @@ lib/
 # Local tooling
 .claude/
 *.user
+graphify-out/
 
 # Stray release packages (release zips are built under bin/)
 *.zip

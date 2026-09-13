@@ -1132,23 +1132,6 @@ namespace FIHMapEditor
             => !string.IsNullOrEmpty(name)
                 && name.IndexOf("FIH", StringComparison.OrdinalIgnoreCase) >= 0;
 
-        public void OmitUnplaceable(CatalogEntry entry)
-        {
-            if (entry == null || !Entries.Remove(entry)) return;
-
-            var staleKeys = new List<string>();
-            foreach (var pair in _seen)
-                if (ReferenceEquals(pair.Value, entry)) staleKeys.Add(pair.Key);
-            foreach (var key in staleKeys) _seen.Remove(key);
-
-            // Force the GUI's filtered-list cache to rebuild before its next draw.
-            ScanVersion++;
-            bool categoryStillUsed = false;
-            foreach (var remaining in Entries)
-                if (remaining.Category == entry.Category) { categoryStillUsed = true; break; }
-            if (!categoryStillUsed) Categories.Remove(entry.Category);
-        }
-
         public GameObject GetLiveSource(CatalogEntry entry)
         {
             if (entry.Source != null) return entry.Source;

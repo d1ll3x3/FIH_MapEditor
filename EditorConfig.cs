@@ -31,15 +31,15 @@ namespace FIHMapEditor
         // E: interact with cannons/boost pads in play mode (no conflict with fly mode).
         public KeyCode InteractKey { get; set; } = KeyCode.E;
 
-        // Fly-mode movement. Space/Shift default for up/down; Ctrl is reserved for editor
+        // Fly-mode movement. Space/Q default for up/down; Ctrl is reserved for editor
         // shortcuts (Ctrl+Z/D/S), so avoid it for movement.
         public KeyCode FlyForwardKey { get; set; } = KeyCode.W;
         public KeyCode FlyBackKey { get; set; } = KeyCode.S;
         public KeyCode FlyLeftKey { get; set; } = KeyCode.A;
         public KeyCode FlyRightKey { get; set; } = KeyCode.D;
         public KeyCode FlyUpKey { get; set; } = KeyCode.Space;
-        public KeyCode FlyDownKey { get; set; } = KeyCode.LeftShift;
-        public KeyCode FlyBoostKey { get; set; } = KeyCode.Q;
+        public KeyCode FlyDownKey { get; set; } = KeyCode.Q;
+        public KeyCode FlyBoostKey { get; set; } = KeyCode.LeftShift;
 
         public float FlySpeed { get; set; } = 18.0f;
         public float FlySpeedBoost { get; set; } = 3.0f;
@@ -94,11 +94,14 @@ namespace FIHMapEditor
                     var options = new JsonSerializerOptions { Converters = { new JsonStringEnumConverter() } };
                     Settings = JsonSerializer.Deserialize<EditorSettings>(json, options) ?? new EditorSettings();
 
-                    // Migrate only the old default pair; preserve customized bindings.
-                    if (Settings.FlyDownKey == KeyCode.Q && Settings.FlyBoostKey == KeyCode.LeftShift)
+                    // One-shot undo of the Q/Shift swap: it rewrote saved configs on load,
+                    // so restoring the defaults alone wouldn't reach anyone who had already
+                    // started the game once. Rebinding either key in TOOLS sticks — this
+                    // only matches the exact swapped pair.
+                    if (Settings.FlyDownKey == KeyCode.LeftShift && Settings.FlyBoostKey == KeyCode.Q)
                     {
-                        Settings.FlyDownKey = KeyCode.LeftShift;
-                        Settings.FlyBoostKey = KeyCode.Q;
+                        Settings.FlyDownKey = KeyCode.Q;
+                        Settings.FlyBoostKey = KeyCode.LeftShift;
                         Save();
                     }
 
