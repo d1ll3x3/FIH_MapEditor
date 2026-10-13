@@ -954,6 +954,9 @@ namespace FIHMapEditor
                 var playerT = _finder.FindPlayerTransform();
                 var rb = _finder.GetCachedPlayerRigidbody();
                 var rotation = Quaternion.Euler(0f, yaw, 0f);
+                // Like the game's own teleport: let go of any zipline/bar/hook/pipe first,
+                // or it keeps holding (and locking) the player at the new spot.
+                PlayerAttachments.ReleaseAll(playerT?.gameObject);
 
                 if (rb != null)
                 {

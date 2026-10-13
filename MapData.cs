@@ -152,6 +152,12 @@ namespace FIHMapEditor
         public float? NetworkCannonForce { get; set; }
         public float? NetworkCannonAngle { get; set; }
         public float? NetworkCannonAirControlBlock { get; set; }
+        // v13: the release game's other spawner-backed interactables (touch-breaking
+        // platform, glass, high-force glass). Absent on older files = prefab defaults.
+        public float? NetworkBreakDelay { get; set; }
+        public float? NetworkBreakDuration { get; set; }
+        public float? NetworkShatteredDuration { get; set; }
+        public float? NetworkShatterImpulse { get; set; }
     }
 
     public class MapFile
@@ -161,9 +167,10 @@ namespace FIHMapEditor
         // key). v7: stable Uid + GroupId on objects (grouping, multiplayer sync) and Uid
         // on checkpoints/reset zones; CustomColor. v8: box-shaped checkpoints
         // (CheckpointData.Size/Rot). v9: soccer mode (Ball + SoccerGoals). v10: placeable
-        // 3D scoreboard. v12: voice triggers + OwnerSteamId. Older files load fine — missing
+        // 3D scoreboard. v12: voice triggers + OwnerSteamId. v13: settings for the other
+        // release-game network interactables. Older files load fine — missing
         // fields stay at defaults and Uids are backfilled on load.
-        public const int CURRENT_FORMAT_VERSION = 12;
+        public const int CURRENT_FORMAT_VERSION = 13;
 
         public int FormatVersion { get; set; } = CURRENT_FORMAT_VERSION;
         // Stable per-map identity for the leaderboard and the online map library. Minted

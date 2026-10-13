@@ -100,6 +100,9 @@ namespace FIHMapEditor
                 {
                     if (e == null) continue;
                     if (IsFihNamed(e.DisplayName)) continue;
+                    // Other players' older clients pushed loose pieces of gameplay objects
+                    // and analytics volumes; the local scan no longer lists either.
+                    if (IsGameplayObjectPiece(e.SourcePath) || IsAnalyticsPath(e.SourcePath)) continue;
                     if (!string.IsNullOrEmpty(e.SourcePath))
                     {
                         // Already have this object (or a duplicate within the pull).
@@ -187,6 +190,10 @@ namespace FIHMapEditor
                 {
                     if (string.IsNullOrEmpty(c.Key) || _seen.ContainsKey(c.Key)) continue;
                     if (IsFihNamed(c.Name)) continue;
+                    // Older sessions listed loose pieces of gameplay objects and keyed
+                    // their variants by name only; both are re-found by the current scan.
+                    if (IsGameplayObjectPiece(c.Path) || IsAnalyticsPath(c.Path)) continue;
+                    if (IsGameplayObjectName(c.Name) && !c.Key.Contains(SHAPE_KEY_MARK)) continue;
                     var entry = new CatalogEntry
                     {
                         DisplayName = c.Name,
@@ -340,7 +347,7 @@ namespace FIHMapEditor
 
                     string display = CleanName(root.name);
                     string meshName = FirstMeshName(root.gameObject);
-                    string key = display + "|" + meshName;
+                    string key = EntryKey(display, meshName, root.gameObject);
 
                     if (seen.TryGetValue(key, out var dup))
                     {
@@ -393,7 +400,7 @@ namespace FIHMapEditor
                         ColliderlessRoots.Add(new DecorPickable { Root = root.gameObject, Bounds = bounds });
 
                     string display = CleanName(root.name);
-                    string key = display + "|" + FirstMeshName(root.gameObject);
+                    string key = EntryKey(display, FirstMeshName(root.gameObject), root.gameObject);
                     if (seen.TryGetValue(key, out var dup))
                     {
                         UpgradeSourceIfBetter(dup, root.gameObject);
@@ -414,6 +421,7 @@ namespace FIHMapEditor
                 }
 
                 ScanInactiveSceneObjects(seen, playerRoot);
+                ScanGameplayObjects(seen, playerRoot);
                 ScanAddressableAssets(seen);
                 ScanPrefabAssets(seen);
                 ScanMechanicsAssemblies(seen);
@@ -432,7 +440,8 @@ namespace FIHMapEditor
                 // ScanMechanicsAssemblies is the one to use.
                 foreach (var e in Entries)
                 {
-                    if (e.Source != null && MechanicsDetector.DetectTypeInSubtree(e.Source) != MechanicType.None)
+                    if (NetworkMechanics.IsMechanicAssetName(e.DisplayName)
+                        || (e.Source != null && MechanicsDetector.DetectTypeInSubtree(e.Source) != MechanicType.None))
                         e.Category = "Mechanics";
                 }
 
@@ -538,7 +547,7 @@ namespace FIHMapEditor
                     if (bounds.size == Vector3.zero) continue;
 
                     string display = CleanName(go.name);
-                    string key = display + "|" + FirstMeshName(go);
+                    string key = EntryKey(display, FirstMeshName(go), go);
                     if (seen.ContainsKey(key)) continue;             // active twin already listed
 
                     var entry = new CatalogEntry
@@ -560,6 +569,86 @@ namespace FIHMapEditor
             catch (Exception ex)
             {
                 MapEditorPlugin.Logger.LogWarning($"[CATALOG] Inactive-object scan failed: {ex.Message}");
+            }
+        }
+
+        // The game's gameplay objects (SceneObject_*: ziplines, swing bars, fans, movers...)
+        // share one name and mesh per kind, but each instance can have a different shape
+        // (a zipline's length, a route's course). Their key carries the measured size so
+        // differently shaped ones stay separate entries.
+        private const string SHAPE_KEY_MARK = "|~";
+
+        private static bool IsGameplayObjectName(string name)
+            => name != null && name.StartsWith("SceneObject_", StringComparison.OrdinalIgnoreCase);
+
+        // A path that goes THROUGH a SceneObject_ node: one piece of a gameplay object.
+        private static bool IsGameplayObjectPiece(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return false;
+            int at = path.IndexOf("/SceneObject_", StringComparison.OrdinalIgnoreCase);
+            if (at < 0 && !path.StartsWith("SceneObject_", StringComparison.OrdinalIgnoreCase)) return false;
+            int from = at < 0 ? 0 : at + 1;
+            return path.IndexOf('/', from) >= 0;
+        }
+
+        // Invisible analytics volumes (AnalyticsAllZones/...) only measure where players
+        // go; they are not placeable objects.
+        private static bool IsAnalyticsPath(string path)
+            => !string.IsNullOrEmpty(path) && path.StartsWith("AnalyticsAllZones", StringComparison.OrdinalIgnoreCase);
+
+        private static string EntryKey(string display, string meshName, GameObject go)
+        {
+            string key = display + "|" + meshName;
+            if (!IsGameplayObjectName(display)) return key;
+            var size = ComputeAssetBounds(go).size;
+            return $"{key}{SHAPE_KEY_MARK}{Mathf.RoundToInt(size.x)}x{Mathf.RoundToInt(size.y)}x{Mathf.RoundToInt(size.z)}";
+        }
+
+        // Every gameplay object of the level, active or not. The collider and renderer
+        // passes reach them only when the click-style climb happens to land on their
+        // root, and a disabled level section hides all of its objects from them.
+        private void ScanGameplayObjects(Dictionary<string, CatalogEntry> seen, Transform playerRoot)
+        {
+            try
+            {
+                int added = 0;
+                foreach (var obj in Resources.FindObjectsOfTypeAll(Il2CppType.Of<GameObject>()))
+                {
+                    var go = obj?.TryCast<GameObject>();
+                    if (go == null || !go.scene.IsValid() || !IsGameplayObjectName(go.name)) continue;
+                    var t = go.transform;
+                    if (t.root.name == "FIH_SpawnRoot" || t.root.name == "FIH_MapObjectsRoot") continue;
+                    if ((go.hideFlags & HideFlags.HideAndDontSave) != 0) continue;
+                    if (!IsValidCandidate(t, playerRoot, requireActive: false)) continue;
+                    if (go.GetComponentInChildren<Renderer>(true) == null) continue;
+
+                    var bounds = ComputeAssetBounds(go);
+                    if (bounds.size == Vector3.zero) continue;
+                    if (bounds.size.x > 120f || bounds.size.y > 120f || bounds.size.z > 120f) continue;
+
+                    string display = CleanName(go.name);
+                    string key = EntryKey(display, FirstMeshName(go), go);
+                    if (seen.ContainsKey(key)) continue;
+
+                    var entry = new CatalogEntry
+                    {
+                        DisplayName = display,
+                        SourcePath = BuildPath(t),
+                        Source = go,
+                        BoundsSize = bounds.size,
+                        Category = "Mechanics",
+                        HasCollider = go.GetComponentInChildren<Collider>(true) != null,
+                    };
+                    seen[key] = entry;
+                    Entries.Add(entry);
+                    added++;
+                }
+                if (EditorConfig.VerboseLogs)
+                    MapEditorPlugin.Logger.LogInfo($"[CATALOG] Gameplay-object scan added {added} entries.");
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[CATALOG] Gameplay-object scan failed: {ex.Message}");
             }
         }
 
@@ -597,7 +686,7 @@ namespace FIHMapEditor
                     if (bounds.size == Vector3.zero) continue;
 
                     string display = CleanName(root.name);
-                    string key = display + "|" + FirstMeshName(root.gameObject);
+                    string key = EntryKey(display, FirstMeshName(root.gameObject), root.gameObject);
                     if (seen.ContainsKey(key)) continue;
 
                     var entry = new CatalogEntry
@@ -646,7 +735,7 @@ namespace FIHMapEditor
                     if (bounds.size == Vector3.zero) continue;
 
                     string display = CleanName(go.name);
-                    string key = display + "|" + FirstMeshName(go);
+                    string key = EntryKey(display, FirstMeshName(go), go);
                     if (seen.ContainsKey(key)) continue;             // same object exists in the scene
 
                     var entry = new CatalogEntry
@@ -676,7 +765,10 @@ namespace FIHMapEditor
             if (go.GetComponentInChildren<Renderer>(true) == null) return false;
             if (go.GetComponentInChildren<Camera>(true) != null) return false;
             if (go.GetComponentInChildren<AudioListener>(true) != null) return false;
-            if (go.GetComponentInChildren<Canvas>(true) != null) return false;
+            // The network interactables carry a world-space "press to interact" hint
+            // canvas; it is part of them, not a UI root.
+            if (go.GetComponentInChildren<Canvas>(true) != null
+                && NetworkMechanics.KindOf(go) == NetworkMechanicKind.None) return false;
             try
             {
                 foreach (var mb in go.GetComponentsInChildren<MonoBehaviour>(true))
@@ -688,6 +780,31 @@ namespace FIHMapEditor
             }
             catch { }
             return true;
+        }
+
+        // Levels built with mesh combining (NW_*_Combined: the Fridge, The Grid...) draw
+        // their static pieces from merged meshes and switch each piece's own renderer
+        // off. Those pieces are still real objects; what stays out of the merge lives
+        // under an "Ignore Combine" node and keeps its renderers on.
+        public static bool IsCombinedLevelPiece(Transform t)
+        {
+            for (var current = t; current != null; current = current.parent)
+            {
+                string name = current.name;
+                if (name.IndexOf("Ignore Combine", StringComparison.OrdinalIgnoreCase) >= 0
+                    || name.IndexOf("IgnoreCombine", StringComparison.OrdinalIgnoreCase) >= 0) return false;
+                if (current.parent == null) return name.IndexOf("_Combined", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            return false;
+        }
+
+        // What the player actually sees of an object: its enabled renderers, or for a
+        // combined level piece the meshes its (disabled) renderers would draw.
+        public static Bounds ComputeVisualBounds(GameObject go)
+        {
+            var bounds = ComputeBounds(go);
+            if (bounds.size != Vector3.zero || !IsCombinedLevelPiece(go.transform)) return bounds;
+            return ComputeAssetBounds(go);
         }
 
         // Renderer.bounds is unreliable on inactive prefab assets; approximate from the
@@ -800,7 +917,7 @@ namespace FIHMapEditor
                 }
                 break;
             }
-            return root;
+            return SelectionSystem.PromoteToMechanicRoot(root);
         }
 
         private bool IsValidCandidate(Transform root, Transform playerRoot, bool requireActive = true)
@@ -816,6 +933,8 @@ namespace FIHMapEditor
             if (go.name.Contains(CLONE_MARKER)) { reason = "own-clone"; return false; }
             if (go.name == "FIH_MapObjectsRoot" || go.name == "FIH_SpawnRoot") { reason = "mod-helper"; return false; }
             if (playerRoot != null && root.root == playerRoot) { reason = "player-rig"; return false; }
+            if (root.root.name.StartsWith("AnalyticsAllZones", StringComparison.OrdinalIgnoreCase))
+                { reason = "analytics-volume"; return false; }
 
             // Skip anything that is (or carries) gameplay-critical machinery.
             if (go.GetComponentInChildren<Camera>(true) != null) { reason = "has-camera"; return false; }
@@ -877,6 +996,10 @@ namespace FIHMapEditor
             }
             return name;
         }
+
+        // Addressables entries are not loaded yet, so only their name can tell.
+        private static string CategorizeAsset(string displayName)
+            => NetworkMechanics.IsMechanicAssetName(displayName) ? "Mechanics" : ASSET_CATEGORY;
 
         private static string Categorize(string name, Vector3 size)
         {
@@ -992,6 +1115,9 @@ namespace FIHMapEditor
                         UnityEngine.AddressableAssets.ResourceLocators.IResourceLocator>();
                     if (locator == null) continue;
                     var map = locator.TryCast<ResourceLocationMap>();
+                    // Binary catalogs (catalog.bin, the release game) have no ResourceLocationMap.
+                    // Querying them through IResourceLocator.Locate crashed the game natively
+                    // on the first scan, so they are skipped until a safe path is found.
                     if (map == null || map.Locations == null) continue;
 
                     // ResourceLocationMap.AllLocations uses SelectMany over native
@@ -1053,7 +1179,7 @@ namespace FIHMapEditor
                     && candidate.SourcePath.StartsWith(ADDRESSABLE_PREFIX))) continue;
                 candidate.SourcePath = ADDRESSABLE_PREFIX + address;
                 candidate.Source = null;
-                candidate.Category = ASSET_CATEGORY;
+                candidate.Category = CategorizeAsset(display);
                 seen[key] = candidate;
                 _sourcesUpgraded = true;
                 return false;
@@ -1064,7 +1190,7 @@ namespace FIHMapEditor
                 DisplayName = display,
                 SourcePath = ADDRESSABLE_PREFIX + address,
                 BoundsSize = Vector3.one,
-                Category = ASSET_CATEGORY,
+                Category = CategorizeAsset(display),
                 HasCollider = true,
             };
             seen[key] = entry;

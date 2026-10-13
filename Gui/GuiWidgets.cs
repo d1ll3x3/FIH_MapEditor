@@ -115,11 +115,24 @@ namespace FIHMapEditor
         // Button drawn highlighted when "on" (used for toggles and tab headers).
         public bool ToggleButton(Rect rect, string text, bool on)
         {
-            var prev = GUI.backgroundColor;
-            if (on) GUI.backgroundColor = new Color(0.2f, 0.75f, 0.35f, 1f);
+            // backgroundColor barely tints this skin's dark box, so an "on" state is
+            // painted underneath, plus an accent bar along the bottom edge.
+            if (on)
+            {
+                FillRect(rect, new Color(0.2f, 0.75f, 0.35f, 0.55f));
+                FillRect(new Rect(rect.x, rect.yMax - 3f, rect.width, 3f), new Color(0.3f, 0.95f, 0.45f, 1f));
+            }
             GUI.Box(rect, text);
-            GUI.backgroundColor = prev;
             return HitTest(rect);
+        }
+
+        // Solid colour rectangle. Unlike a tinted GUI.Box it shows up on this skin.
+        public static void FillRect(Rect rect, Color color)
+        {
+            var prev = GUI.color;
+            GUI.color = color;
+            GUI.DrawTexture(rect, Texture2D.whiteTexture);
+            GUI.color = prev;
         }
 
         private bool HitTest(Rect rect)
@@ -203,6 +216,62 @@ namespace FIHMapEditor
             Rect abs = new Rect(WindowRect.x + localRect.x, WindowRect.y + localRect.y, localRect.width, localRect.height);
             return abs.Contains(CompensatedMouse()) ? scroll : 0f;
         }
+
+        // Horizontal slider in window-local coordinates, value printed on the track.
+        // Press anywhere on it and drag; same Repaint-gated press/hold/release handling
+        // as VScrollbar. Returns the (possibly changed) value snapped to `step`.
+        public float HSlider(Rect r, string id, float value, float min, float max, float step, string format)
+        {
+            value = Mathf.Clamp(value, min, max);
+            float fill = max > min ? (value - min) / (max - min) : 0f;
+
+            var prev = GUI.backgroundColor;
+            GUI.backgroundColor = new Color(0.05f, 0.05f, 0.07f, 1f);
+            GUI.Box(r, "");
+            GUI.backgroundColor = prev;
+            var fillColor = _activeSlider == id
+                ? new Color(0.2f, 0.75f, 0.35f, 0.9f)
+                : new Color(0.3f, 0.5f, 0.9f, 0.85f);
+            var inner = new Rect(r.x + 2f, r.y + 2f, r.width - 4f, r.height - 4f);
+            if (fill > 0f) FillRect(new Rect(inner.x, inner.y, Mathf.Max(3f, inner.width * fill), inner.height), fillColor);
+            // Handle at the current value, so the position reads even at 0 or a full bar.
+            FillRect(new Rect(inner.x + inner.width * fill - 2f, r.y, 4f, r.height), Color.white);
+            if (_sliderLabel == null)
+            {
+                // GUIStyle's copy constructor is not exposed by the interop; build it bare.
+                _sliderLabel = new GUIStyle { fontSize = 13, fontStyle = FontStyle.Bold, alignment = TextAnchor.MiddleCenter };
+                _sliderLabel.normal.textColor = Color.white;
+            }
+            GUI.Label(r, value.ToString(format), _sliderLabel);
+
+            if (InputBlocked()) { if (_activeSlider == id) _activeSlider = null; return value; }
+            if (Event.current.type != EventType.Repaint) return value;
+
+            Vector2 m = CompensatedMouse();
+            var abs = new Rect(WindowRect.x + r.x, WindowRect.y + r.y, r.width, r.height);
+            if (Input.GetMouseButtonDown(0) && _activeSlider == null && !_clickHandledThisFrame && abs.Contains(m))
+            {
+                _clickHandledThisFrame = true;
+                _activeSlider = id;
+            }
+            if (_activeSlider == id)
+            {
+                if (!Input.GetMouseButton(0)) _activeSlider = null;
+                else
+                {
+                    value = min + Mathf.Clamp01((m.x - abs.x) / abs.width) * (max - min);
+                    if (step > 0f) value = Mathf.Round(value / step) * step;
+                }
+            }
+            return Mathf.Clamp(value, min, max);
+        }
+
+        // True while the given slider is being dragged; edits that are costly to apply
+        // (a network respawn) wait for the release.
+        public bool IsSliderHeld(string id) => _activeSlider == id;
+
+        private string _activeSlider;
+        private static GUIStyle _sliderLabel;
 
         // Draggable vertical scrollbar over an item list, in window-local coordinates.
         // Returns the (possibly changed) index of the first visible item. HitTest can't

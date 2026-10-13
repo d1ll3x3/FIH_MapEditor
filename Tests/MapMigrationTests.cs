@@ -59,5 +59,40 @@ namespace FIHMapEditor.Tests
             Assert.Equal(38f, mechanic.NetworkCannonAngle);
             Assert.Equal(1.25f, mechanic.NetworkCannonAirControlBlock);
         }
+
+        [Fact]
+        public void BreakingPlatformAndGlassSettingsRoundTripThroughJson()
+        {
+            var original = new MapFile();
+            original.Objects.Add(new MapObjectData
+            {
+                SourceName = "NetworkedInteractable_GlassHighForce",
+                NetworkBreakDelay = 0.75f,
+                NetworkBreakDuration = 4f,
+                NetworkShatteredDuration = 6.5f,
+                NetworkShatterImpulse = 12f,
+            });
+
+            string json = JsonSerializer.Serialize(original);
+            var loaded = JsonSerializer.Deserialize<MapFile>(json);
+            var mechanic = Assert.Single(loaded.Objects);
+
+            Assert.Equal(0.75f, mechanic.NetworkBreakDelay);
+            Assert.Equal(4f, mechanic.NetworkBreakDuration);
+            Assert.Equal(6.5f, mechanic.NetworkShatteredDuration);
+            Assert.Equal(12f, mechanic.NetworkShatterImpulse);
+        }
+
+        [Fact]
+        public void MapsWithoutNewNetworkSettingsLeaveThemUnset()
+        {
+            var loaded = JsonSerializer.Deserialize<MapFile>(
+                "{\"FormatVersion\":12,\"Objects\":[{\"SourceName\":\"NetworkedInteractable_Cannon\",\"NetworkCannonForce\":20}]}");
+            var mechanic = Assert.Single(MapMigrations.Normalize(loaded).Objects);
+
+            Assert.Equal(20f, mechanic.NetworkCannonForce);
+            Assert.Null(mechanic.NetworkBreakDelay);
+            Assert.Null(mechanic.NetworkShatteredDuration);
+        }
     }
 }

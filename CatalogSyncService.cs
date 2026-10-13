@@ -368,20 +368,30 @@ namespace FIHMapEditor
                     ["p_versions"] = versions,
                 };
 
-                using var req = new HttpRequestMessage(HttpMethod.Post, $"{Supabase.Url}/rest/v1/rpc/fetch_catalog");
-                Supabase.AddAuth(req);
-                req.Content = new StringContent(JsonSerializer.Serialize(args, Json), Encoding.UTF8, "application/json");
-                using var resp = await Supabase.Http.SendAsync(req).ConfigureAwait(false);
-                string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
-                if (!resp.IsSuccessStatusCode)
+                // PostgREST caps every response at the project's max-rows (1000 by
+                // default), so one call silently returned only the first 1000 objects.
+                // Page through the whole result in a stable order until a page is empty.
+                var raw = new List<RawCatalogEntry>();
+                for (int page = 0; page < MAX_PULL_PAGES; page++)
                 {
-                    MapEditorPlugin.Logger.LogWarning(
-                        $"[CATSYNC] Pull '{sceneName}' failed: HTTP {(int)resp.StatusCode} {Supabase.Trim(body)}");
-                    return null;
+                    string url = $"{Supabase.Url}/rest/v1/rpc/fetch_catalog?order=id.asc&limit={PULL_PAGE_SIZE}&offset={raw.Count}";
+                    using var req = new HttpRequestMessage(HttpMethod.Post, url);
+                    Supabase.AddAuth(req);
+                    req.Content = new StringContent(JsonSerializer.Serialize(args, Json), Encoding.UTF8, "application/json");
+                    using var resp = await Supabase.Http.SendAsync(req).ConfigureAwait(false);
+                    string body = await resp.Content.ReadAsStringAsync().ConfigureAwait(false);
+                    if (!resp.IsSuccessStatusCode)
+                    {
+                        MapEditorPlugin.Logger.LogWarning(
+                            $"[CATSYNC] Pull '{sceneName}' failed at row {raw.Count}: HTTP {(int)resp.StatusCode} {Supabase.Trim(body)}");
+                        if (raw.Count == 0) return null;
+                        break;   // keep the pages that did arrive
+                    }
+                    var rows = JsonSerializer.Deserialize<List<RawCatalogEntry>>(body, Json);
+                    if (rows == null || rows.Count == 0) break;
+                    raw.AddRange(rows);
                 }
-
-                var raw = JsonSerializer.Deserialize<List<RawCatalogEntry>>(body, Json);
-                if (raw == null || raw.Count == 0) return new List<CatalogEntry>();
+                if (raw.Count == 0) return new List<CatalogEntry>();
 
                 var list = new List<CatalogEntry>(raw.Count);
                 foreach (var r in raw)
@@ -414,6 +424,9 @@ namespace FIHMapEditor
 
         // Raw row shape from the DB. Property names match the SQL columns (case-
         // insensitive parsing via JsonSerializerOptions above).
+        private const int PULL_PAGE_SIZE = 1000;
+        private const int MAX_PULL_PAGES = 50;   // 50k rows: far above any one scene's catalog
+
         private class RawCatalogEntry
         {
             [JsonPropertyName("scene_name")]     public string scene_name { get; set; }

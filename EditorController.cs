@@ -359,6 +359,9 @@ namespace FIHMapEditor
                 GroundContactFix.Tick(Finder.FindPlayer());
                 HandlePendingReapply();
                 Multiplayer.Update();
+                PlacedManager.UpdateNetworkReplicas();
+                // Placed mechanics hold still while editing and run everywhere else.
+                PlacedManager.SetMechanicsRunning(Mode != EditorMode.Editor, Finder.FindPlayer());
 
                 // Focus gate: no hotkeys while the window is unfocused + short grace after.
                 bool focused = Application.isFocused;
@@ -1336,11 +1339,13 @@ namespace FIHMapEditor
                     // root.forward and targetAngle.
                     var pad = placed.Root.GetComponentInChildren<
                         EHS.Interactables.BoostPad.NetworkedInteractableBoostPad>(true);
-                    Vector3 shootDirection = pad != null ? pad.FindShootDirection() : Vector3.zero;
+                    Vector3 shootDirection = pad != null ? pad.FindShootDirection()
+                        : placed.ScenePad != null ? ScenePadShootDirection(placed.ScenePad) : Vector3.zero;
+                    GameObject padObject = pad != null ? pad.gameObject : placed.ScenePad?.gameObject;
                     if (shootDirection.sqrMagnitude > 0.001f)
                     {
                         velocity = shootDirection.normalized * force;
-                        var triggerBounds = MechanicsController.ComputeColliderBounds(pad.gameObject);
+                        var triggerBounds = MechanicsController.ComputeColliderBounds(padObject);
                         if (triggerBounds.size.sqrMagnitude > 0.001f)
                             start = triggerBounds.center;
                     }
@@ -2148,7 +2153,10 @@ namespace FIHMapEditor
             // Stamp placement only when the master mouse-place switch is on.
             if (MousePlaceEnabled && StampEntry != null && hit)
             {
-                PlaceEntryAt(StampEntry, hitPoint);
+                var entry = StampEntry;
+                // One stamp = one copy; picking STAMP again places another.
+                StampEntry = null;
+                PlaceEntryAt(entry, hitPoint);
             }
         }
 
@@ -2236,6 +2244,9 @@ namespace FIHMapEditor
             }
             var old = Mode;
             Mode = newMode;
+            // Every mode change teleports or freezes things: let go of anything holding
+            // the player first, as the game does before its own teleports.
+            PlayerAttachments.ReleaseAll(Finder.FindPlayer());
 
             try
             {
@@ -2764,12 +2775,20 @@ namespace FIHMapEditor
             try
             {
                 var existing = PlacedManager.FindByUid(data.Uid);
+                // The host owns network objects: new settings from a peer need a respawn
+                // so FishNet ships the new spawner data to everyone.
+                if (existing?.NetworkSpawner != null && existing.NetworkSettingsDiffer(data))
+                {
+                    ReplacePlacedFromData(data.Uid, data, SelectionSys.Current.Placed == existing);
+                    return;
+                }
                 if (existing != null && existing.Root != null)
                 {
                     var t = existing.Root.transform;
-                    t.position = VecUtil.ToVector3(data.Pos, t.position);
-                    t.eulerAngles = VecUtil.ToVector3(data.Rot, t.eulerAngles);
-                    t.localScale = VecUtil.ToVector3(data.Scale, t.localScale);
+                    PlacedManager.SetAuthoredPose(existing,
+                        VecUtil.ToVector3(data.Pos, t.position),
+                        Quaternion.Euler(VecUtil.ToVector3(data.Rot, t.eulerAngles)),
+                        VecUtil.ToVector3(data.Scale, t.localScale));
                     existing.GroupId = data.GroupId;
                     if (data.CustomColor != null && data.CustomColor.Length >= 3)
                         PlacedManager.ApplyCustomColor(existing, new Color(data.CustomColor[0], data.CustomColor[1], data.CustomColor[2]));
@@ -2779,11 +2798,8 @@ namespace FIHMapEditor
                     if (data.CannonTimer.HasValue) existing.CannonTimer = data.CannonTimer.Value;
                     if (data.CannonTarget != null) existing.CannonTarget = (float[])data.CannonTarget.Clone();
                     existing.CannonLaunchPos = data.CannonLaunchPos != null ? (float[])data.CannonLaunchPos.Clone() : null;
-                    existing.NetworkBoostForce = data.NetworkBoostForce;
-                    existing.NetworkBoostAngle = data.NetworkBoostAngle;
-                    existing.NetworkCannonForce = data.NetworkCannonForce;
-                    existing.NetworkCannonAngle = data.NetworkCannonAngle;
-                    existing.NetworkCannonAirControlBlock = data.NetworkCannonAirControlBlock;
+                    existing.CopyNetworkSettingsFrom(data);
+                    PlacedObjectManager.ApplyScenePadSettings(existing);
                 }
                 else
                 {
@@ -2821,6 +2837,11 @@ namespace FIHMapEditor
             SelectionSys.PruneMulti();
             SetDirty();
         }
+
+        public Dictionary<string, int> NetworkObjectIds() => PlacedManager.NetworkObjectIds();
+
+        public void ApplyRemoteNetworkObjectId(string uid, int? objectId)
+            => PlacedManager.SetRemoteNetworkObjectId(uid, objectId);
 
         public void ApplyRemoteCheckpointUpsert(CheckpointData data)
         {
@@ -3283,7 +3304,9 @@ namespace FIHMapEditor
             AutoLaunchEnd = null;
         }
 
-        public void CreateAutoAimedNetworkMechanic(float apexHeight)
+        // objectName: what to build — a scene pad (SceneObject_BoostPad...) or the
+        // network cannon (NetworkedInteractable_Cannon).
+        public void CreateAutoAimedNetworkMechanic(string objectName, float apexHeight)
         {
             if (ReadOnlyBlock()) return;
             if (!AutoLaunchStart.HasValue || !AutoLaunchEnd.HasValue)
@@ -3292,24 +3315,14 @@ namespace FIHMapEditor
                 return;
             }
 
-            var entry = StampEntry;
-            string requested = ObjectCatalog.CleanName(entry?.DisplayName ?? "").ToLowerInvariant();
-            bool isPad = requested.StartsWith("networkedinteractable_", StringComparison.OrdinalIgnoreCase)
-                && (requested.Contains("boostpad") || requested.Contains("booster"));
-            bool isCannon = requested.StartsWith("networkedinteractable_", StringComparison.OrdinalIgnoreCase)
-                && requested.Contains("cannon");
-            if (!isPad && !isCannon)
+            if (!TryFindAutoAimSource(objectName, out var source, out string sourcePath))
             {
-                ShowToast("Choose a NetworkedInteractable pad or cannon with STAMP first");
+                ShowToast($"No \"{objectName}\" is loaded in this level right now");
                 return;
             }
-
-            var source = Catalog.GetLiveSource(entry);
-            if (source == null)
-            {
-                ShowToast($"Source object \"{entry.DisplayName}\" not found");
-                return;
-            }
+            bool isCannon = objectName.IndexOf("cannon", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool isPad = !isCannon;
+            var entry = new CatalogEntry { DisplayName = objectName, SourcePath = sourcePath };
 
             Vector3 start = AutoLaunchStart.Value;
             Vector3 end = AutoLaunchEnd.Value;
@@ -3430,11 +3443,55 @@ namespace FIHMapEditor
             ShowToast($"Created {(isPad ? "boost pad" : "cannon")}: force {force:0.##}, angle {angle:0.##}°");
         }
 
+        // Found directly rather than through the catalog, which lists the cannon only
+        // under its level instance name and may not have scanned a pad yet.
+        private bool TryFindAutoAimSource(string objectName, out GameObject source, out string sourcePath)
+        {
+            source = null;
+            sourcePath = null;
+            if (objectName.StartsWith("NetworkedInteractable_", StringComparison.OrdinalIgnoreCase))
+            {
+                var prefab = PlacedManager.FindNetworkPrefab(objectName);
+                if (prefab == null) return false;
+                source = prefab.gameObject;
+                sourcePath = ObjectCatalog.ASSET_PREFIX + prefab.gameObject.name;
+                return true;
+            }
+            foreach (var pad in Resources.FindObjectsOfTypeAll<EHS.SceneBoostPad>())
+            {
+                if (pad == null || !pad.gameObject.scene.IsValid()) continue;
+                var root = SelectionSystem.PromoteToMechanicRoot(pad.transform);
+                if (root.root.name == "FIH_MapObjectsRoot" || root.root.name == "FIH_SpawnRoot") continue;
+                if (!string.Equals(ObjectCatalog.CleanName(root.name), objectName, StringComparison.OrdinalIgnoreCase)) continue;
+                source = root.gameObject;
+                sourcePath = ObjectCatalog.BuildPath(root);
+                return true;
+            }
+            return false;
+        }
+
+        // Same formula as SceneBoostPad.FindShootDirection: forward pitched up by
+        // targetAngle around the pad's right axis.
+        private static Vector3 ScenePadShootDirection(EHS.SceneBoostPad pad)
+        {
+            var t = pad.transform;
+            return Quaternion.AngleAxis(-pad.targetAngle, t.right) * t.forward;
+        }
+
         private static bool TryGetActualLaunchState(PlacedObject placed,
             out Vector3 start, out Vector3 direction)
         {
             start = placed.Root.transform.position;
             direction = Vector3.zero;
+
+            if (placed.ScenePad != null)
+            {
+                direction = ScenePadShootDirection(placed.ScenePad);
+                var padBounds = MechanicsController.ComputeColliderBounds(placed.ScenePad.gameObject);
+                if (padBounds.size.sqrMagnitude > 0.001f) start = padBounds.center;
+                direction.Normalize();
+                return direction.sqrMagnitude > 0.001f;
+            }
 
             if (placed.NetworkBoostForce.HasValue)
             {
@@ -3984,26 +4041,31 @@ namespace FIHMapEditor
             ShowToast($"Deleted: {name}");
         }
 
-        public void ApplySelectedNetworkMechanicSettings(PlacedObject placed,
-            float force, float angle, float airControlBlock)
+        // edit receives a copy of the object's data and changes only its Network* fields.
+        public void ApplySelectedNetworkMechanicSettings(PlacedObject placed, Action<MapObjectData> edit)
         {
             if (ReadOnlyBlock() || placed?.Root == null) return;
-            bool isPad = placed.NetworkBoostForce.HasValue;
-            bool isCannon = placed.NetworkCannonForce.HasValue;
-            if (!isPad && !isCannon) return;
+            if (placed.NetworkKind == NetworkMechanicKind.None && placed.ScenePad == null) return;
 
             var oldData = placed.ToData();
             var newData = placed.ToData();
-            if (isPad)
+            edit(newData);
+            NetworkMechanics.Clamp(newData);
+            if (!placed.NetworkSettingsDiffer(newData)) return;
+
+            // The game's scene pad reads its values on every touch: edit it in place.
+            if (placed.ScenePad != null)
             {
-                newData.NetworkBoostForce = Mathf.Clamp(force, 0f, 200f);
-                newData.NetworkBoostAngle = Mathf.Clamp(angle, -89f, 89f);
-            }
-            else
-            {
-                newData.NetworkCannonForce = Mathf.Clamp(force, 0f, 200f);
-                newData.NetworkCannonAngle = Mathf.Clamp(angle, -89f, 89f);
-                newData.NetworkCannonAirControlBlock = Mathf.Clamp(airControlBlock, 0f, 10f);
+                Undo.Push("pad settings", () =>
+                {
+                    placed.CopyNetworkSettingsFrom(oldData);
+                    PlacedObjectManager.ApplyScenePadSettings(placed);
+                    SetDirty();
+                });
+                placed.CopyNetworkSettingsFrom(newData);
+                PlacedObjectManager.ApplyScenePadSettings(placed);
+                SetDirty();
+                return;
             }
 
             string uid = placed.Uid;
@@ -4011,7 +4073,7 @@ namespace FIHMapEditor
             if (ReplacePlacedFromData(uid, newData, true))
             {
                 SetDirty();
-                ShowToast($"{(isPad ? "Boost pad" : "Cannon")} settings applied");
+                ShowToast($"{NetworkMechanics.Label(placed.NetworkKind)} settings applied");
             }
         }
 

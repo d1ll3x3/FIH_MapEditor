@@ -115,6 +115,9 @@ namespace FIHMapEditor
         // "mapid", and vt: ops are dropped unless they come from that owner.
         private const int K_OWNER = 22;
         private const int K_VT_UPSERT = 23, K_VT_DELETE = 24;
+        // FishNet ObjectId of a host-spawned network object, so clients can adopt the
+        // replica under their placed object. Host-derived; clients only mirror it.
+        private const int K_NETID = 25, K_NETID_CLEAR = 26;
 
         private static readonly JsonSerializerOptions JsonOpts = new JsonSerializerOptions
         {
@@ -407,6 +410,9 @@ namespace FIHMapEditor
             foreach (var vt in map.VoiceTriggers)
                 if (!string.IsNullOrEmpty(vt.Uid))
                     snap["vt:" + vt.Uid] = JsonSerializer.Serialize(vt, JsonOpts);
+            // Clients mirror what they received, so their diff never turns these into deletes.
+            foreach (var kv in _c.NetworkObjectIds())
+                snap["net:" + kv.Key] = JsonSerializer.Serialize(kv.Value);
             return snap;
         }
 
@@ -427,6 +433,7 @@ namespace FIHMapEditor
             if (key == "scoreboard") return K_SCOREBOARD;
             if (key == "owner") return K_OWNER;
             if (key.StartsWith("vt:")) return K_VT_UPSERT;
+            if (key.StartsWith("net:")) return K_NETID;
             return -1;
         }
 
@@ -442,6 +449,7 @@ namespace FIHMapEditor
             if (key.StartsWith("soccergoal:")) return K_SOCCERGOAL_DELETE;
             if (key == "scoreboard") return K_SCOREBOARD_CLEAR;
             if (key.StartsWith("vt:")) return K_VT_DELETE;
+            if (key.StartsWith("net:")) return K_NETID_CLEAR;
             return -1; // basemode/mapname/mapid/editable/owner are never absent
         }
 
@@ -742,7 +750,9 @@ namespace FIHMapEditor
                                 }
                                 else if (!TryAcceptOp(op)) continue;
                                 accepted++;
-                                if (deferVisuals) _queuedOps.Add(op);
+                                // Network ids are bookkeeping, not visuals: the replica
+                                // exists in Play too and must be adoptable right away.
+                                if (deferVisuals && !op.Key.StartsWith("net:")) _queuedOps.Add(op);
                                 else ApplyVisual(op);
                             }
                         }
@@ -837,6 +847,8 @@ namespace FIHMapEditor
                     case K_OWNER: _c.ApplyRemoteOwner(Deserialize<long>(op.Payload)); break;
                     case K_VT_UPSERT: _c.ApplyRemoteVoiceTriggerUpsert(Deserialize<VoiceTriggerData>(op.Payload)); break;
                     case K_VT_DELETE: _c.ApplyRemoteVoiceTriggerDelete(op.Key.Substring(3)); break;
+                    case K_NETID: _c.ApplyRemoteNetworkObjectId(op.Key.Substring(4), Deserialize<int>(op.Payload)); break;
+                    case K_NETID_CLEAR: _c.ApplyRemoteNetworkObjectId(op.Key.Substring(4), null); break;
                 }
             }
             catch (Exception ex)

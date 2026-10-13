@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace FIHMapEditor
 {
@@ -19,11 +20,15 @@ namespace FIHMapEditor
         void ShowToast(string message, float seconds = 3f);
         bool HasMapContent();
         MapFile BuildMapFile();
+        // Host-assigned FishNet ObjectId of each placed network object, by object Uid.
+        // Not part of the map file: ids are only valid within the current session.
+        Dictionary<string, int> NetworkObjectIds();
 
         // Transport callbacks may run off-thread; implementations marshal mutations through
         // RunOnMainThread before touching Unity objects or the working session.
         void ApplyRemoteObjectUpsert(MapObjectData data);
         void ApplyRemoteObjectDelete(string uid);
+        void ApplyRemoteNetworkObjectId(string uid, int? objectId);
         void ApplyRemoteCheckpointUpsert(CheckpointData data);
         void ApplyRemoteCheckpointDelete(string uid);
         void ApplyRemoteResetZoneUpsert(ResetZoneData data);

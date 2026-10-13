@@ -214,7 +214,7 @@ namespace FIHMapEditor
                 }
 
                 // Resolve to the same logical root the catalog scan would pick.
-                var root = ClimbToLogicalRoot(bestTransform);
+                var root = pickInvisible ? ClimbToLogicalRoot(bestTransform) : ClimbToVisibleRoot(bestTransform);
                 if (unlockOriginals)
                 {
                     RememberPick(screenPos, root, additive);
@@ -270,6 +270,12 @@ namespace FIHMapEditor
             // Physics pass: nearest collider hit that isn't the player or a helper.
             var hits = Physics.RaycastAll(ray, 1000f);
             int rawHitCount = hits?.Length ?? 0;
+            // A gameplay object can be all trigger where it is clicked (a fan's wind,
+            // a swing bar's grab zone). Its trigger only counts when no solid surface
+            // is on the ray, so large volumes never steal clicks from what is inside.
+            Transform triggerFallback = null;
+            Vector3 triggerFallbackPoint = Vector3.zero;
+            float triggerFallbackDist = float.MaxValue;
             if (hits != null)
             {
                 foreach (var hit in hits)
@@ -282,7 +288,18 @@ namespace FIHMapEditor
                     if (exclude != null && (t == exclude || t.IsChildOf(exclude))) continue;
                     if (!pickInvisible)
                     {
-                        if (col.isTrigger) { Note(discarded, t, "trigger (Pick invisible OFF)"); continue; }
+                        if (col.isTrigger)
+                        {
+                            if (hit.distance < triggerFallbackDist && IsPartOfMechanic(t)
+                                && IsVisible(t, visCache))
+                            {
+                                triggerFallback = t;
+                                triggerFallbackPoint = hit.point;
+                                triggerFallbackDist = hit.distance;
+                            }
+                            else Note(discarded, t, "trigger (Pick invisible OFF)");
+                            continue;
+                        }
                         if (!IsVisible(t, visCache)) { Note(discarded, t, "no visible renderer (Pick invisible OFF)"); continue; }
                     }
                     if (hit.distance < bestDist)
@@ -292,6 +309,13 @@ namespace FIHMapEditor
                         bestPoint = hit.point;
                     }
                 }
+            }
+
+            if (bestTransform == null && triggerFallback != null)
+            {
+                bestTransform = triggerFallback;
+                bestPoint = triggerFallbackPoint;
+                bestDist = triggerFallbackDist;
             }
 
             // Our own collider-less clones compete with physics hits by distance —
@@ -391,11 +415,11 @@ namespace FIHMapEditor
             {
                 if (_placedManager.FromTransform(t) != null) return true;
 
-                var root = ClimbToLogicalRoot(t);
+                var root = ClimbToVisibleRoot(t);
                 int id = root.GetInstanceID();
                 if (cache.TryGetValue(id, out bool cached)) return cached;
 
-                bool visible = ObjectCatalog.ComputeBounds(root.gameObject).size != Vector3.zero;
+                bool visible = ObjectCatalog.ComputeVisualBounds(root.gameObject).size != Vector3.zero;
                 cache[id] = visible;
                 return visible;
             }
@@ -570,8 +594,62 @@ namespace FIHMapEditor
                 if (CanClimbInto(p, cache)) { root = p; continue; }
                 break;
             }
+            return PromoteToMechanicRoot(root);
+        }
+
+        // The game builds every gameplay object (swing bars, fans, movers, pads...) as a
+        // SceneObject_* root whose behaviour, triggers and routes hang off that root,
+        // with the visuals as separate children. The geometric climb stops at a visual
+        // piece, and a copy of just that mesh does nothing — so a pick or catalog root
+        // inside such an object is promoted to the object itself. Shared with the catalog.
+        public static Transform PromoteToMechanicRoot(Transform t)
+            => FindMechanicRoot(t) ?? t;
+
+        private static Transform FindMechanicRoot(Transform t)
+        {
+            var current = t;
+            for (int depth = 0; current != null && depth < MECHANIC_ROOT_MAX_DEPTH; depth++, current = current.parent)
+            {
+                string name = current.name;
+                bool mechanicRoot = name.StartsWith("SceneObject_", StringComparison.OrdinalIgnoreCase)
+                    || name.StartsWith("NetworkedInteractable_", StringComparison.OrdinalIgnoreCase)
+                    || current.GetComponent<FishNet.Object.NetworkObject>() != null;
+                if (!mechanicRoot) continue;
+                var bounds = ObjectCatalog.ComputeBounds(current.gameObject);
+                // Same chunk-size guard as the climb: never select a level container.
+                if (bounds.size.x > 60f || bounds.size.y > 60f || bounds.size.z > 60f) return null;
+                return current;
+            }
+            return null;
+        }
+
+        // Part of one of our placed copies or of a level gameplay object.
+        private bool IsPartOfMechanic(Transform t)
+            => _placedManager.FromTransform(t) != null || FindMechanicRoot(t) != null;
+
+        // Clicks land on collision proxies ('Collider', 'SM_Bounds', 'Box') that sit
+        // beside or under the mesh they belong to; their own climb finds no renderer.
+        // Use the nearest object-sized ancestor that is visible instead.
+        public static Transform ClimbToVisibleRoot(Transform t)
+        {
+            var root = ClimbToLogicalRoot(t);
+            if (ObjectCatalog.ComputeVisualBounds(root.gameObject).size != Vector3.zero) return root;
+            var current = root.parent;
+            for (int depth = 0; current != null && depth < 3; depth++, current = current.parent)
+            {
+                // A section of the level (dozens of colliders) is never "the object".
+                if (current.GetComponentsInChildren<Collider>(true).Length > MAX_OBJECT_COLLIDERS) break;
+                var bounds = ObjectCatalog.ComputeVisualBounds(current.gameObject);
+                if (bounds.size == Vector3.zero) continue;
+                if (bounds.size.x > 60f || bounds.size.y > 60f || bounds.size.z > 60f) break;
+                return PromoteToMechanicRoot(current);
+            }
             return root;
         }
+
+        private const int MAX_OBJECT_COLLIDERS = 12;
+
+        private const int MECHANIC_ROOT_MAX_DEPTH = 6;
 
         // Whether `p` is still part of the SAME logical object as its children — i.e.
         // the root climb should continue through it. Shared by selection picking and

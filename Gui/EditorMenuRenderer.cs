@@ -34,8 +34,8 @@ namespace FIHMapEditor
         private const int CATALOG_GRID_ROWS = 2;
         private const int CATALOG_PAGE_SIZE = CATALOG_COLUMNS * CATALOG_GRID_ROWS;
         private const float CATALOG_CARD_HEIGHT = 174f;
-        private string _netBoostForce, _netBoostAngle, _netCannonForce, _netCannonAngle, _netAirBlock;
-        private string _autoArcApex = "5";
+        private float _autoArcApex = 5f;
+        private int _padTool;   // index into PadTools
 
         // List state
         private string _listFilter = "";
@@ -70,7 +70,8 @@ namespace FIHMapEditor
         // Mechanics row state: numeric box re-seeded when the selection changes.
         private string _mechTimerField;
         private int _mechFieldsForId = -1;
-        private string _selectedNetForce, _selectedNetAngle, _selectedNetAirBlock;
+        // Slider values for the selected mechanic (meaning depends on its kind).
+        private float _selA, _selB, _selC;
 
         // KEYS tab fly tuning fields (lazy-seeded from config).
         private string _flySpeedField, _flyBoostField, _lookSensitivityField;
@@ -274,7 +275,7 @@ namespace FIHMapEditor
             }
             else
             {
-                GUI.Label(new Rect(444, y + 3, W - 459, 20), "Stamp: click places copies", _styleSmall);
+                GUI.Label(new Rect(444, y + 3, W - 459, 20), "Stamp: next click places one copy", _styleSmall);
             }
             y += 28;
             DrawNetworkPlacementTuning(ref y);
@@ -377,61 +378,86 @@ namespace FIHMapEditor
         // Filtering the whole catalog is O(entries × favorites) — too much to redo on
         // every OnGUI event (IMGUI runs Layout + Repaint + input passes per frame), so
         // the result is cached and only rebuilt when an input to the filter changes.
+        // Pads & cannons panel: pick the kind, shape its launch with sliders (values used
+        // by every new placement of that kind), or let the editor build one that lands
+        // exactly where you want: stand at the launch spot, then at the landing spot.
+        private static readonly (string label, string prefab)[] PadTools =
+        {
+            // Pads are the release game's own scene pads (sound, visual sync between
+            // players); cannons only exist as network objects.
+            ("Boost Pad", "SceneObject_BoostPad"),
+            ("Jelly Pad", "SceneObject_BoostPadCandyLand"),
+            ("Cannon", "NetworkedInteractable_Cannon"),
+        };
+
         private void DrawNetworkPlacementTuning(ref float y)
         {
             var p = _c.PlacedManager;
-            _netBoostForce ??= p.NetworkBoostForce.ToString("0.##");
-            _netBoostAngle ??= p.NetworkBoostAngle.ToString("0.##");
-            _netCannonForce ??= p.NetworkCannonForce.ToString("0.##");
-            _netCannonAngle ??= p.NetworkCannonAngle.ToString("0.##");
-            _netAirBlock ??= p.NetworkCannonAirControlBlock.ToString("0.##");
+            bool cannon = _padTool == 2;
+            // Four rows (27 + 30 + 27 + 29): the box ends right above the category tabs.
+            GUI.Box(new Rect(10, y - 2, W - 20, 110), "");
 
-            GUI.Box(new Rect(10, y - 2, W - 20, 130), "");
-
-            GUI.Label(new Rect(18, y + 3, 190, 20), "Network Pad & Cannon Settings", _styleTitle);
-            if (_win.ToggleButton(new Rect(430, y, 130, 22),
-                    p.OverrideNetworkMechanicSettings ? "Custom values: ON" : "Custom values: OFF",
+            GUI.Label(new Rect(18, y + 2, 150, 20), "Pads & Cannons", _styleTitle);
+            for (int i = 0; i < PadTools.Length; i++)
+                if (_win.ToggleButton(new Rect(160 + i * 96, y, 92, 22), PadTools[i].label, _padTool == i))
+                    _padTool = i;
+            if (_win.ToggleButton(new Rect(458, y, 197, 22),
+                    p.OverrideNetworkMechanicSettings ? "New: my values" : "New: game values",
                     p.OverrideNetworkMechanicSettings))
                 p.OverrideNetworkMechanicSettings = !p.OverrideNetworkMechanicSettings;
-            GUI.Label(new Rect(565, y + 3, 95, 20), "new placements", _styleSmall);
-            y += 25;
+            y += 27;
 
-            GUI.Label(new Rect(18, y + 3, 76, 20), "Boost Pad:", _styleSmall);
-            DrawNetField("Force", "padforce", ref _netBoostForce, 96, y, 58);
-            DrawNetField("Angle °", "padangle", ref _netBoostAngle, 215, y, 58);
-            GUI.Label(new Rect(338, y + 3, 70, 20), "Cannon:", _styleSmall);
-            DrawNetField("Force", "cannonforce", ref _netCannonForce, 405, y, 58);
-            DrawNetField("Angle °", "cannonangle", ref _netCannonAngle, 524, y, 58);
-            y += 25;
-
-            GUI.Label(new Rect(18, y + 3, 390, 20),
-                "Cannon air-control lock after launch (seconds):", _styleSmall);
-            _netAirBlock = _win.TextField(new Rect(405, y, 58, 22), "netairblock", _netAirBlock);
-            if (_win.Button(new Rect(480, y, 175, 22), "Apply to New Placements"))
+            // Moving any slider means "use my values" for the next placements.
+            float force = cannon ? p.NetworkCannonForce : p.NetworkBoostForce;
+            float angle = cannon ? p.NetworkCannonAngle : p.NetworkBoostAngle;
+            GUI.Label(new Rect(18, y + 3, 45, 20), "Force", _styleSmall);
+            float newForce = _win.HSlider(new Rect(64, y, 170, 22), "padtoolforce", force, 0f, 200f, 0.5f, "0.#");
+            GUI.Label(new Rect(244, y + 3, 50, 20), "Angle°", _styleSmall);
+            float newAngle = _win.HSlider(new Rect(296, y, 150, 22), "padtoolangle", angle, -89f, 89f, 1f, "0");
+            float airBlock = p.NetworkCannonAirControlBlock;
+            float newAirBlock = airBlock;
+            if (cannon)
             {
-                p.NetworkBoostForce = Mathf.Clamp(ParseFloat(_netBoostForce, p.NetworkBoostForce), 0f, 200f);
-                p.NetworkBoostAngle = Mathf.Clamp(ParseFloat(_netBoostAngle, p.NetworkBoostAngle), -89f, 89f);
-                p.NetworkCannonForce = Mathf.Clamp(ParseFloat(_netCannonForce, p.NetworkCannonForce), 0f, 200f);
-                p.NetworkCannonAngle = Mathf.Clamp(ParseFloat(_netCannonAngle, p.NetworkCannonAngle), -89f, 89f);
-                p.NetworkCannonAirControlBlock = Mathf.Clamp(ParseFloat(_netAirBlock, p.NetworkCannonAirControlBlock), 0f, 10f);
-                p.OverrideNetworkMechanicSettings = true;
-                _c.ShowToast("Pad and cannon settings will be used for new placements");
+                GUI.Label(new Rect(456, y + 3, 70, 20), "Air lock s", _styleSmall);
+                newAirBlock = _win.HSlider(new Rect(528, y, 127, 22), "padtoolair", airBlock, 0f, 10f, 0.05f, "0.##");
             }
-            y += 28;
+            else
+            {
+                GUI.Label(new Rect(456, y + 3, 200, 20), "higher angle = steeper launch", _styleSmall);
+            }
+            if (newForce != force || newAngle != angle || newAirBlock != airBlock)
+            {
+                if (cannon)
+                {
+                    p.NetworkCannonForce = newForce;
+                    p.NetworkCannonAngle = newAngle;
+                    p.NetworkCannonAirControlBlock = newAirBlock;
+                }
+                else
+                {
+                    p.NetworkBoostForce = newForce;
+                    p.NetworkBoostAngle = newAngle;
+                }
+                p.OverrideNetworkMechanicSettings = true;
+            }
+            y += 30;
 
-            GUI.Label(new Rect(18, y + 3, 190, 20), "Automatic Start → Landing:", _styleSmall);
-            if (_win.Button(new Rect(205, y, 105, 22), "Set Start Here"))
+            GUI.Label(new Rect(18, y + 3, 110, 20), "Auto-aim:", _styleSmall);
+            if (_win.ToggleButton(new Rect(90, y, 125, 22), "1. Launch = me", _c.AutoLaunchStart.HasValue))
                 _c.SetAutoLaunchPoint(start: true);
-            if (_win.Button(new Rect(315, y, 105, 22), "Set End Here"))
+            if (_win.ToggleButton(new Rect(220, y, 125, 22), "2. Landing = me", _c.AutoLaunchEnd.HasValue))
                 _c.SetAutoLaunchPoint(start: false);
-            GUI.Label(new Rect(430, y + 3, 72, 20), "Apex +m", _styleSmall);
-            _autoArcApex = _win.TextField(new Rect(502, y, 52, 22), "autoarcapex", _autoArcApex);
-            if (_win.Button(new Rect(560, y, 95, 22), "Create"))
-                _c.CreateAutoAimedNetworkMechanic(ParseFloat(_autoArcApex, 5f));
-            y += 25;
+            GUI.Label(new Rect(352, y + 3, 45, 20), "Apex", _styleSmall);
+            _autoArcApex = _win.HSlider(new Rect(392, y, 110, 22), "padtoolapex", _autoArcApex, 0f, 40f, 0.5f, "+0.# m");
+            bool ready = _c.AutoLaunchStart.HasValue && _c.AutoLaunchEnd.HasValue;
+            if (_win.ToggleButton(new Rect(510, y, 145, 22), $"3. Create {PadTools[_padTool].label}", ready))
+                _c.CreateAutoAimedNetworkMechanic(PadTools[_padTool].prefab, _autoArcApex);
+            y += 27;
 
-            string pointStatus = $"Start: {FormatPoint(_c.AutoLaunchStart)}   End: {FormatPoint(_c.AutoLaunchEnd)}";
-            GUI.Label(new Rect(18, y + 3, 520, 20), pointStatus, _styleSmall);
+            string status = !_c.AutoLaunchStart.HasValue ? "Stand where the launch should be and press 1."
+                : !_c.AutoLaunchEnd.HasValue ? "Now stand on the landing spot and press 2."
+                : $"Ready: {Vector3.Distance(_c.AutoLaunchStart.Value, _c.AutoLaunchEnd.Value):0.#} m apart — press 3.";
+            GUI.Label(new Rect(18, y + 3, 520, 20), status, _styleSmall);
             if (_win.Button(new Rect(560, y, 95, 22), "Clear Points"))
                 _c.ClearAutoLaunchPoints();
             y += 29;
@@ -441,14 +467,6 @@ namespace FIHMapEditor
             => point.HasValue
                 ? $"{point.Value.x:0.#},{point.Value.y:0.#},{point.Value.z:0.#}"
                 : "not set";
-
-        private void DrawNetField(string label, string id, ref string value,
-                                  float x, float y, float fieldWidth)
-        {
-            float labelWidth = label.Length * 7f + 6f;
-            GUI.Label(new Rect(x, y + 3, labelWidth, 20), label, _styleSmall);
-            value = _win.TextField(new Rect(x + labelWidth, y, fieldWidth, 22), "net" + id, value);
-        }
 
         private List<CatalogEntry> _filteredCache;
         private string _filteredCacheKey;
@@ -1059,44 +1077,108 @@ namespace FIHMapEditor
             return true;
         }
 
-        // Boost pad / cannon tuning row, shown only when the selection has a mechanic.
+        // Mechanic tuning row (network interactables and the legacy simulated pad/cannon),
+        // shown only when the selection has one.
         private void DrawMechanicsRow(Selection sel, ref float y)
         {
             if (_c.SelectionSys.IsMulti) return;
             if (!sel.IsPlaced) return;
             var placed = sel.Placed;
-            bool networkPad = placed.NetworkBoostForce.HasValue;
-            bool networkCannon = placed.NetworkCannonForce.HasValue;
-            if (placed.Mechanic == MechanicType.None && !networkPad && !networkCannon) return;
+            var kind = placed.NetworkKind;
+            bool scenePad = placed.ScenePad != null;
+            if (placed.Mechanic == MechanicType.None && kind == NetworkMechanicKind.None && !scenePad) return;
 
             if (_mechFieldsForId != placed.Id)
             {
                 _mechFieldsForId = placed.Id;
                 _mechTimerField = placed.CannonTimer.ToString("0.##");
-                _selectedNetForce = (placed.NetworkBoostForce ?? placed.NetworkCannonForce ?? 20f).ToString("0.##");
-                _selectedNetAngle = (placed.NetworkBoostAngle ?? placed.NetworkCannonAngle ?? 45f).ToString("0.##");
-                _selectedNetAirBlock = (placed.NetworkCannonAirControlBlock ?? 0.5f).ToString("0.##");
+                _selA = placed.NetworkBoostForce ?? placed.NetworkCannonForce ?? placed.NetworkBreakDelay
+                    ?? placed.NetworkShatteredDuration ?? 0f;
+                _selB = placed.NetworkBoostAngle ?? placed.NetworkCannonAngle ?? placed.NetworkBreakDuration
+                    ?? placed.NetworkShatterImpulse ?? 0f;
+                _selC = placed.NetworkCannonAirControlBlock ?? 0.5f;
             }
 
-            if (networkPad || networkCannon)
+            if (kind != NetworkMechanicKind.None || scenePad)
             {
-                GUI.Label(new Rect(15, y + 3, 145, 20),
-                    networkPad ? "Network Boost Pad:" : "Network Cannon:", _styleSmall);
-                GUI.Label(new Rect(165, y + 3, 42, 20), "Force", _styleSmall);
-                _selectedNetForce = _win.TextField(new Rect(207, y, 58, 22), "selectednetforce", _selectedNetForce);
-                GUI.Label(new Rect(275, y + 3, 48, 20), "Angle°", _styleSmall);
-                _selectedNetAngle = _win.TextField(new Rect(326, y, 58, 22), "selectednetangle", _selectedNetAngle);
-                if (networkCannon)
+                string title = scenePad ? "Pad (local):" : $"{NetworkMechanics.Label(kind)}:";
+                GUI.Label(new Rect(15, y + 3, 145, 20), title, _styleSmall);
+                // A client's placement exists only once the host spawned it.
+                if (placed.IsReplicaAnchor && placed.Replica == null)
                 {
-                    GUI.Label(new Rect(394, y + 3, 58, 20), "Air lock", _styleSmall);
-                    _selectedNetAirBlock = _win.TextField(new Rect(454, y, 58, 22),
-                        "selectednetair", _selectedNetAirBlock);
+                    GUI.Label(new Rect(165, y + 3, 300, 20), "waiting for the host to spawn it…", _styleSmall);
+                    y += 28;
+                    return;
                 }
-                if (_win.Button(new Rect(525, y, 130, 22), "Apply & Respawn"))
-                    _c.ApplySelectedNetworkMechanicSettings(placed,
-                        ParseFloat(_selectedNetForce, 20f),
-                        ParseFloat(_selectedNetAngle, 45f),
-                        ParseFloat(_selectedNetAirBlock, 0.5f));
+
+                Action<MapObjectData> edit = null;
+                bool changed = false;
+                if (scenePad || kind == NetworkMechanicKind.BoostPad || kind == NetworkMechanicKind.Cannon)
+                {
+                    bool cannon = kind == NetworkMechanicKind.Cannon;
+                    _selA = SelectedSlider("Force", "selforce", 165, y, 150, _selA, 0f, 200f, 0.5f, "0.#");
+                    _selB = SelectedSlider("Angle°", "selangle", 375, y, 110, _selB, -89f, 89f, 1f, "0");
+                    if (cannon) _selC = SelectedSlider("Air", "selair", 545, y, 80, _selC, 0f, 10f, 0.05f, "0.##");
+                    float force = _selA, angle = _selB, air = _selC;
+                    if (cannon)
+                    {
+                        changed = force != placed.NetworkCannonForce || angle != placed.NetworkCannonAngle
+                            || air != placed.NetworkCannonAirControlBlock;
+                        edit = d =>
+                        {
+                            d.NetworkCannonForce = force;
+                            d.NetworkCannonAngle = angle;
+                            d.NetworkCannonAirControlBlock = air;
+                        };
+                    }
+                    else
+                    {
+                        changed = force != placed.NetworkBoostForce || angle != placed.NetworkBoostAngle;
+                        edit = d => { d.NetworkBoostForce = force; d.NetworkBoostAngle = angle; };
+                    }
+                }
+                else if (kind == NetworkMechanicKind.BreakingPlatform)
+                {
+                    _selA = SelectedSlider("Delay s", "selbreakdelay", 165, y, 130, _selA, 0f, 10f, 0.05f, "0.##");
+                    _selB = SelectedSlider("Broken s", "selbreakdur", 375, y, 130, _selB, 0.1f, 30f, 0.1f, "0.#");
+                    float delay = _selA, broken = _selB;
+                    changed = delay != placed.NetworkBreakDelay || broken != placed.NetworkBreakDuration;
+                    edit = d => { d.NetworkBreakDelay = delay; d.NetworkBreakDuration = broken; };
+                }
+                else if (kind == NetworkMechanicKind.GlassShatter || kind == NetworkMechanicKind.HighForceGlass)
+                {
+                    _selA = SelectedSlider("Reset s", "selshatter", 165, y, 130, _selA, 0.1f, 30f, 0.1f, "0.#");
+                    float reset = _selA;
+                    if (kind == NetworkMechanicKind.HighForceGlass)
+                    {
+                        _selB = SelectedSlider("Impulse", "selimpulse", 375, y, 130, _selB, 0f, 100f, 0.5f, "0.#");
+                        float impulse = _selB;
+                        changed = reset != placed.NetworkShatteredDuration || impulse != placed.NetworkShatterImpulse;
+                        edit = d => { d.NetworkShatteredDuration = reset; d.NetworkShatterImpulse = impulse; };
+                    }
+                    else
+                    {
+                        changed = reset != placed.NetworkShatteredDuration;
+                        edit = d => d.NetworkShatteredDuration = reset;
+                    }
+                }
+                else
+                {
+                    GUI.Label(new Rect(165, y + 3, 220, 20), "no adjustable settings", _styleSmall);
+                }
+
+                // Applied when the slider is released: a network object respawns per change.
+                bool dragging = _win.IsSliderHeld("selforce") || _win.IsSliderHeld("selangle")
+                    || _win.IsSliderHeld("selair") || _win.IsSliderHeld("selbreakdelay")
+                    || _win.IsSliderHeld("selbreakdur") || _win.IsSliderHeld("selshatter")
+                    || _win.IsSliderHeld("selimpulse");
+                if (edit != null && changed && !dragging)
+                {
+                    _c.ApplySelectedNetworkMechanicSettings(placed, edit);
+                    // Reload from the (possibly respawned) object: a failed apply snaps
+                    // the sliders back instead of retrying every frame.
+                    _mechFieldsForId = -1;
+                }
                 y += 28;
             }
             else if (placed.Mechanic == MechanicType.BoostPad)
@@ -1130,6 +1212,13 @@ namespace FIHMapEditor
                 }
             }
             y += 28;
+        }
+
+        private float SelectedSlider(string label, string id, float x, float y, float width,
+            float value, float min, float max, float step, string format)
+        {
+            GUI.Label(new Rect(x, y + 3, 58, 20), label, _styleSmall);
+            return _win.HSlider(new Rect(x + 58, y, width, 22), id, value, min, max, step, format);
         }
 
         private void CommitCannonTimer(PlacedObject placed, float value)

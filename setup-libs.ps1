@@ -79,7 +79,9 @@ $dllsToCopy = @(
     "UnityEngine.InputLegacyModule.dll",
     "UnityEngine.PhysicsModule.dll",
     "UnityEngine.TextRenderingModule.dll",
-    "UnityEngine.UIModule.dll"
+    "UnityEngine.UIModule.dll",
+    "Unity.Splines.dll",
+    "Unity.Mathematics.dll"
 )
 
 $interopPath = "$gamePath\BepInEx\interop"
