@@ -42,6 +42,9 @@ namespace FIHMapEditor
 
         public bool EnforceWarned;   // log the "something is fighting us" line only once
 
+        // Mesh-combined level this object belongs to, drawn piece by piece while edited.
+        public Transform CombineScope;
+
         public LevelEditData ToData()
         {
             var data = new LevelEditData { Path = Path, Name = Name, Hidden = Hidden };
@@ -93,7 +96,144 @@ namespace FIHMapEditor
             // silently undoing any client-side edit. Disable those controllers (never
             // destroy — everything is restored on revert).
             Neutralize(record);
+            SplitCombined(record);
             return record;
+        }
+
+        // A level split back into pieces: what was switched to make that happen.
+        private class CombinedSplit
+        {
+            public List<Renderer> Outputs = new List<Renderer>();
+            public List<Renderer> Pieces = new List<Renderer>();
+            public List<LODGroup> LodGroups = new List<LODGroup>();
+            public int Users;
+        }
+
+        private readonly Dictionary<int, CombinedSplit> _splits = new Dictionary<int, CombinedSplit>();
+
+        // Levels built with the game's MeshCombiner (the Fridge, The Grid... and most of
+        // the full game) draw every static piece from baked "<name>_LOD<n>_Combined"
+        // meshes and keep each piece's own renderer off. Moving or hiding a piece then
+        // changes nothing on screen: the baked mesh keeps drawing it where it was. While
+        // any piece is edited, draw that level from its pieces instead (what the game's
+        // RevertCombine does in the Unity editor); recombined when the last edit goes.
+        private void SplitCombined(LevelEditRecord record)
+        {
+            try
+            {
+                var scope = FindCombineScope(record.Target.transform);
+                if (scope == null) return;
+                record.CombineScope = scope;
+
+                int id = scope.GetInstanceID();
+                if (_splits.TryGetValue(id, out var split))
+                {
+                    split.Users++;
+                    return;
+                }
+
+                split = new CombinedSplit { Users = 1 };
+                foreach (var r in scope.GetComponentsInChildren<MeshRenderer>(true))
+                {
+                    if (r == null) continue;
+                    if (IsCombinedOutput(r.transform))
+                    {
+                        if (r.enabled) { r.enabled = false; split.Outputs.Add(r); }
+                        continue;
+                    }
+                    if (r.enabled || !r.gameObject.activeInHierarchy) continue;
+                    if (IsIgnoredByCombiner(r.transform, scope)) continue;
+                    var mf = r.GetComponent<MeshFilter>();
+                    if (mf == null || mf.sharedMesh == null) continue;
+                    split.Pieces.Add(r);
+                }
+
+                // Without the baked meshes found, switching every piece on would draw
+                // the level twice; show just the edited object instead.
+                // Keyed by the object itself, so other pieces of that level get their own.
+                if (split.Outputs.Count == 0)
+                {
+                    scope = record.Target.transform;
+                    record.CombineScope = scope;
+                    id = scope.GetInstanceID();
+                    split.Pieces.Clear();
+                    foreach (var r in record.Target.GetComponentsInChildren<MeshRenderer>(false))
+                        if (r != null && !r.enabled) split.Pieces.Add(r);
+                    MapEditorPlugin.Logger.LogWarning(
+                        $"[LEVELEDIT] No combined mesh found for '{record.Name}' — showing it on its own.");
+                }
+
+                foreach (var r in split.Pieces) r.enabled = true;
+                // A piece's own LODGroup picks which of its LOD renderers draws.
+                foreach (var lod in scope.GetComponentsInChildren<LODGroup>(false))
+                {
+                    if (lod == null || lod.enabled || IsCombinedOutput(lod.transform)
+                        || IsIgnoredByCombiner(lod.transform, scope)) continue;
+                    lod.enabled = true;
+                    split.LodGroups.Add(lod);
+                }
+
+                _splits[id] = split;
+                MapEditorPlugin.Logger.LogInfo(
+                    $"[LEVELEDIT] '{scope.name}' split for editing: {split.Outputs.Count} combined mesh(es) off, " +
+                    $"{split.Pieces.Count} piece renderer(s) on.");
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[LEVELEDIT] Split error on '{record.Name}': {ex.Message}");
+            }
+        }
+
+        private void ReleaseCombined(LevelEditRecord record)
+        {
+            var scope = record.CombineScope;
+            record.CombineScope = null;
+            if (scope == null) return;
+            int id = scope.GetInstanceID();
+            if (!_splits.TryGetValue(id, out var split) || --split.Users > 0) return;
+            _splits.Remove(id);
+            try
+            {
+                foreach (var lod in split.LodGroups) if (lod != null) lod.enabled = false;
+                foreach (var r in split.Pieces) if (r != null) r.enabled = false;
+                foreach (var r in split.Outputs) if (r != null) r.enabled = true;
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[LEVELEDIT] Recombine error on '{scope.name}': {ex.Message}");
+            }
+        }
+
+        // The MeshCombiner owning the piece, or the "_Combined" level root for levels
+        // whose combiner component didn't survive the build.
+        private static Transform FindCombineScope(Transform t)
+        {
+            var combiner = t.GetComponentInParent<global::EHS.MeshCombiner.MeshCombiner>();
+            Transform scope = combiner != null ? combiner.transform
+                : ObjectCatalog.IsCombinedLevelPiece(t) ? t.root : null;
+            return scope != null && !IsIgnoredByCombiner(t, scope) ? scope : null;
+        }
+
+        // What sits under an "Ignore Combine" node or a MeshCombinerIgnore was never
+        // merged: it draws itself, and its disabled renderers are off on purpose.
+        private static bool IsIgnoredByCombiner(Transform t, Transform scope)
+        {
+            for (var current = t; current != null && current != scope; current = current.parent)
+            {
+                string name = current.name;
+                if (name.IndexOf("Ignore Combine", StringComparison.OrdinalIgnoreCase) >= 0
+                    || name.IndexOf("IgnoreCombine", StringComparison.OrdinalIgnoreCase) >= 0
+                    || current.GetComponent<global::EHS.MeshCombiner.MeshCombinerIgnore>() != null) return true;
+            }
+            return false;
+        }
+
+        // The combiner names its baked meshes "<prefix>_<name>_LOD<n>_Combined".
+        private static bool IsCombinedOutput(Transform t)
+        {
+            string name = t.name;
+            return name.EndsWith("_Combined", StringComparison.OrdinalIgnoreCase)
+                && name.IndexOf("_LOD", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static void Neutralize(LevelEditRecord record)
@@ -400,6 +540,7 @@ namespace FIHMapEditor
 
         private void Remove(LevelEditRecord record)
         {
+            ReleaseCombined(record);
             _records.Remove(record);
             if (record.Target != null) _byId.Remove(record.Target.GetInstanceID());
         }
@@ -409,6 +550,7 @@ namespace FIHMapEditor
         {
             _records.Clear();
             _byId.Clear();
+            _splits.Clear();
         }
 
         public List<LevelEditData> Snapshot()
