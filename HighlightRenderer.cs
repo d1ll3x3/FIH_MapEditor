@@ -244,7 +244,9 @@ namespace FIHMapEditor
                 return;
             }
 
-            var bounds = ObjectCatalog.ComputeBounds(target);
+            // Visual bounds: a piece of a mesh-combined level has no renderer of its own
+            // switched on until it is edited.
+            var bounds = ObjectCatalog.ComputeVisualBounds(target);
             if (bounds.size == Vector3.zero)
             {
                 _box.Hide();

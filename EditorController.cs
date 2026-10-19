@@ -751,7 +751,7 @@ namespace FIHMapEditor
                     _multiBoxes[i].Hide();
                     continue;
                 }
-                var bounds = ObjectCatalog.ComputeBounds(members[i].Target);
+                var bounds = ObjectCatalog.ComputeVisualBounds(members[i].Target);
                 if (bounds.size == Vector3.zero) { _multiBoxes[i].Hide(); continue; }
                 _multiBoxes[i].ShowBox(bounds, new Color(0.2f, 0.8f, 0.8f, 0.5f));
             }
@@ -4134,7 +4134,7 @@ namespace FIHMapEditor
         {
             var sel = SelectionSys.Current;
             if (!sel.IsValid || sel.Target == null) return;
-            var bounds = ObjectCatalog.ComputeBounds(sel.Target);
+            var bounds = ObjectCatalog.ComputeVisualBounds(sel.Target);
             if (bounds.size == Vector3.zero) return;
 
             Vector3 pos = bounds.center + Vector3.up * (bounds.extents.y + 1.5f);

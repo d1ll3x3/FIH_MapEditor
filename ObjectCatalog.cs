@@ -782,20 +782,55 @@ namespace FIHMapEditor
             return true;
         }
 
-        // Levels built with mesh combining (NW_*_Combined: the Fridge, The Grid...) draw
-        // their static pieces from merged meshes and switch each piece's own renderer
-        // off. Those pieces are still real objects; what stays out of the merge lives
-        // under an "Ignore Combine" node and keeps its renderers on.
-        public static bool IsCombinedLevelPiece(Transform t)
+        // Levels built with the game's MeshCombiner (the Fridge, The Grid... and most of
+        // the full game) draw their static pieces from merged meshes and switch each
+        // piece's own renderer and LODGroup off. Those pieces are still real objects;
+        // what stays out of the merge (MeshCombinerIgnore, "Ignore Combine" nodes) keeps
+        // its renderers on.
+        public static bool IsCombinedLevelPiece(Transform t) => FindCombineScope(t) != null;
+
+        // The MeshCombiner a piece was merged by, or the "_Combined" level root when the
+        // level carries no combiner component. Null for anything that draws itself.
+        public static Transform FindCombineScope(Transform t)
         {
-            for (var current = t; current != null; current = current.parent)
+            if (t == null) return null;
+            Transform scope = null;
+            var combiner = t.GetComponentInParent<global::EHS.MeshCombiner.MeshCombiner>(true);
+            if (combiner != null) scope = combiner.transform;
+            else if (t.root.name.IndexOf("_Combined", StringComparison.OrdinalIgnoreCase) >= 0) scope = t.root;
+            if (scope == null || IsIgnoredByCombiner(t, scope) || IsCombinedOutput(t, scope)) return null;
+            return scope;
+        }
+
+        private static bool IsIgnoredByCombiner(Transform t, Transform scope)
+        {
+            for (var current = t; current != null && current != scope; current = current.parent)
             {
                 string name = current.name;
                 if (name.IndexOf("Ignore Combine", StringComparison.OrdinalIgnoreCase) >= 0
-                    || name.IndexOf("IgnoreCombine", StringComparison.OrdinalIgnoreCase) >= 0) return false;
-                if (current.parent == null) return name.IndexOf("_Combined", StringComparison.OrdinalIgnoreCase) >= 0;
+                    || name.IndexOf("IgnoreCombine", StringComparison.OrdinalIgnoreCase) >= 0
+                    || current.GetComponent<global::EHS.MeshCombiner.MeshCombinerIgnore>() != null) return true;
             }
             return false;
+        }
+
+        // The combiner bakes each LOD level into a direct child named
+        // "<combiner name>_LOD<n>" (MeshCombiner.GetOrCreateLODGameObject). Only the
+        // suffix is checked: a scene instance of the combiner may have been renamed.
+        public static bool IsCombinedOutput(Transform t, Transform scope)
+        {
+            for (var current = t; current != null && current != scope; current = current.parent)
+                if (current.parent == scope && HasLodSuffix(current.name)) return true;
+            return false;
+        }
+
+        private static bool HasLodSuffix(string name)
+        {
+            int lod = name.LastIndexOf("_LOD", StringComparison.Ordinal);
+            if (lod < 0 || lod + 4 == name.Length) return false;
+            for (int i = lod + 4; i < name.Length; i++)
+                if (!char.IsDigit(name[i])) return false;
+            return true;
         }
 
         // What the player actually sees of an object: its enabled renderers, or for a
@@ -808,7 +843,7 @@ namespace FIHMapEditor
         }
 
         // Renderer.bounds is unreliable on inactive prefab assets; approximate from the
-        // shared meshes instead (rotation ignored — good enough for catalog sizing).
+        // shared meshes instead.
         private static Bounds ComputeAssetBounds(GameObject go)
         {
             bool has = false;
@@ -830,16 +865,18 @@ namespace FIHMapEditor
             catch { }
             return has ? bounds : new Bounds(Vector3.zero, Vector3.zero);
 
+            // All 8 corners: a rotated piece of a combined level is measured as placed.
             static void Accumulate(Bounds local, Transform t, ref Bounds bounds, ref bool has)
             {
-                Vector3 center = t.TransformPoint(local.center);
-                Vector3 scale = t.lossyScale;
-                Vector3 size = new Vector3(Mathf.Abs(local.size.x * scale.x),
-                                           Mathf.Abs(local.size.y * scale.y),
-                                           Mathf.Abs(local.size.z * scale.z));
-                var wb = new Bounds(center, size);
-                if (!has) { bounds = wb; has = true; }
-                else bounds.Encapsulate(wb);
+                Vector3 c = local.center, e = local.extents;
+                for (int xi = -1; xi <= 1; xi += 2)
+                    for (int yi = -1; yi <= 1; yi += 2)
+                        for (int zi = -1; zi <= 1; zi += 2)
+                        {
+                            Vector3 corner = t.TransformPoint(c + new Vector3(xi * e.x, yi * e.y, zi * e.z));
+                            if (!has) { bounds = new Bounds(corner, Vector3.zero); has = true; }
+                            else bounds.Encapsulate(corner);
+                        }
             }
         }
 

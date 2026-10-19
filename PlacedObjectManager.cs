@@ -295,6 +295,10 @@ namespace FIHMapEditor
                             reEnabled++;
                         }
                     }
+                    // The combiner switches a piece's LODGroup off too; without it every
+                    // LOD of the copy draws at once.
+                    foreach (var lod in clone.GetComponentsInChildren<LODGroup>(true))
+                        if (lod != null && !lod.enabled) lod.enabled = true;
                     if (reEnabled > 0)
                         MapEditorPlugin.Logger.LogInfo(
                             $"[PLACE] '{clone.name}' had no visible renderer — re-enabled {reEnabled} hidden renderer(s)/node(s).");
