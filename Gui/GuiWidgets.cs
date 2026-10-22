@@ -28,6 +28,14 @@ namespace FIHMapEditor
 
         public bool HasFocusedTextField => _activeField != null;
 
+        // Where the rects passed to the widgets start inside the window: set it while
+        // drawing inside a GUI.BeginGroup at that offset (the editor's content panel sits
+        // right of its sidebar) so the manual hit tests line up with what is drawn.
+        public Vector2 ContentOffset;
+
+        private Rect ToScreen(Rect r)
+            => new Rect(WindowRect.x + ContentOffset.x + r.x, WindowRect.y + ContentOffset.y + r.y, r.width, r.height);
+
         public GuiWindowHelper(Rect initialRect)
         {
             WindowRect = initialRect;
@@ -108,23 +116,37 @@ namespace FIHMapEditor
         // Rect is in window-local coordinates.
         public bool Button(Rect rect, string text)
         {
-            GUI.Box(rect, text);
+            DrawButton(rect, text, false);
             return HitTest(rect);
         }
 
-        // Button drawn highlighted when "on" (used for toggles and tab headers).
+        // Button drawn in the accent colour when "on" (toggles, tabs, modes).
         public bool ToggleButton(Rect rect, string text, bool on)
         {
-            // backgroundColor barely tints this skin's dark box, so an "on" state is
-            // painted underneath, plus an accent bar along the bottom edge.
-            if (on)
-            {
-                FillRect(rect, new Color(0.2f, 0.75f, 0.35f, 0.55f));
-                FillRect(new Rect(rect.x, rect.yMax - 3f, rect.width, 3f), new Color(0.3f, 0.95f, 0.45f, 1f));
-            }
-            GUI.Box(rect, text);
+            DrawButton(rect, text, on);
             return HitTest(rect);
         }
+
+        // Callers colour a button by setting GUI.backgroundColor first (green PLAY, red
+        // delete...); white means the theme's own colour.
+        private void DrawButton(Rect rect, string text, bool on)
+        {
+            Color tint = GUI.backgroundColor;
+            bool tinted = tint.r < 0.99f || tint.g < 0.99f || tint.b < 0.99f;
+            Color fill = on ? GuiTheme.Accent
+                : tinted ? Color.Lerp(GuiTheme.PanelRaised, new Color(tint.r, tint.g, tint.b, 1f), 0.7f)
+                : GuiTheme.PanelRaised;
+            if (IsHovered(rect))
+                fill = Input.GetMouseButton(0) ? Color.Lerp(fill, Color.black, 0.18f) : Color.Lerp(fill, Color.white, 0.09f);
+            GuiTheme.Fill(rect, fill);
+            GUI.Label(rect, text, on ? GuiTheme.ButtonTextBold : GuiTheme.ButtonText);
+        }
+
+        // Mouse over a window-local rect (and this window may take input).
+        public bool IsHovered(Rect rect) => !InputBlocked() && ToScreen(rect).Contains(CompensatedMouse());
+
+        // A click on an area drawn by the caller (sidebar rows, list rows).
+        public bool Clicked(Rect rect) => HitTest(rect);
 
         // Solid colour rectangle. Unlike a tinted GUI.Box it shows up on this skin.
         public static void FillRect(Rect rect, Color color)
@@ -142,7 +164,7 @@ namespace FIHMapEditor
             if (Input.GetMouseButtonDown(0))
             {
                 Vector2 mouse = CompensatedMouse();
-                Rect absRect = new Rect(WindowRect.x + rect.x, WindowRect.y + rect.y, rect.width, rect.height);
+                Rect absRect = ToScreen(rect);
 
                 if (absRect.Contains(mouse))
                 {
@@ -162,16 +184,15 @@ namespace FIHMapEditor
         {
             _fieldsDrawn.Add(id);
             bool active = _activeField == id;
-            GUI.color = active ? new Color(0.8f, 1f, 0.8f) : Color.white;
-            GUI.Box(r, active ? value + "_" : value);
-            GUI.color = Color.white;
+            GuiTheme.Outlined(r, GuiTheme.Inset, active ? GuiTheme.Accent : new Color(1f, 1f, 1f, 0.12f));
+            GUI.Label(r, active ? value + "_" : value, GuiTheme.FieldText);
 
             if (InputBlocked()) return value;
 
             var e = Event.current;
             if (Input.GetMouseButtonDown(0) && e.type == EventType.Repaint)
             {
-                Rect abs = new Rect(WindowRect.x + r.x, WindowRect.y + r.y, r.width, r.height);
+                Rect abs = ToScreen(r);
                 Vector2 m = CompensatedMouse();
                 if (abs.Contains(m) && !_clickHandledThisFrame)
                 {
@@ -213,7 +234,7 @@ namespace FIHMapEditor
             float scroll = Input.mouseScrollDelta.y;
             if (scroll == 0f) return 0f;
 
-            Rect abs = new Rect(WindowRect.x + localRect.x, WindowRect.y + localRect.y, localRect.width, localRect.height);
+            Rect abs = ToScreen(localRect);
             return abs.Contains(CompensatedMouse()) ? scroll : 0f;
         }
 
@@ -225,17 +246,12 @@ namespace FIHMapEditor
             value = Mathf.Clamp(value, min, max);
             float fill = max > min ? (value - min) / (max - min) : 0f;
 
-            var prev = GUI.backgroundColor;
-            GUI.backgroundColor = new Color(0.05f, 0.05f, 0.07f, 1f);
-            GUI.Box(r, "");
-            GUI.backgroundColor = prev;
-            var fillColor = _activeSlider == id
-                ? new Color(0.2f, 0.75f, 0.35f, 0.9f)
-                : new Color(0.3f, 0.5f, 0.9f, 0.85f);
+            GuiTheme.Fill(r, GuiTheme.Inset);
+            var fillColor = _activeSlider == id ? GuiTheme.Success : GuiTheme.Accent;
             var inner = new Rect(r.x + 2f, r.y + 2f, r.width - 4f, r.height - 4f);
-            if (fill > 0f) FillRect(new Rect(inner.x, inner.y, Mathf.Max(3f, inner.width * fill), inner.height), fillColor);
+            if (fill > 0f) GuiTheme.Fill(new Rect(inner.x, inner.y, Mathf.Max(8f, inner.width * fill), inner.height), fillColor);
             // Handle at the current value, so the position reads even at 0 or a full bar.
-            FillRect(new Rect(inner.x + inner.width * fill - 2f, r.y, 4f, r.height), Color.white);
+            GuiTheme.Fill(new Rect(inner.x + inner.width * fill - 3f, r.y + 1f, 6f, r.height - 2f), Color.white);
             if (_sliderLabel == null)
             {
                 // GUIStyle's copy constructor is not exposed by the interop; build it bare.
@@ -248,7 +264,7 @@ namespace FIHMapEditor
             if (Event.current.type != EventType.Repaint) return value;
 
             Vector2 m = CompensatedMouse();
-            var abs = new Rect(WindowRect.x + r.x, WindowRect.y + r.y, r.width, r.height);
+            var abs = ToScreen(r);
             if (Input.GetMouseButtonDown(0) && _activeSlider == null && !_clickHandledThisFrame && abs.Contains(m))
             {
                 _clickHandledThisFrame = true;
@@ -285,10 +301,7 @@ namespace FIHMapEditor
             if (maxTop == 0)
             {
                 // Nothing to scroll: empty groove, no thumb, layout unchanged.
-                var prevEmpty = GUI.backgroundColor;
-                GUI.backgroundColor = new Color(0.05f, 0.05f, 0.07f, 1f);
-                GUI.Box(r, "");
-                GUI.backgroundColor = prevEmpty;
+                GuiTheme.Fill(r, GuiTheme.Inset);
                 if (_activeScrollbar == id) _activeScrollbar = null;
                 return 0;
             }
@@ -300,25 +313,19 @@ namespace FIHMapEditor
             float travel = r.height - thumbHeight;
             float thumbY = r.y + (maxTop > 0 ? (float)top / maxTop * travel : 0f);
 
-            // The panel behind us is already a GUI.Box, so an ambient-coloured track is
-            // invisible against it: sink the track and light up the thumb. Everything
-            // readable in this UI is opaque over the near-black window (0.13,0.13,0.16).
-            var prev = GUI.backgroundColor;
-            GUI.backgroundColor = new Color(0.05f, 0.05f, 0.07f, 1f);
-            GUI.Box(r, "");
+            // Sunken track, lit thumb: readable over any panel.
+            GuiTheme.Fill(r, GuiTheme.Inset);
             var thumb = new Rect(r.x, thumbY, r.width, thumbHeight);
-            GUI.backgroundColor = _activeScrollbar == id
-                ? new Color(0.2f, 0.75f, 0.35f, 1f)   // same green the toggles use while held
-                : new Color(0.62f, 0.66f, 0.76f, 1f);
-            GUI.Box(thumb, "");
-            GUI.backgroundColor = prev;
+            GuiTheme.Fill(new Rect(thumb.x + 2f, thumb.y + 2f, thumb.width - 4f, thumb.height - 4f),
+                _activeScrollbar == id ? GuiTheme.Accent
+                    : IsHovered(thumb) ? GuiTheme.PanelHover : new Color(0.32f, 0.35f, 0.43f, 1f));
 
             if (InputBlocked()) { _activeScrollbar = null; return top; }
             if (Event.current.type != EventType.Repaint) return top;
 
             Vector2 m = CompensatedMouse();
-            var absTrack = new Rect(WindowRect.x + r.x, WindowRect.y + r.y, r.width, r.height);
-            var absThumb = new Rect(WindowRect.x + thumb.x, WindowRect.y + thumb.y, thumb.width, thumb.height);
+            var absTrack = ToScreen(r);
+            var absThumb = ToScreen(thumb);
 
             if (Input.GetMouseButtonDown(0) && _activeScrollbar == null
                 && !_clickHandledThisFrame && absTrack.Contains(m))

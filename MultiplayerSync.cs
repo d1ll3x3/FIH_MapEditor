@@ -536,7 +536,17 @@ namespace FIHMapEditor
             MapEditorPlugin.Logger.LogInfo($"[COOP] {LastSyncInfo}");
         }
 
+        // A batch that doesn't fit one packet (a big map's full seed) is split: dropping
+        // it lost those changes for good, since ComputeDiff already counts them as sent.
+        // Each op stands on its own, and reliable packets on one channel arrive in order,
+        // so "owner" goes first: the receiver judges vt: ops by it.
         private void SendOps(IEnumerable<ulong> targets, List<SyncOp> ops)
+        {
+            var ids = targets.ToList();
+            SendOpsChunk(ids, ops.OrderBy(o => o.Key == "owner" ? 0 : 1).ToList());
+        }
+
+        private void SendOpsChunk(List<ulong> ids, List<SyncOp> ops)
         {
             byte[] payload;
             try
@@ -551,10 +561,19 @@ namespace FIHMapEditor
             }
             if (payload.Length > MAX_PACKET)
             {
-                _c.ShowToast($"Co-edit: sync batch too large ({payload.Length / 1024} KB) — some changes may not sync");
+                if (ops.Count == 1)
+                {
+                    MapEditorPlugin.Logger.LogWarning(
+                        $"[COOP] '{ops[0].Key}' alone is {payload.Length / 1024} KB — too large to sync.");
+                    _c.ShowToast("Co-edit: one change is too large to sync");
+                    return;
+                }
+                int half = ops.Count / 2;
+                SendOpsChunk(ids, ops.GetRange(0, half));
+                SendOpsChunk(ids, ops.GetRange(half, ops.Count - half));
                 return;
             }
-            foreach (var id in targets)
+            foreach (var id in ids)
                 SendTo(id, MSG_OPS, payload);
         }
 

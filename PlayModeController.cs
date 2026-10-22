@@ -945,6 +945,25 @@ namespace FIHMapEditor
         // the source of the stuck-jump bug — the trainer never touches any of that and its
         // teleport never breaks the jump. Phone repair stays (self-gated no-op when intact,
         // exactly like the trainer keeps PhoneRepair on teleport).
+        // The two network steps of the game's own PlayerTeleportController.TeleportTo:
+        // publish the body's new pose and tell FishNet's NetworkTransform this is a jump,
+        // not movement. Without them a client's teleport was undone right away (logged as
+        // an EXTERNAL teleport back to where it came from); the host never noticed.
+        private static void AnnounceTeleport(Rigidbody rb, Transform playerT)
+        {
+            try
+            {
+                rb?.PublishTransform();
+                var networkTransform = playerT?.GetComponentInParent<FishNet.Component.Transforming.NetworkTransform>()
+                    ?? playerT?.GetComponentInChildren<FishNet.Component.Transforming.NetworkTransform>();
+                networkTransform?.Teleport();
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[PLAY] Network teleport notice failed: {ex.Message}");
+            }
+        }
+
         private void TeleportTo(Vector3 position, float yaw)
         {
             _movedByUs = true;
@@ -979,6 +998,7 @@ namespace FIHMapEditor
                     playerT.position = position;
                     playerT.rotation = rotation;
                 }
+                AnnounceTeleport(rb, playerT);
             }
             catch (Exception ex)
             {

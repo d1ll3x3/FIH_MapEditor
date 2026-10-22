@@ -13,7 +13,6 @@ namespace FIHMapEditor
         private bool _active = false;
         private bool _wasKinematic = false;
         private bool _wasGravity = true;
-        private bool _wasCollisions = true;
 
         public bool IsActive => _active;
 
@@ -31,12 +30,9 @@ namespace FIHMapEditor
                 var rb = _finder.GetCachedPlayerRigidbody() ?? _finder.FindPlayer()?.GetComponent<Rigidbody>();
                 if (rb == null) return;
 
-                // Preserve the game's exact physics configuration. Network ownership and
-                // respawn sequences may legitimately leave a player kinematic, so Exit must
-                // restore observed values rather than assume the usual gameplay defaults.
+                // Kept as fallbacks for Exit, which otherwise restores the game's own rule.
                 _wasKinematic = rb.isKinematic;
                 _wasGravity = rb.useGravity;
-                _wasCollisions = rb.detectCollisions;
 
                 rb.isKinematic = true;
                 rb.useGravity = false;
@@ -59,9 +55,16 @@ namespace FIHMapEditor
                 var rb = _finder.GetCachedPlayerRigidbody();
                 if (rb != null)
                 {
+                    // Put back what the game itself would, not what was observed on
+                    // Enter: fly can start in the middle of a game routine that has the
+                    // body changed for a moment (a cannon launch switches collisions off
+                    // and back on), and restoring that snapshot left the player walking
+                    // through everything. Collisions are always on outside those
+                    // routines; the body is kinematic only while the game freezes the
+                    // player (same rule as SceneZiplineSpline.ReleaseAttachedPlayer).
                     rb.useGravity = _wasGravity;
-                    rb.detectCollisions = _wasCollisions;
-                    rb.isKinematic = _wasKinematic;
+                    rb.detectCollisions = true;
+                    rb.isKinematic = IsFrozenByGame(rb) ?? _wasKinematic;
 
                     // Do not carry editor movement into gameplay as residual momentum.
                     if (!rb.isKinematic)
@@ -78,6 +81,12 @@ namespace FIHMapEditor
             {
                 MapEditorPlugin.Logger.LogError($"Error exiting fly mode: {ex}");
             }
+        }
+
+        private static bool? IsFrozenByGame(Rigidbody rb)
+        {
+            var player = rb.GetComponentInParent<EHS.PlayerNetworked>() ?? rb.GetComponentInChildren<EHS.PlayerNetworked>();
+            return player != null ? player.IsComposedFrozen : (bool?)null;
         }
 
         // Call every Update while active and movement input is allowed.

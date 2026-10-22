@@ -4,19 +4,63 @@ using UnityEngine;
 
 namespace FIHMapEditor
 {
-    // Main editor window: CATALOG / SELECT / TOOLS / LIST / MAP tabs + footer.
+    // Main editor window: a sidebar of sections (grouped by what they are for), the
+    // selected section's panel on its right, and a footer with the map status.
     public class EditorMenuRenderer
     {
         private readonly EditorController _c;
         private readonly GuiWindowHelper _win;
         private readonly GUI.WindowFunction _windowDelegate;
 
+        private const float SIDEBAR = 150f;
+        // Width of a section's panel. Sections draw in their own space starting at the
+        // sidebar's right edge (see WindowFunction), so W is their full width.
         private const float W = 680f;
+        private const float TOTAL_W = SIDEBAR + W;
         private const float H = 790f;
+        private const float FOOTER_H = 34f;
         private const int WINDOW_ID = 51601;
 
-        private enum Tab { Catalog, Select, Tools, List, Map, Keys, Times }
+        private enum Tab { Catalog, Mechanics, Select, List, Course, Level, Map, Multiplayer, Times, Keys }
         private Tab _tab = Tab.Catalog;
+
+        private static readonly (string Group, (Tab Tab, string Label)[] Items)[] SidebarGroups =
+        {
+            ("BUILD", new[] { (Tab.Catalog, "Catalog"), (Tab.Mechanics, "Pads & Cannons"),
+                              (Tab.Select, "Selection"), (Tab.List, "Objects") }),
+            ("MAP", new[] { (Tab.Course, "Course"), (Tab.Level, "Level"), (Tab.Map, "Save & Load") }),
+            ("SESSION", new[] { (Tab.Multiplayer, "Multiplayer"), (Tab.Times, "Times") }),
+            ("", new[] { (Tab.Keys, "Settings") }),
+        };
+
+        // Title and one-line purpose shown at the top of each section's panel.
+        private static string SectionTitle(Tab tab) => tab switch
+        {
+            Tab.Catalog => "Catalog",
+            Tab.Mechanics => "Pads & Cannons",
+            Tab.Select => "Selection",
+            Tab.List => "Objects",
+            Tab.Course => "Course",
+            Tab.Level => "Level",
+            Tab.Map => "Save & Load",
+            Tab.Multiplayer => "Multiplayer",
+            Tab.Times => "Times",
+            _ => "Settings",
+        };
+
+        private static string SectionHint(Tab tab) => tab switch
+        {
+            Tab.Catalog => "The level's objects. PLACE: in front of you. STAMP: where you click.",
+            Tab.Mechanics => "The game's own pads and cannons, spawned for every player.",
+            Tab.Select => "Click an object in the world to select it; Ctrl+Click adds more.",
+            Tab.List => "Everything placed or changed in this map.",
+            Tab.Course => "Where the run starts and ends, and what happens along it.",
+            Tab.Level => "The game's own level: edit its pieces or start from a clean space.",
+            Tab.Map => "Name, save and share this map.",
+            Tab.Multiplayer => "Co-edit with modded players in your lobby.",
+            Tab.Times => "This map's leaderboard.",
+            _ => "Keys, flying, interface size and performance.",
+        };
 
         // KEYS tab: id of the action currently listening for a key, or null.
         private string _listeningBind = null;
@@ -31,7 +75,7 @@ namespace FIHMapEditor
         private bool _favsOnly = false;       // show starred entries only
         private int _catalogTop = 0;
         private const int CATALOG_COLUMNS = 3;
-        private const int CATALOG_GRID_ROWS = 2;
+        private const int CATALOG_GRID_ROWS = 3;
         private const int CATALOG_PAGE_SIZE = CATALOG_COLUMNS * CATALOG_GRID_ROWS;
         private const float CATALOG_CARD_HEIGHT = 174f;
         private float _autoArcApex = 5f;
@@ -80,7 +124,7 @@ namespace FIHMapEditor
         private float _wipeConfirmUntil = 0f;
         private float _revertEditsConfirmUntil = 0f;
 
-        private GUIStyle _styleTitle, _styleSmall, _styleRow;
+        private GUIStyle _styleTitle, _styleSmall, _styleRow, _styleGroup, _styleHint, _styleSection, _styleNav, _styleFooter;
         private bool _stylesReady;
 
         public bool HasFocusedTextField => _win.HasFocusedTextField;
@@ -98,7 +142,7 @@ namespace FIHMapEditor
         public EditorMenuRenderer(EditorController controller)
         {
             _c = controller;
-            _win = new GuiWindowHelper(new Rect(Screen.width - W - 20, 40, W, H))
+            _win = new GuiWindowHelper(new Rect(Screen.width - TOTAL_W - 20, 40, TOTAL_W, H))
             {
                 // The Maps hub is modal on top of this window.
                 InputBlocked = () => _c.MapsHubOpen || !_c.CursorFree,
@@ -109,12 +153,19 @@ namespace FIHMapEditor
         private void InitStyles()
         {
             if (_stylesReady) return;
-            _styleTitle = new GUIStyle { fontSize = 16, fontStyle = FontStyle.Bold };
-            _styleTitle.normal.textColor = new Color(0.5f, 0.85f, 1f);
-            _styleSmall = new GUIStyle { fontSize = 13 };
-            _styleSmall.normal.textColor = new Color(0.92f, 0.92f, 0.92f);
-            _styleRow = new GUIStyle { fontSize = 14, alignment = TextAnchor.MiddleLeft };
-            _styleRow.normal.textColor = Color.white;
+            _styleTitle = GuiTheme.MakeText(14, TextAnchor.UpperLeft, true);
+            _styleSmall = GuiTheme.MakeText(13, TextAnchor.UpperLeft, false);
+            _styleSmall.normal.textColor = new Color(0.8f, 0.82f, 0.88f);
+            _styleSmall.clipping = TextClipping.Overflow;
+            _styleRow = GuiTheme.MakeText(14, TextAnchor.MiddleLeft, false);
+            _styleGroup = GuiTheme.MakeText(11, TextAnchor.MiddleLeft, true);
+            _styleGroup.normal.textColor = GuiTheme.TextDim;
+            _styleHint = GuiTheme.MakeText(12, TextAnchor.UpperLeft, false);
+            _styleHint.normal.textColor = GuiTheme.TextDim;
+            _styleSection = GuiTheme.MakeText(19, TextAnchor.UpperLeft, true);
+            _styleNav = GuiTheme.MakeText(14, TextAnchor.MiddleLeft, false);
+            _styleFooter = GuiTheme.MakeText(13, TextAnchor.MiddleLeft, false);
+            _styleFooter.normal.textColor = GuiTheme.TextDim;
             _stylesReady = true;
         }
 
@@ -132,39 +183,46 @@ namespace FIHMapEditor
             if (!Mathf.Approximately(scale, 1f))
                 GUIUtility.ScaleAroundPivot(Vector2.one * scale, _win.WindowRect.position);
 
-            GUI.backgroundColor = new Color(0.13f, 0.13f, 0.16f, 0.97f);
-            _win.WindowRect = GUI.Window(WINDOW_ID, _win.WindowRect, _windowDelegate, "FIH CUSTOM MAP EDITOR");
-            GUI.backgroundColor = Color.white;
+            _win.WindowRect = GUI.Window(WINDOW_ID, _win.WindowRect, _windowDelegate, "", GuiTheme.WindowStyle);
 
             GUI.matrix = prevMatrix;
         }
 
         private void WindowFunction(int id)
         {
-            // The stock window style doesn't reliably paint the full body in this build;
-            // fill the client area ourselves so content never sits on a transparent hole.
-            var prevBg = GUI.backgroundColor;
-            GUI.backgroundColor = new Color(0.11f, 0.11f, 0.14f, 1f);
-            GUI.Box(new Rect(0, 20, W, H - 20), "");
-            GUI.Box(new Rect(0, 20, W, H - 20), "");
-            GUI.backgroundColor = prevBg;
+            // Our own frame (the stock window style didn't reliably paint its body here).
+            GuiTheme.WindowFrame(TOTAL_W, H, "FIH CUSTOM MAP EDITOR");
 
-            // Bigger, brighter text on every Box-based widget (buttons, fields).
-            GUI.skin.box.fontSize = 14;
-            GUI.skin.box.normal.textColor = Color.white;
 
             DrawHeaderRow();
-            DrawTabs();
+            DrawSidebar();
 
-            switch (_tab)
+            // The section panel is a group right of the sidebar: every section keeps
+            // drawing from x = 0 of its own panel, and the widgets offset their hit
+            // tests by the same amount.
+            GUI.BeginGroup(new Rect(SIDEBAR, 0, W, H - FOOTER_H));
+            _win.ContentOffset = new Vector2(SIDEBAR, 0);
+            try
             {
-                case Tab.Catalog: DrawCatalogTab(); break;
-                case Tab.Select: DrawSelectTab(); break;
-                case Tab.Tools: DrawToolsTab(); break;
-                case Tab.List: DrawListTab(); break;
-                case Tab.Map: DrawMapTab(); break;
-                case Tab.Keys: DrawKeysTab(); break;
-                case Tab.Times: DrawTimesTab(); break;
+                DrawSectionTitle();
+                switch (_tab)
+                {
+                    case Tab.Catalog: DrawCatalogTab(); break;
+                    case Tab.Mechanics: DrawMechanicsTab(); break;
+                    case Tab.Select: DrawSelectTab(); break;
+                    case Tab.List: DrawListTab(); break;
+                    case Tab.Course: DrawCourseTab(); break;
+                    case Tab.Level: DrawLevelTab(); break;
+                    case Tab.Map: DrawMapTab(); break;
+                    case Tab.Multiplayer: DrawMultiplayerTab(); break;
+                    case Tab.Times: DrawTimesTab(); break;
+                    case Tab.Keys: DrawKeysTab(); break;
+                }
+            }
+            finally
+            {
+                _win.ContentOffset = Vector2.zero;
+                GUI.EndGroup();
             }
 
             DrawFooter();
@@ -175,35 +233,84 @@ namespace FIHMapEditor
         {
             if (!_c.CursorFree)
             {
-                GUI.Label(new Rect(20, 30, W - 40, 22),
+                GUI.Label(new Rect(20, 30, TOTAL_W - 40, 22),
                     $"Press {EditorConfig.Settings.ToggleCursorKey} to free the cursor and use the menu", _styleTitle);
                 return;
             }
 
+            float half = (TOTAL_W - 40) / 2f;
             bool on = _c.MousePlaceEnabled;
-            if (_win.ToggleButton(new Rect(15, 28, 320, 24),
+            if (_win.ToggleButton(new Rect(15, 28, half, 24),
                 on ? "Mouse placement: ON" : "Mouse placement: OFF", on))
                 _c.MousePlaceEnabled = !on;
 
-            if (_win.Button(new Rect(345, 28, 320, 24),
+            if (_win.Button(new Rect(25 + half, 28, half, 24),
                 $"Back to camera ({EditorConfig.Settings.ToggleCursorKey})"))
                 _c.SetCursorFree(false);
         }
 
-        private void DrawTabs()
+        private void DrawSidebar()
         {
-            float y = 58;
-            string[] names = { "CATALOG", "SELECT", "TOOLS", "LIST", "MAP", "KEYS", "TIMES" };
-            float w = (W - 30) / names.Length;
-            for (int i = 0; i < names.Length; i++)
+            GuiTheme.Fill(new Rect(8, 60, SIDEBAR - 12, H - FOOTER_H - 66), GuiTheme.Panel);
+
+            float y = 70;
+            foreach (var (group, items) in SidebarGroups)
             {
-                if (_win.ToggleButton(new Rect(15 + i * w, y, w - 4, 26), names[i], (int)_tab == i))
+                if (group != "")
                 {
-                    bool entering = _tab != (Tab)i;
-                    _tab = (Tab)i;
-                    if (entering && _tab == Tab.Catalog) MaybeRefreshCatalog();
+                    GUI.Label(new Rect(22, y, SIDEBAR - 40, 18), group, _styleGroup);
+                    y += 20;
                 }
+                else
+                {
+                    GuiWindowHelper.FillRect(new Rect(20, y + 4, SIDEBAR - 36, 1), GuiTheme.Line);
+                    y += 10;
+                }
+                foreach (var (tab, label) in items)
+                {
+                    var row = new Rect(14, y, SIDEBAR - 24, 30);
+                    bool selected = _tab == tab;
+                    if (selected)
+                    {
+                        GuiTheme.Fill(row, GuiTheme.AccentSoft);
+                        GuiWindowHelper.FillRect(new Rect(row.x, row.y + 7, 3, row.height - 14), GuiTheme.Accent);
+                    }
+                    else if (_win.IsHovered(row))
+                    {
+                        GuiTheme.Fill(row, new Color(1f, 1f, 1f, 0.05f));
+                    }
+                    _styleNav.normal.textColor = selected ? GuiTheme.Text : GuiTheme.TextDim;
+                    _styleNav.fontStyle = selected ? FontStyle.Bold : FontStyle.Normal;
+                    GUI.Label(new Rect(row.x + 12, row.y, row.width - 12, row.height), label, _styleNav);
+                    if (_win.Clicked(row)) SelectTab(tab);
+                    y += 32;
+                }
+                y += 8;
             }
+        }
+
+        private void SelectTab(Tab tab)
+        {
+            bool entering = _tab != tab;
+            _tab = tab;
+            if (entering && _tab == Tab.Catalog) MaybeRefreshCatalog();
+        }
+
+        private void DrawSectionTitle()
+        {
+            GUI.Label(new Rect(15, 58, W - 30, 24), SectionTitle(_tab), _styleSection);
+            GUI.Label(new Rect(15, 80, W - 30, 16), SectionHint(_tab), _styleHint);
+        }
+
+        // Thin labelled divider between the blocks of a section.
+        private void DrawBlockHeader(string title, ref float y)
+        {
+            var size = _styleGroup.CalcSize(new GUIContent(title));
+            _styleGroup.normal.textColor = GuiTheme.Accent;
+            GUI.Label(new Rect(15, y, size.x + 4, 18), title, _styleGroup);
+            _styleGroup.normal.textColor = GuiTheme.TextDim;
+            GuiWindowHelper.FillRect(new Rect(size.x + 25, y + 9, W - size.x - 40, 1), GuiTheme.Line);
+            y += 24;
         }
 
         // Opening the CATALOG tab is the moment completeness matters. Rescan only when
@@ -278,7 +385,6 @@ namespace FIHMapEditor
                 GUI.Label(new Rect(444, y + 3, W - 459, 20), "Stamp: next click places one copy", _styleSmall);
             }
             y += 28;
-            DrawNetworkPlacementTuning(ref y);
 
             // Category filter — wraps onto extra rows so no category is ever dropped.
             float cx = 15;
@@ -304,7 +410,6 @@ namespace FIHMapEditor
 
             var entries = FilteredEntries();
             var listRect = new Rect(10, y, W - 20, CATALOG_GRID_ROWS * CATALOG_CARD_HEIGHT + 4);
-            GUI.Box(listRect, "");
 
             // A rescan (or a cloud pull) can shrink the list under a scrolled-down view;
             // the filter buttons reset _catalogTop but nothing else does.
@@ -342,10 +447,11 @@ namespace FIHMapEditor
                 int row = slot / CATALOG_COLUMNS;
                 float cardX = 14 + column * 214f;
                 float cardY = y + 4 + row * CATALOG_CARD_HEIGHT;
-                GUI.Box(new Rect(cardX, cardY, cardWidth, CATALOG_CARD_HEIGHT - 4), "");
+                var card = new Rect(cardX, cardY, cardWidth, CATALOG_CARD_HEIGHT - 4);
+                GuiTheme.Fill(card, _win.IsHovered(card) ? GuiTheme.PanelRaised : GuiTheme.Panel);
 
                 var preview = _c.Catalog.Previews.Request(e);
-                GUI.Box(new Rect(cardX + 6, cardY + 6, 122, 122), "");
+                GuiTheme.Fill(new Rect(cardX + 6, cardY + 6, 122, 122), GuiTheme.Inset);
                 if (preview != null)
                     GUI.DrawTexture(new Rect(cardX + 10, cardY + 10, 114, 114), preview,
                         ScaleMode.ScaleToFit, true);
@@ -399,9 +505,9 @@ namespace FIHMapEditor
             var p = _c.PlacedManager;
             bool cannon = _padTool == 2;
             // Four rows (27 + 30 + 27 + 29): the box ends right above the category tabs.
-            GUI.Box(new Rect(10, y - 2, W - 20, 110), "");
+            GuiTheme.Fill(new Rect(10, y - 4, W - 20, 114), GuiTheme.Panel);
 
-            GUI.Label(new Rect(18, y + 2, 150, 20), "Pads & Cannons", _styleTitle);
+            GUI.Label(new Rect(18, y + 3, 140, 20), "Type:", _styleSmall);
             for (int i = 0; i < PadTools.Length; i++)
                 if (_win.ToggleButton(new Rect(160 + i * 96, y, 92, 22), PadTools[i].label, _padTool == i))
                     _padTool = i;
@@ -521,14 +627,9 @@ namespace FIHMapEditor
             string selName = _c.SelectionSys.IsMulti
                 ? $"{_c.SelectionSys.Multi.Count} objects (Ctrl+Click)"
                 : sel.IsValid ? sel.DisplayName : "(nothing selected — click an object)";
-            GUI.Label(new Rect(15, y, 325, 22), $"Selected: {Truncate(selName, 26)}", _styleTitle);
-            if (_win.ToggleButton(new Rect(345, y, 150, 22), $"Unlock: {(_c.UnlockOriginals ? "ON" : "OFF")}", _c.UnlockOriginals))
-                _c.UnlockOriginals = !_c.UnlockOriginals;
-            // OFF = clicks ignore triggers and renderless colliders (kill zones, invisible
-            // walls) so you always pick what you actually see.
-            if (_win.ToggleButton(new Rect(500, y, 165, 22), $"Pick invisible: {(_c.PickInvisible ? "ON" : "OFF")}", _c.PickInvisible))
-                _c.PickInvisible = !_c.PickInvisible;
-            y += 28;
+            GUI.Label(new Rect(15, y, W - 30, 22), $"Selected: {Truncate(selName, 60)}", _styleRow);
+            y += 26;
+            DrawPickToggles(ref y);
 
             // Selected soccer goal: team toggle.
             if (sel.Marker == "soccergoal" && sel.MarkerIndex < _c.SoccerGoals.Count)
@@ -565,6 +666,7 @@ namespace FIHMapEditor
 
             DrawMechanicsRow(sel, ref y);
 
+            DrawBlockHeader("TRANSFORM", ref y);
             // Gizmo mode (mouse dragging on the axes; 1/2/3 hotkeys)
             GUI.Label(new Rect(15, y + 3, 55, 20), "Gizmo:", _styleSmall);
             (string, GizmoMode)[] gizmoModes = { ("Move (1)", GizmoMode.Move), ("Rotate (2)", GizmoMode.Rotate), ("Scale (3)", GizmoMode.Scale) };
@@ -572,15 +674,6 @@ namespace FIHMapEditor
             {
                 if (_win.ToggleButton(new Rect(75 + i * 104, y, 100, 22), gizmoModes[i].Item1, _c.Gizmo.Mode == gizmoModes[i].Item2))
                     _c.Gizmo.Mode = gizmoModes[i].Item2;
-            }
-            // X-ray: wireframes on trigger zones / invisible walls (magenta = trigger,
-            // white = solid). Pairs naturally with "Pick invisible".
-            if (_win.ToggleButton(new Rect(500, y, 165, 22), $"Show invisible: {(_c.Xray.Enabled ? "ON" : "OFF")}", _c.Xray.Enabled))
-            {
-                _c.Xray.SetEnabled(!_c.Xray.Enabled);
-                if (_c.Xray.Enabled)
-                    _c.ShowToast($"X-ray: {_c.Xray.Count} invisible objects (magenta = trigger, white = solid). " +
-                                 (_c.PickInvisible ? "" : "Turn 'Pick invisible' ON to click them."));
             }
             y += 28;
 
@@ -670,7 +763,7 @@ namespace FIHMapEditor
             }
             y += 30;
 
-            // Actions row
+            DrawBlockHeader("ACTIONS", ref y);
             if (_win.Button(new Rect(15, y, 140, 24), "Duplicate (Ctrl+D)")) _c.DuplicateSelected();
             if (_win.Button(new Rect(160, y, 100, 24), "Delete (Del)")) _c.DeleteSelected();
             if (_win.Button(new Rect(265, y, 115, 24), "Drop to Floor")) _c.DropSelectedToFloor();
@@ -694,11 +787,10 @@ namespace FIHMapEditor
                 _c.UngroupSelected();
             y += 30;
 
+            DrawBlockHeader("APPEARANCE", ref y);
             DrawColorRow(sel, ref y);
 
-            // Multi-clone
-            GUI.Label(new Rect(15, y, 200, 20), "Multi-Clone Array:", _styleTitle);
-            y += 24;
+            DrawBlockHeader("ARRAY (MULTI-CLONE)", ref y);
             GUI.Label(new Rect(15, y + 3, 55, 20), "Copies:", _styleSmall);
             int[] counts = { 3, 5, 10 };
             for (int i = 0; i < counts.Length; i++)
@@ -722,20 +814,32 @@ namespace FIHMapEditor
             GUI.backgroundColor = Color.white;
             y += 32;
 
-            GUI.Label(new Rect(15, y, W - 30, 60),
+            GUI.Label(new Rect(15, y, W - 30, 40),
                 "Keys (free cursor): arrows = move  |  PgUp/PgDn = up/down  |  1/2/3 = gizmo mode\n" +
                 "[ ] = rotate Y by the ° box  |  +/- = scale by the box  |  Ctrl+D = duplicate  |  Del = delete  |  Ctrl+Z = undo",
                 _styleSmall);
         }
 
-        // ──────────────────────────────────────────────────────────── TOOLS ──
+        // ────────────────────────────────────────────────────── PADS & CANNONS ──
 
-        private void DrawToolsTab()
+        private void DrawMechanicsTab()
+        {
+            float y = ContentY;
+            DrawNetworkPlacementTuning(ref y);
+            y += 12;
+            GUI.Label(new Rect(15, y, W - 30, 60),
+                "The host spawns them through the game, so every player sees and uses them.\n" +
+                "Placed ones are tuned from Selection; their landing ring is moved with the gizmo.",
+                _styleSmall);
+        }
+
+        // ──────────────────────────────────────────────────────────── COURSE ──
+
+        private void DrawCourseTab()
         {
             float y = ContentY;
 
-            GUI.Label(new Rect(15, y, 300, 22), "Map spawn and goal:", _styleTitle);
-            y += 26;
+            DrawBlockHeader("SPAWN & GOAL", ref y);
             if (_win.Button(new Rect(15, y, 150, 26), "Set Spawn Here")) _c.SetSpawnHere();
             GUI.Label(new Rect(172, y + 5, 180, 20),
                 _c.Spawn?.Pos != null ? $"spawn: {FmtVec(_c.Spawn.Pos)}" : "no spawn (uses the game's)", _styleSmall);
@@ -751,10 +855,9 @@ namespace FIHMapEditor
                 if (_win.Button(new Rect(445, y, 60, 26), "Size -")) _c.AdjustGoalSize(-1f);
                 if (_win.Button(new Rect(510, y, 60, 26), "Size +")) _c.AdjustGoalSize(1f);
             }
-            y += 34;
+            y += 38;
 
-            GUI.Label(new Rect(15, y, 400, 22), "Checkpoints & reset triggers:", _styleTitle);
-            y += 26;
+            DrawBlockHeader("CHECKPOINTS & RESET TRIGGERS", ref y);
             if (_win.Button(new Rect(15, y, 190, 26), "Add Checkpoint Here")) _c.AddCheckpointHere();
             GUI.Label(new Rect(212, y + 5, 130, 20), $"{_c.Checkpoints.Count} placed", _styleSmall);
             if (_win.Button(new Rect(340, y, 190, 26), "Add Reset Trigger Here")) _c.AddResetZoneHere();
@@ -766,10 +869,9 @@ namespace FIHMapEditor
             y += 30;
             GUI.Label(new Rect(15, y, W - 30, 20),
                 "Click a ring/box to select it; edit with the gizmo; Del removes it.", _styleSmall);
-            y += 26;
+            y += 30;
 
-            GUI.Label(new Rect(15, y, 400, 22), "Voice lines (your own recordings):", _styleTitle);
-            y += 26;
+            DrawBlockHeader("VOICE LINES (YOUR OWN RECORDINGS)", ref y);
             if (_win.Button(new Rect(15, y, 190, 26), "Add Voice Trigger Here")) _c.AddVoiceTriggerHere();
             GUI.Label(new Rect(212, y + 5, 120, 20), $"{_c.VoiceTriggers.Count} placed", _styleSmall);
             if (_win.Button(new Rect(340, y, 190, 26), "Rescan Audio Folder")) _c.RescanVoiceLibrary();
@@ -778,70 +880,9 @@ namespace FIHMapEditor
             GUI.Label(new Rect(15, y, W - 30, 20), _c.OwnsCurrentMap
                 ? "ogg/mp3/wav/flac in BepInEx/plugins/FIHMapEditor/Audio; plays when a player walks in."
                 : "Only this map's owner can add or edit voice lines.", _styleSmall);
-            y += 26;
+            y += 30;
 
-            GUI.Label(new Rect(15, y, 300, 22), "Map base:", _styleTitle);
-            y += 26;
-            if (_win.ToggleButton(new Rect(15, y, 200, 26), "Original level (Overlay)", _c.BaseMode == MapBaseMode.Overlay))
-                _c.SetBaseMode(MapBaseMode.Overlay);
-            GUI.backgroundColor = _c.BaseMode == MapBaseMode.Blank ? Color.red : new Color(0.8f, 0.4f, 0.3f);
-            if (_win.Button(new Rect(220, y, 200, 26),
-                _c.BaseMode == MapBaseMode.Blank ? "Level wiped ✓" : "Wipe Level (clean space)"))
-                _c.WipeLevelGeometry();
-            GUI.backgroundColor = Color.white;
-            y += 40;
-
-            GUI.Label(new Rect(15, y, 300, 22), "Actions:", _styleTitle);
-            y += 26;
-            GUI.backgroundColor = new Color(0.3f, 0.8f, 0.4f);
-            if (_win.Button(new Rect(15, y, 200, 30), $"► Enter PLAY mode ({EditorConfig.Settings.TogglePlayKey})"))
-                _c.SetMode(EditorMode.Play);
-            GUI.backgroundColor = Color.white;
-
-            bool confirming = Time.unscaledTime < _wipeConfirmUntil;
-            GUI.backgroundColor = confirming ? Color.red : new Color(0.8f, 0.4f, 0.3f);
-            if (_win.Button(new Rect(230, y, 200, 30), confirming ? "SURE? (click again)" : "Wipe Custom Objects"))
-            {
-                if (confirming) { _c.WipeCustomObjects(); _wipeConfirmUntil = 0f; }
-                else _wipeConfirmUntil = Time.unscaledTime + 3f;
-            }
-            GUI.backgroundColor = Color.white;
-
-            if (_c.LevelEdits.Count > 0)
-            {
-                bool confirmingEdits = Time.unscaledTime < _revertEditsConfirmUntil;
-                GUI.backgroundColor = confirmingEdits ? Color.red : new Color(0.8f, 0.6f, 0.3f);
-                if (_win.Button(new Rect(445, y, 200, 30),
-                    confirmingEdits ? "SURE? (click again)" : $"Revert Level Edits ({_c.LevelEdits.Count})"))
-                {
-                    if (confirmingEdits) { _c.RestoreAllLevelEdits(); _revertEditsConfirmUntil = 0f; }
-                    else _revertEditsConfirmUntil = Time.unscaledTime + 3f;
-                }
-                GUI.backgroundColor = Color.white;
-            }
-            y += 44;
-
-            // Co-edit: always-on full-map sync over Steam P2P with other modded players
-            // in the lobby. No switch — it activates itself the moment a modded peer is
-            // detected; this block is purely informative (plus a manual resend).
-            GUI.Label(new Rect(15, y, 300, 22), "Co-edit (multiplayer, automatic):", _styleTitle);
-            y += 26;
-            GUI.color = _c.Multiplayer.PeerCount > 0 ? new Color(0.5f, 1f, 0.6f) : Color.white;
-            GUI.Label(new Rect(15, y + 5, 465, 20), _c.Multiplayer.StatusLine, _styleSmall);
-            GUI.color = Color.white;
-            if (_win.Button(new Rect(490, y, 130, 26), "Send map now"))
-                _c.Multiplayer.ForceBroadcast();
-            y += 28;
-            if (_c.Multiplayer.LastSyncInfo != "")
-            {
-                GUI.Label(new Rect(15, y, W - 30, 20), $"last sync: {_c.Multiplayer.LastSyncInfo}", _styleSmall);
-                y += 22;
-            }
-            y += 4;
-
-            // Soccer mode — at the very bottom of the tab, as its own section.
-            GUI.Label(new Rect(15, y, 400, 22), "⚽ Soccer (ball + goals + scoreboard):", _styleTitle);
-            y += 26;
+            DrawBlockHeader("SOCCER (BALL + GOALS + SCOREBOARD)", ref y);
             if (_win.Button(new Rect(15, y, 165, 26), _c.Ball != null ? "Move Ball Here" : "Place Ball Here"))
                 _c.PlaceBallHere();
             GUI.backgroundColor = new Color(0.3f, 0.6f, 1f);
@@ -858,13 +899,147 @@ namespace FIHMapEditor
                 $"{(_c.Scoreboard != null ? ", scoreboard placed" : "")}. Ball in a goal scores for the other team;\n" +
                 "the 3D scoreboard shows blue - red and is moved/rotated/scaled with the gizmo.",
                 _styleSmall);
-            y += 40;
+            y += 44;
 
             GUI.Label(new Rect(15, y, W - 30, 60),
                 "Play: R / pad X = retry from last coin; Shift+R / LB+X = full restart.\n" +
                 "Checkpoint rings set your respawn; reset triggers (invisible in play) send\n" +
-                "you back. Co-edit: everyone with the mod edits, the last change wins.",
+                "you back.",
                 _styleSmall);
+        }
+
+        // ───────────────────────────────────────────────────────────── LEVEL ──
+
+        private void DrawLevelTab()
+        {
+            float y = ContentY;
+
+            DrawBlockHeader("EDITING THE LEVEL'S OWN OBJECTS", ref y);
+            DrawPickToggles(ref y);
+            GUI.Label(new Rect(15, y, W - 30, 40),
+                "Unlock ON: clicks select the level's own pieces, which then move, rotate, scale\n" +
+                "or hide like placed objects. Every change is saved with the map and revertible.",
+                _styleSmall);
+            y += 44;
+
+            if (_c.LevelEdits.Count > 0)
+            {
+                bool confirmingEdits = Time.unscaledTime < _revertEditsConfirmUntil;
+                GUI.backgroundColor = confirmingEdits ? Color.red : new Color(0.8f, 0.6f, 0.3f);
+                if (_win.Button(new Rect(15, y, 230, 28),
+                    confirmingEdits ? "SURE? (click again)" : $"Revert Level Edits ({_c.LevelEdits.Count})"))
+                {
+                    if (confirmingEdits) { _c.RestoreAllLevelEdits(); _revertEditsConfirmUntil = 0f; }
+                    else _revertEditsConfirmUntil = Time.unscaledTime + 3f;
+                }
+                GUI.backgroundColor = Color.white;
+                GUI.Label(new Rect(255, y + 6, 400, 20), "Objects lists every edit with its own Revert.", _styleSmall);
+            }
+            else
+            {
+                GUI.Label(new Rect(15, y + 6, W - 30, 20), "No level edits in this map.", _styleSmall);
+            }
+            y += 40;
+
+            DrawBlockHeader("MAP BASE", ref y);
+            if (_win.ToggleButton(new Rect(15, y, 200, 26), "Original level (Overlay)", _c.BaseMode == MapBaseMode.Overlay))
+                _c.SetBaseMode(MapBaseMode.Overlay);
+            GUI.backgroundColor = _c.BaseMode == MapBaseMode.Blank ? Color.red : new Color(0.8f, 0.4f, 0.3f);
+            if (_win.Button(new Rect(220, y, 200, 26),
+                _c.BaseMode == MapBaseMode.Blank ? "Level wiped ✓" : "Wipe Level (clean space)"))
+                _c.WipeLevelGeometry();
+            GUI.backgroundColor = Color.white;
+            y += 32;
+            GUI.Label(new Rect(15, y, W - 30, 40),
+                "Wipe hides the whole level (nothing is deleted) so the map is built from scratch;\n" +
+                "Overlay brings it back.",
+                _styleSmall);
+        }
+
+        // Pick/visibility toggles: in Selection, where they are used, and in Level.
+        private void DrawPickToggles(ref float y)
+        {
+            if (_win.ToggleButton(new Rect(15, y, 150, 24), $"Unlock: {(_c.UnlockOriginals ? "ON" : "OFF")}", _c.UnlockOriginals))
+                _c.UnlockOriginals = !_c.UnlockOriginals;
+            // OFF = clicks ignore triggers and renderless colliders (kill zones, invisible
+            // walls) so you always pick what you actually see.
+            if (_win.ToggleButton(new Rect(170, y, 170, 24), $"Pick invisible: {(_c.PickInvisible ? "ON" : "OFF")}", _c.PickInvisible))
+                _c.PickInvisible = !_c.PickInvisible;
+            // X-ray: wireframes on trigger zones / invisible walls (magenta = trigger,
+            // white = solid). Pairs naturally with "Pick invisible".
+            if (_win.ToggleButton(new Rect(345, y, 170, 24), $"Show invisible: {(_c.Xray.Enabled ? "ON" : "OFF")}", _c.Xray.Enabled))
+            {
+                _c.Xray.SetEnabled(!_c.Xray.Enabled);
+                if (_c.Xray.Enabled)
+                    _c.ShowToast($"X-ray: {_c.Xray.Count} invisible objects (magenta = trigger, white = solid). " +
+                                 (_c.PickInvisible ? "" : "Turn 'Pick invisible' ON to click them."));
+            }
+            y += 30;
+        }
+
+        // ─────────────────────────────────────────────────────── MULTIPLAYER ──
+
+        private void DrawMultiplayerTab()
+        {
+            float y = ContentY;
+
+            // Co-edit: always-on full-map sync over Steam P2P with other modded players
+            // in the lobby. No switch — it activates itself the moment a modded peer is
+            // detected; this block is purely informative (plus a manual resend).
+            DrawBlockHeader("CO-EDIT (AUTOMATIC)", ref y);
+            GUI.color = _c.Multiplayer.PeerCount > 0 ? new Color(0.5f, 1f, 0.6f) : Color.white;
+            GUI.Label(new Rect(15, y + 5, 465, 20), _c.Multiplayer.StatusLine, _styleSmall);
+            GUI.color = Color.white;
+            if (_win.Button(new Rect(490, y, 130, 26), "Send map now"))
+                _c.Multiplayer.ForceBroadcast();
+            y += 30;
+            if (_c.Multiplayer.LastSyncInfo != "")
+            {
+                GUI.Label(new Rect(15, y, W - 30, 20), $"last sync: {_c.Multiplayer.LastSyncInfo}", _styleSmall);
+                y += 22;
+            }
+            GUI.Label(new Rect(15, y, W - 30, 40),
+                "Everyone with the mod edits the same map; the last change to an object wins.\n" +
+                "Pads and cannons are spawned by the host for every player.",
+                _styleSmall);
+            y += 48;
+
+            DrawBlockHeader("PLAYERS", ref y);
+            DrawPlayerTeleports(ref y);
+        }
+
+        // Listing the session's players allocates on the game side; IMGUI draws several
+        // times per frame, so the list is refreshed once a second.
+        private List<(string Name, Transform Body)> _players = new List<(string, Transform)>();
+        private float _playersRefreshAt;
+
+        private void DrawPlayerTeleports(ref float y)
+        {
+            if (Time.unscaledTime >= _playersRefreshAt)
+            {
+                _players = _c.OtherPlayers();
+                _playersRefreshAt = Time.unscaledTime + 1f;
+            }
+            if (_players.Count == 0)
+            {
+                GUI.Label(new Rect(15, y + 5, W - 30, 20), "No other players in this session.", _styleSmall);
+                y += 28;
+                return;
+            }
+            GUI.Label(new Rect(15, y, W - 30, 20), "Click a player to teleport next to them:", _styleSmall);
+            y += 24;
+            float x = 15;
+            foreach (var (name, body) in _players)
+            {
+                if (x + 155 > W - 15)
+                {
+                    x = 15;
+                    y += 30;
+                }
+                if (_win.Button(new Rect(x, y, 150, 26), Truncate(name, 16))) _c.TeleportToPlayer(name, body);
+                x += 155;
+            }
+            y += 30;
         }
 
         // ───────────────────────────────────────────────────────────── LIST ──
@@ -899,7 +1074,7 @@ namespace FIHMapEditor
             y += 30;
 
             var listRect = new Rect(10, y, W - 20, LIST_ROWS * 26 + 4);
-            GUI.Box(listRect, "");
+            GuiTheme.Fill(listRect, GuiTheme.Panel);
 
             int total = placed.Count + edits.Count;
             float scroll = _win.ScrollDeltaOver(listRect);
@@ -1017,6 +1192,22 @@ namespace FIHMapEditor
                 "Maps are .fihmap.json files — share them by copying the file.\n" +
                 "To play someone else's map: copy it into the Maps folder and load it\n" +
                 "from the Maps Hub.", _styleSmall);
+            y += 66;
+
+            DrawBlockHeader("ACTIONS", ref y);
+            GUI.backgroundColor = new Color(0.3f, 0.8f, 0.4f);
+            if (_win.Button(new Rect(15, y, 220, 30), $"► Enter PLAY mode ({EditorConfig.Settings.TogglePlayKey})"))
+                _c.SetMode(EditorMode.Play);
+            GUI.backgroundColor = Color.white;
+
+            bool confirming = Time.unscaledTime < _wipeConfirmUntil;
+            GUI.backgroundColor = confirming ? Color.red : new Color(0.8f, 0.4f, 0.3f);
+            if (_win.Button(new Rect(245, y, 220, 30), confirming ? "SURE? (click again)" : "Wipe Custom Objects"))
+            {
+                if (confirming) { _c.WipeCustomObjects(); _wipeConfirmUntil = 0f; }
+                else _wipeConfirmUntil = Time.unscaledTime + 3f;
+            }
+            GUI.backgroundColor = Color.white;
         }
 
         private bool AnyGroupedInMulti()
@@ -1054,10 +1245,7 @@ namespace FIHMapEditor
             px += 86;
             if (TryParseHexColor(_colorHexField, out var previewColor))
             {
-                var prevBg = GUI.backgroundColor;
-                GUI.backgroundColor = previewColor;
-                GUI.Box(new Rect(px, y, 24, 24), "");
-                GUI.backgroundColor = prevBg;
+                GuiTheme.Outlined(new Rect(px, y, 24, 24), previewColor, new Color(1f, 1f, 1f, 0.3f));
             }
             px += 30;
             if (_win.Button(new Rect(px, y, 60, 24), "Apply") && hasTarget)
@@ -1510,7 +1698,7 @@ namespace FIHMapEditor
             y += 22;
 
             var listRect = new Rect(10, y, W - 20, TIMES_ROWS * 26 + 4);
-            GUI.Box(listRect, "");
+            GuiTheme.Fill(listRect, GuiTheme.Panel);
 
             float scroll = _win.ScrollDeltaOver(listRect);
             if (scroll != 0)
@@ -1532,9 +1720,7 @@ namespace FIHMapEditor
                 bool isSelf = self != 0 && e.SteamId == self;
                 if (isSelf)
                 {
-                    GUI.backgroundColor = new Color(0.2f, 0.75f, 0.35f);
-                    GUI.Box(new Rect(14, ry - 1, W - 28, 24), "");
-                    GUI.backgroundColor = Color.white;
+                    GuiTheme.Fill(new Rect(14, ry - 1, W - 28, 24), GuiTheme.AccentSoft);
                 }
                 GUI.Label(new Rect(20, ry, 50, 22), $"#{i + 1}", _styleRow);
                 GUI.Label(new Rect(70, ry, 390, 22), Truncate(e.PlayerName ?? "player", 30), _styleRow);
@@ -1553,12 +1739,13 @@ namespace FIHMapEditor
         private void DrawFooter()
         {
             float y = H - 30;
-            GUI.Box(new Rect(0, y - 4, W, 34), "");
+            GuiWindowHelper.FillRect(new Rect(1, y - 5, TOTAL_W - 2, 1), GuiTheme.Line);
+            GuiTheme.Fill(new Rect(1, y - 4, TOTAL_W - 2, FOOTER_H + 3), GuiTheme.Panel);
             string dirty = _c.Dirty ? " ●" : "";
-            GUI.Label(new Rect(15, y, W - 30, 22),
+            GUI.Label(new Rect(15, y, TOTAL_W - 30, 22),
                 $"Map: \"{Truncate(_c.MapName, 24)}\"{dirty}   Objects: {_c.PlacedManager.Count}   Base: {_c.BaseMode}" +
                 (_c.LoadReport != "" ? $"   [{_c.LoadReport}]" : ""),
-                _styleRow);
+                _styleFooter);
         }
 
         private static string FmtVec(float[] v) => v == null ? "?" : $"({v[0]:0.#}, {v[1]:0.#}, {v[2]:0.#})";

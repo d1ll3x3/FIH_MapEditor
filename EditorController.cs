@@ -519,6 +519,10 @@ namespace FIHMapEditor
             PlacedManager.WipeAll();
             Mode = EditorMode.Off;
             Mechanics.ResetState();
+            // Leaving with the editor open used to keep fly "active": a player body that
+            // survives the scene change stayed kinematic without collisions, and the next
+            // F6 skipped Fly.Enter. Before Finder.ClearCache: Exit uses the cached body.
+            Fly.Exit();
             Multiplayer.OnSceneLeft();
             PlayMode.Exit();
             _timesViewer?.Close();
@@ -4142,10 +4146,55 @@ namespace FIHMapEditor
             if (bounds.size == Vector3.zero) return;
 
             Vector3 pos = bounds.center + Vector3.up * (bounds.extents.y + 1.5f);
-            var rb = Finder.GetCachedPlayerRigidbody();
-            var t = Finder.FindPlayerTransform();
-            if (rb != null) rb.position = pos;
-            if (t != null) t.position = pos;
+            // Through the shared teleport: a bare position write was undone on clients.
+            var cam = Finder.FindCameraTransform();
+            PlayMode.TeleportToPosition(pos, cam != null ? cam.eulerAngles.y : 0f);
+        }
+
+        // Everyone else in the session (host or client view), with the body to teleport to.
+        public List<(string Name, Transform Body)> OtherPlayers()
+        {
+            var players = new List<(string, Transform)>();
+            try
+            {
+                var connected = EHS.PlayerRef.GetConnectedPlayersClientSnapshot();
+                for (int i = 0; connected != null && i < connected.Count; i++)
+                {
+                    var player = connected[i];
+                    if (player == null || EHS.PlayerRef.IsLocalPlayer(player)) continue;
+                    var networked = player.PlayerNetworked;
+                    if (networked == null) continue;
+                    string name = networked.NicknameSyncVar?.Value;
+                    players.Add((string.IsNullOrWhiteSpace(name) ? $"Player {i + 1}" : name, networked.transform));
+                }
+            }
+            catch (Exception ex)
+            {
+                if (!_playerListWarned)
+                {
+                    _playerListWarned = true;
+                    MapEditorPlugin.Logger.LogWarning($"[PLAYERS] Could not list lobby players: {ex.Message}");
+                }
+            }
+            return players;
+        }
+
+        private bool _playerListWarned;
+
+        // Editor only: during a Play run it would be a shortcut through the course.
+        public void TeleportToPlayer(string name, Transform body)
+        {
+            if (Mode != EditorMode.Editor) return;
+            if (body == null)
+            {
+                ShowToast($"{name} is no longer in the session");
+                return;
+            }
+            // Just above them, so the two bodies don't overlap on arrival.
+            var cam = Finder.FindCameraTransform();
+            float yaw = cam != null ? cam.eulerAngles.y : 0f;
+            PlayMode.TeleportToPosition(body.position + Vector3.up * 1.5f, yaw);
+            ShowToast($"Teleported to {name}");
         }
 
         public void BringSelectedHere()

@@ -64,7 +64,7 @@ namespace FIHMapEditor
         {
             if (_stylesReady) return;
             _styleTitle = new GUIStyle { fontSize = 16, fontStyle = FontStyle.Bold };
-            _styleTitle.normal.textColor = new Color(0.5f, 0.85f, 1f);
+            _styleTitle.normal.textColor = GuiTheme.Text;
             _styleRow = new GUIStyle { fontSize = 14, alignment = TextAnchor.MiddleLeft };
             _styleRow.normal.textColor = Color.white;
             _styleSmall = new GUIStyle { fontSize = 13 };
@@ -86,23 +86,15 @@ namespace FIHMapEditor
             if (!Mathf.Approximately(scale, 1f))
                 GUIUtility.ScaleAroundPivot(Vector2.one * scale, _win.WindowRect.position);
 
-            GUI.backgroundColor = new Color(0.1f, 0.12f, 0.18f, 0.98f);
-            _win.WindowRect = GUI.Window(WINDOW_ID, _win.WindowRect, _windowDelegate, "LEADERBOARD");
-            GUI.backgroundColor = Color.white;
+            _win.WindowRect = GUI.Window(WINDOW_ID, _win.WindowRect, _windowDelegate, "", GuiTheme.WindowStyle);
 
             GUI.matrix = prevMatrix;
         }
 
         private void WindowFunction(int id)
         {
-            var prevBg = GUI.backgroundColor;
-            GUI.backgroundColor = new Color(0.09f, 0.11f, 0.16f, 1f);
-            GUI.Box(new Rect(0, 20, W, H - 20), "");
-            GUI.Box(new Rect(0, 20, W, H - 20), "");
-            GUI.backgroundColor = prevBg;
+            GuiTheme.WindowFrame(W, H, "LEADERBOARD");
 
-            GUI.skin.box.fontSize = 14;
-            GUI.skin.box.normal.textColor = Color.white;
 
             GUI.backgroundColor = Color.red;
             if (_win.Button(new Rect(W - 40, 4, 32, 22), "X")) Close();
@@ -135,7 +127,7 @@ namespace FIHMapEditor
                 y += 22;
 
                 var listRect = new Rect(10, y, W - 20, ROWS * 26 + 4);
-                GUI.Box(listRect, "");
+                GuiTheme.Fill(listRect, GuiTheme.Panel);
 
                 float scroll = _win.ScrollDeltaOver(listRect);
                 if (scroll != 0)
@@ -156,9 +148,7 @@ namespace FIHMapEditor
                     var e = entries[i];
                     if (self != 0 && e.SteamId == self)
                     {
-                        GUI.backgroundColor = new Color(0.2f, 0.75f, 0.35f);
-                        GUI.Box(new Rect(14, ry - 1, W - 28, 24), "");
-                        GUI.backgroundColor = Color.white;
+                        GuiTheme.Fill(new Rect(14, ry - 1, W - 28, 24), GuiTheme.AccentSoft);
                     }
                     GUI.Label(new Rect(20, ry, 45, 22), $"#{i + 1}", _styleRow);
                     GUI.Label(new Rect(65, ry, 315, 22), Truncate(e.PlayerName ?? "player", 26), _styleRow);

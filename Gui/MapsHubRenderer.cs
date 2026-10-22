@@ -104,23 +104,15 @@ namespace FIHMapEditor
             if (!Mathf.Approximately(scale, 1f))
                 GUIUtility.ScaleAroundPivot(Vector2.one * scale, _win.WindowRect.position);
 
-            GUI.backgroundColor = new Color(0.1f, 0.12f, 0.18f, 0.98f);
-            _win.WindowRect = GUI.Window(WINDOW_ID, _win.WindowRect, _windowDelegate, "MAPS HUB");
-            GUI.backgroundColor = Color.white;
+            _win.WindowRect = GUI.Window(WINDOW_ID, _win.WindowRect, _windowDelegate, "", GuiTheme.WindowStyle);
 
             GUI.matrix = prevMatrix;
         }
 
         private void WindowFunction(int id)
         {
-            var prevBg = GUI.backgroundColor;
-            GUI.backgroundColor = new Color(0.09f, 0.11f, 0.16f, 1f);
-            GUI.Box(new Rect(0, 20, W, H - 20), "");
-            GUI.Box(new Rect(0, 20, W, H - 20), "");
-            GUI.backgroundColor = prevBg;
+            GuiTheme.WindowFrame(W, H, "MAPS HUB");
 
-            GUI.skin.box.fontSize = 14;
-            GUI.skin.box.normal.textColor = Color.white;
 
             GUI.backgroundColor = Color.red;
             if (_win.Button(new Rect(W - 40, 4, 32, 22), "X")) Close();
@@ -164,7 +156,7 @@ namespace FIHMapEditor
         private void DrawLocalList(float y)
         {
             var listRect = new Rect(10, y, W - 20, ROWS * 44 + 4);
-            GUI.Box(listRect, "");
+            GuiTheme.Fill(listRect, GuiTheme.Panel);
 
             float scroll = _win.ScrollDeltaOver(listRect);
             if (scroll != 0)
@@ -251,7 +243,7 @@ namespace FIHMapEditor
         {
             var maps = _c.OnlineMaps.Maps;
             var listRect = new Rect(10, y, W - 20, ROWS * 44 + 4);
-            GUI.Box(listRect, "");
+            GuiTheme.Fill(listRect, GuiTheme.Panel);
 
             float scroll = _win.ScrollDeltaOver(listRect);
             if (scroll != 0)

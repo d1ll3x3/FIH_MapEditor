@@ -82,14 +82,16 @@ namespace FIHMapEditor
             GUI.matrix = prevMatrix;
         }
 
+        // Translucent dark panel behind HUD text: readable over the level, not a block.
+        private static readonly Color HudPanel = new Color(0.06f, 0.065f, 0.085f, 0.82f);
+
         // "[E] Launch cannon" while standing next to one of our cannons.
         private void DrawInteractPrompt()
         {
             string prompt = _c.Mechanics?.InteractPrompt;
             if (string.IsNullOrEmpty(prompt)) return;
             var rect = new Rect(Screen.width / 2f - 120, Screen.height * 0.62f, 240, 26);
-            GUI.Box(rect, "");
-            GUI.Box(rect, "");
+            GuiTheme.Fill(rect, HudPanel);
             GUI.Label(rect, prompt, _styleToast);
         }
 
@@ -100,8 +102,7 @@ namespace FIHMapEditor
             try { w = _styleBanner.CalcSize(new GUIContent(text)).x + 36f; }
             catch { w = text.Length * 9f + 36f; }
             var rect = new Rect(Screen.width / 2f - w / 2f, 8, w, 30);
-            GUI.Box(rect, "");
-            GUI.Box(rect, "");   // second pass: the box texture is translucent
+            GuiTheme.Fill(rect, HudPanel);
             GUI.Label(rect, text, _styleBanner);
         }
 
@@ -150,7 +151,7 @@ namespace FIHMapEditor
             if (pm.Timer != TimerState.Idle)
             {
                 var timerRect = new Rect(Screen.width / 2f - 130, clean ? 12 : 42, 260, 40);
-                GUI.Box(timerRect, "");
+                GuiTheme.Fill(timerRect, HudPanel);
 
                 string text = pm.Timer switch
                 {
@@ -211,10 +212,9 @@ namespace FIHMapEditor
             float w = 480, h = overwrite ? 100 : 76;
             var rect = new Rect(Screen.width / 2f - w / 2f, 130, w, h);
 
-            GUI.backgroundColor = overwrite ? new Color(0.45f, 0.18f, 0.14f, 0.96f) : new Color(0.12f, 0.32f, 0.18f, 0.96f);
-            GUI.Box(rect, "");
-            GUI.Box(rect, "");
-            GUI.backgroundColor = Color.white;
+            GuiTheme.Outlined(rect,
+                overwrite ? new Color(0.3f, 0.12f, 0.1f, 0.97f) : new Color(0.08f, 0.22f, 0.13f, 0.97f),
+                overwrite ? GuiTheme.Danger : GuiTheme.Success);
 
             string line1 = overwrite
                 ? $"Not a new best (best: {PlayModeController.FormatTime(pm.BestTime ?? pm.PendingUploadSeconds)}). Upload {time} anyway?"
@@ -249,7 +249,11 @@ namespace FIHMapEditor
 
         private bool HudButton(Rect rect, string text)
         {
-            GUI.Box(rect, text);
+            var tint = GUI.backgroundColor;
+            GuiTheme.Fill(rect, rect.Contains(CompensatedMouse())
+                ? Color.Lerp(new Color(tint.r, tint.g, tint.b, 1f), Color.white, 0.1f)
+                : new Color(tint.r, tint.g, tint.b, 1f));
+            GUI.Label(rect, text, GuiTheme.ButtonText);
             if (_clickHandledThisFrame) return false;
             if (Input.GetMouseButtonDown(0) && Event.current.type == EventType.Repaint
                 && rect.Contains(CompensatedMouse()))
@@ -266,8 +270,8 @@ namespace FIHMapEditor
             if (string.IsNullOrEmpty(toast)) return;
 
             float w = Mathf.Max(300, toast.Length * 8f);
-            var rect = new Rect(Screen.width / 2f - w / 2f, Screen.height - 70, w, 26);
-            GUI.Box(rect, "");
+            var rect = new Rect(Screen.width / 2f - w / 2f, Screen.height - 70, w, 28);
+            GuiTheme.Outlined(rect, HudPanel, GuiTheme.AccentSoft);
             GUI.Label(rect, toast, _styleToast);
         }
     }

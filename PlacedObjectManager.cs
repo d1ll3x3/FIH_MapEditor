@@ -192,6 +192,9 @@ namespace FIHMapEditor
         {
             _placed.Clear();
             _byRootId.Clear();
+            // FishNet reuses ObjectIds in the next scene: a stale id would adopt some
+            // unrelated network object as a placed replica.
+            _remoteNetIds.Clear();
             _mapRoot = null;
         }
 
@@ -512,13 +515,18 @@ namespace FIHMapEditor
                 spawner.spawnOnEnable = false;
                 NetworkMechanics.ConfigureSpawner(spawner, placed);
 
-                // Same order as NetworkSpawnerPoint.SpawnAssetServer. The catalog names
-                // the exact prefab variant, which the spawner's AssetReference cannot.
+                // Same order as NetworkSpawnerPoint.SpawnAssetServer: instantiate, set the
+                // object's data, THEN spawn, so the data rides in the spawn message.
+                // Initialising after Spawn left clients with an empty data SyncVar: the
+                // cannon's launch routine then switches the player's collisions off and
+                // bails out before launching or switching them back on (host unaffected,
+                // it has the value locally). The catalog names the exact prefab variant,
+                // which the spawner's AssetReference cannot.
                 nob = UnityEngine.Object.Instantiate(prefab, position, rotation);
                 nob.transform.localScale = scale;
-                server.Spawn(nob.gameObject, null, SceneManager.GetActiveScene());
                 spawner.nob = nob;
                 spawner.InitializeNobServer(refs);
+                server.Spawn(nob.gameObject, null, SceneManager.GetActiveScene());
                 spawnerRoot.SetActive(true);
 
                 nob.gameObject.name = $"{ObjectCatalog.CleanName(placed.SourceName)} {ObjectCatalog.CLONE_MARKER}";
@@ -581,8 +589,7 @@ namespace FIHMapEditor
                 p.Replica = nob;
                 p.HasCollider = p.Root.GetComponentInChildren<Collider>(true) != null;
                 ApplyPlacementColor(p, p.Tint, null);
-                if (EditorConfig.VerboseLogs)
-                    MapEditorPlugin.Logger.LogInfo($"[NETPLACE] Adopted replica {objectId} for '{p.SourceName}'.");
+                MapEditorPlugin.Logger.LogInfo($"[NETPLACE] Adopted replica {objectId} for '{p.SourceName}'.");
             }
         }
 
