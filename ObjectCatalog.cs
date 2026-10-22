@@ -21,6 +21,8 @@ namespace FIHMapEditor
         public Vector3 BoundsSize;
         public GameObject Source;     // live reference; re-resolved by path when destroyed
         public bool HasCollider;      // false = pure decoration (SM meshes, VFX...)
+        // Source already inspected for a game mechanic (scans skip it until it changes).
+        public GameObject MechanicCheckedSource;
     }
 
     // A collider-less scene object: physics raycasts can't hit it, so clicking it is
@@ -260,6 +262,8 @@ namespace FIHMapEditor
             Categories.Clear();
             ColliderlessRoots.Clear();
             _seen.Clear();
+            _scanRoutine = null;
+            _scanFinished = null;
             HasScanned = false;
             // Also reset the first-scan latch so the next scene gets its own
             // community pull (instead of inheriting "we already pulled this
@@ -272,23 +276,87 @@ namespace FIHMapEditor
         public int LastScanColliderCount { get; private set; } = -1;
         public float LastScanTime { get; private set; } = -999f;
 
+        // A full sweep visits thousands of objects in the release game's levels, which
+        // froze the game for whole seconds. Background scans run a few milliseconds per
+        // frame instead; Scan() still finishes synchronously for callers that need the
+        // result right away (map loads, the manual Rescan).
+        private IEnumerator<bool> _scanRoutine;
+        private Action<int> _scanFinished;
+        private const double SCAN_FRAME_BUDGET_MS = 4.0;
+        public bool IsScanning => _scanRoutine != null;
+
         // collectAudit builds the skip-reason trail (BuildPath for every skipped root —
         // thousands of string builds). Only the manual Rescan wants that; automatic
         // scans must stay as light as possible (they already caused editor stutter).
         public void Scan(bool collectAudit = false)
         {
+            // A background scan in flight is finished first: it already is a full sweep.
+            if (_scanRoutine != null)
+            {
+                StepScan(double.MaxValue);
+                if (!collectAudit) return;
+            }
+            _scanRoutine = ScanRoutine(collectAudit);
+            StepScan(double.MaxValue);
+        }
+
+        // Starts a background scan (no-op while one runs). onFinished gets the number of
+        // entries the scan added.
+        public void BeginScan(Action<int> onFinished = null)
+        {
+            if (_scanRoutine != null) return;
+            _scanFinished = onFinished;
+            _scanRoutine = ScanRoutine(false);
+        }
+
+        // Called every frame by EditorController.
+        public void UpdateScan()
+        {
+            if (_scanRoutine != null) StepScan(SCAN_FRAME_BUDGET_MS);
+        }
+
+        private void StepScan(double budgetMs)
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                while (clock.Elapsed.TotalMilliseconds < budgetMs)
+                {
+                    if (_scanRoutine.MoveNext()) continue;
+                    _scanRoutine = null;
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                _scanRoutine = null;
+                _scanFinished = null;
+                MapEditorPlugin.Logger.LogError($"[CATALOG] Scan error: {ex}");
+            }
+        }
+
+        // One sweep of every source. Yields once per visited object so StepScan can stop
+        // on its frame budget; Categories and ColliderlessRoots are only swapped in at
+        // the end, so the GUI and click-picking never see a half-built state.
+        private IEnumerator<bool> ScanRoutine(bool collectAudit)
+        {
+            // Wall time includes the frames between slices; the work itself is in the
+            // per-phase sums below.
+            var phase = new System.Diagnostics.Stopwatch();
+
             // First scan of this scene session: seed with everything previous sessions
             // ever found, so the catalog starts complete instead of re-discovering.
-            if (!HasScanned && Entries.Count == 0) LoadCache();
+            if (!HasScanned && Entries.Count == 0)
+            {
+                LoadCache();
+                // Show the cached entries while the sweep runs in the background.
+                ScanVersion++;
+            }
 
-            // Additive: keep everything already found. Decor instances are rebuilt (the
-            // live objects may have despawned); categories are re-derived at the end.
-            Categories.Clear();
-            ColliderlessRoots.Clear();
             if (collectAudit) _auditSkip.Clear();
-            ScanVersion++;
             LastScanTime = Time.unscaledTime;
             int entriesBefore = Entries.Count;
+            var colliderless = new List<DecorPickable>();
 
             // Snapshot the keys we already know so we can identify the new ones
             // after the scan for the cloud-push hook. Cheap (one HashSet copy).
@@ -302,274 +370,380 @@ namespace FIHMapEditor
                 sceneName = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
             }
 
-            try
+            var playerRoot = _finder.FindPlayer()?.transform?.root;
+            var seen = _seen; // dedupe key → entry, persistent across rescans
+            var visitedRoots = new HashSet<int>();
+            var wrapperCache = new Dictionary<int, int>();     // transform id → renderable child count
+
+            phase.Start();
+            var colliders = UnityEngine.Object.FindObjectsOfType<Collider>();
+            LastScanColliderCount = colliders.Length;
+            phase.Stop();
+            foreach (var col in colliders)
             {
-                var playerRoot = _finder.FindPlayer()?.transform?.root;
-                var seen = _seen; // dedupe key → entry, persistent across rescans
-                var visitedRoots = new HashSet<int>();
-                var wrapperCache = new Dictionary<int, int>();     // transform id → renderable child count
+                yield return true;
+                phase.Start();
+                ScanColliderRoot(col, playerRoot, seen, visitedRoots, wrapperCache, collectAudit);
+                phase.Stop();
+            }
+            double collidersMs = phase.Elapsed.TotalMilliseconds;
 
-                var colliders = UnityEngine.Object.FindObjectsOfType<Collider>();
-                LastScanColliderCount = colliders.Length;
-                foreach (var col in colliders)
+            // Renderer-only pass: pure decoration (no collider anywhere) never shows
+            // up in the collider sweep and physics raycasts can't select it. Catalog
+            // it here and remember each instance's AABB for bounds-based picking.
+            phase.Start();
+            var renderers = UnityEngine.Object.FindObjectsOfType<Renderer>();
+            phase.Stop();
+            foreach (var r in renderers)
+            {
+                yield return true;
+                phase.Start();
+                ScanRendererRoot(r, playerRoot, seen, visitedRoots, wrapperCache, colliderless, collectAudit);
+                phase.Stop();
+            }
+            double renderersMs = phase.Elapsed.TotalMilliseconds - collidersMs;
+
+            // The inactive, gameplay-object and prefab passes all need every loaded
+            // GameObject; one FindObjectsOfTypeAll serves the three of them.
+            var allObjects = new List<(GameObject go, bool inScene)>();
+            var passes = new[]
+            {
+                Guarded(CollectAllGameObjects(allObjects), "Object enumeration"),
+                Guarded(ScanInactiveSceneObjects(allObjects, seen, playerRoot), "Inactive-object scan"),
+                Guarded(ScanGameplayObjects(allObjects, seen, playerRoot), "Gameplay-object scan"),
+                Guarded(ScanAddressablesPass(seen), "Addressables scan"),
+                Guarded(ScanPrefabAssets(allObjects, seen), "Prefab-asset scan"),
+                Guarded(ScanMechanicsAssemblies(seen), "Mechanics-assembly scan"),
+            };
+            foreach (var pass in passes)
+            {
+                using var it = pass.GetEnumerator();
+                while (true)
                 {
-                    if (col == null) continue;
-                    var t = col.transform;
-                    if (t == null) continue;
-
-                    var root = FindCandidateRoot(t, wrapperCache);
-                    if (root == null) continue;
-                    if (!visitedRoots.Add(root.GetInstanceID())) continue;
-                    if (!IsValidCandidate(root, playerRoot, out string why))
-                    {
-                        if (collectAudit) _auditSkip.Add($"{why,-24} {BuildPath(root)}");
-                        continue;
-                    }
-
-                    // Nothing gets skipped for being invisible anymore: an object whose
-                    // renderers are disabled still measures via its meshes, and a pure
-                    // collider object (invisible wall, volume) measures via its
-                    // colliders and lands in the "Invisible" category.
-                    bool invisible = false;
-                    var bounds = ComputeBounds(root.gameObject);
-                    if (bounds.size == Vector3.zero)
-                        bounds = ComputeAssetBounds(root.gameObject);
-                    if (bounds.size == Vector3.zero)
-                    {
-                        bounds = MechanicsController.ComputeColliderBounds(root.gameObject);
-                        if (bounds.size == Vector3.zero)
-                        {
-                            if (collectAudit) _auditSkip.Add($"{"zero-bounds",-24} {BuildPath(root)}");
-                            continue; // truly nothing measurable
-                        }
-                        invisible = true;
-                    }
-
-                    string display = CleanName(root.name);
-                    string meshName = FirstMeshName(root.gameObject);
-                    string key = EntryKey(display, meshName, root.gameObject);
-
-                    if (seen.TryGetValue(key, out var dup))
-                    {
-                        UpgradeSourceIfBetter(dup, root.gameObject);
-                        if (collectAudit) _auditSkip.Add($"{$"dedup -> \"{dup.DisplayName}\"",-24} {BuildPath(root)}");
-                        continue;
-                    }
-
-                    var entry = new CatalogEntry
-                    {
-                        DisplayName = display,
-                        SourcePath = BuildPath(root),
-                        Source = root.gameObject,
-                        BoundsSize = bounds.size,
-                        Category = invisible ? "Invisible" : Categorize(display, bounds.size),
-                        HasCollider = true,
-                    };
-                    seen[key] = entry;
-                    Entries.Add(entry);
+                    phase.Start();
+                    bool more = it.MoveNext();
+                    phase.Stop();
+                    if (!more) break;
+                    yield return true;
                 }
+            }
+            phase.Start();
+            PruneFihNamedEntries();
 
-                // Renderer-only pass: pure decoration (no collider anywhere) never shows
-                // up in the collider sweep and physics raycasts can't select it. Catalog
-                // it here and remember each instance's AABB for bounds-based picking.
-                var renderers = UnityEngine.Object.FindObjectsOfType<Renderer>();
-                foreach (var r in renderers)
+            // The editor catalog is asset-backed once Addressables discovery has
+            // completed. Scene hierarchy scanning remains above only to support
+            // legacy source resolution/auditing during migration; those transient
+            // entries are not offered for new placement.
+            if (_addressableDiscoveryComplete)
+                PruneCatalogToAddressables();
+            phase.Stop();
+
+            // Interactables (boost pads, cannons...) get their own category so they
+            // are easy to find. Subtree-only check: assembly PIECES (visual mesh,
+            // trigger...) must not clutter Mechanics — the full assembly entry from
+            // ScanMechanicsAssemblies is the one to use. Each source is inspected once.
+            // A snapshot: a cloud pull may add entries between slices.
+            foreach (var e in Entries.ToArray())
+            {
+                if (NetworkMechanics.IsMechanicAssetName(e.DisplayName))
                 {
-                    if (r == null) continue;
-                    var t = r.transform;
-                    if (t == null) continue;
-
-                    var root = FindCandidateRoot(t, wrapperCache);
-                    if (root == null) continue;
-                    if (!visitedRoots.Add(root.GetInstanceID())) continue;
-                    if (!IsValidCandidate(root, playerRoot, out string why))
-                    {
-                        if (collectAudit) _auditSkip.Add($"{why,-24} {BuildPath(root)}");
-                        continue;
-                    }
-
-                    var bounds = ComputeBounds(root.gameObject);
-                    if (bounds.size == Vector3.zero)
-                    {
-                        if (collectAudit) _auditSkip.Add($"{"zero-bounds",-24} {BuildPath(root)}");
-                        continue;
-                    }
-
-                    bool hasCollider = root.GetComponentInChildren<Collider>(true) != null;
-                    if (!hasCollider)
-                        ColliderlessRoots.Add(new DecorPickable { Root = root.gameObject, Bounds = bounds });
-
-                    string display = CleanName(root.name);
-                    string key = EntryKey(display, FirstMeshName(root.gameObject), root.gameObject);
-                    if (seen.TryGetValue(key, out var dup))
-                    {
-                        UpgradeSourceIfBetter(dup, root.gameObject);
-                        if (collectAudit) _auditSkip.Add($"{$"dedup -> \"{dup.DisplayName}\"",-24} {BuildPath(root)}");
-                        continue;
-                    }
-
-                    seen[key] = new CatalogEntry
-                    {
-                        DisplayName = display,
-                        SourcePath = BuildPath(root),
-                        Source = root.gameObject,
-                        BoundsSize = bounds.size,
-                        Category = hasCollider ? Categorize(display, bounds.size) : "Decor",
-                        HasCollider = hasCollider,
-                    };
-                    Entries.Add(seen[key]);
+                    e.Category = "Mechanics";
+                    continue;
                 }
-
-                ScanInactiveSceneObjects(seen, playerRoot);
-                ScanGameplayObjects(seen, playerRoot);
-                ScanAddressableAssets(seen);
-                ScanPrefabAssets(seen);
-                ScanMechanicsAssemblies(seen);
-                PruneFihNamedEntries();
-
-                // The editor catalog is asset-backed once Addressables discovery has
-                // completed. Scene hierarchy scanning remains above only to support
-                // legacy source resolution/auditing during migration; those transient
-                // entries are not offered for new placement.
-                if (_addressableDiscoveryComplete)
-                    PruneCatalogToAddressables();
-
-                // Interactables (boost pads, cannons...) get their own category so they
-                // are easy to find. Subtree-only check: assembly PIECES (visual mesh,
-                // trigger...) must not clutter Mechanics — the full assembly entry from
-                // ScanMechanicsAssemblies is the one to use.
-                foreach (var e in Entries)
+                if (e.Source == null || e.MechanicCheckedSource == e.Source) continue;
+                yield return true;
+                phase.Start();
+                if (e.Source != null)
                 {
-                    if (NetworkMechanics.IsMechanicAssetName(e.DisplayName)
-                        || (e.Source != null && MechanicsDetector.DetectTypeInSubtree(e.Source) != MechanicType.None))
-                        e.Category = "Mechanics";
+                    e.MechanicCheckedSource = e.Source;
+                    if (HasMechanicComponent(e.Source)) e.Category = "Mechanics";
                 }
+                phase.Stop();
+            }
+            double otherMs = phase.Elapsed.TotalMilliseconds - collidersMs - renderersMs;
 
-                Entries.Sort((a, b) => string.CompareOrdinal(a.DisplayName, b.DisplayName));
+            phase.Start();
+            Entries.Sort((a, b) => string.CompareOrdinal(a.DisplayName, b.DisplayName));
 
-                foreach (var e in Entries)
-                    if (!Categories.Contains(e.Category)) Categories.Add(e.Category);
-                Categories.Sort();
+            Categories.Clear();
+            foreach (var e in Entries)
+                if (!Categories.Contains(e.Category)) Categories.Add(e.Category);
+            Categories.Sort();
+            ColliderlessRoots.Clear();
+            ColliderlessRoots.AddRange(colliderless);
+            ScanVersion++;
 
-                HasScanned = true;
-                var counts = new Dictionary<string, int>();
-                foreach (var e in Entries)
-                    counts[e.Category] = counts.TryGetValue(e.Category, out int n) ? n + 1 : 1;
-                var summary = new StringBuilder();
-                foreach (var cat in Categories)
-                    summary.Append($"{cat}: {counts[cat]}  ");
-                MapEditorPlugin.Logger.LogInfo(
-                    $"[CATALOG] Scan: {Entries.Count} unique objects (+{Entries.Count - entriesBefore} new, " +
-                    $"{colliders.Length} colliders examined). {summary}");
+            HasScanned = true;
+            var counts = new Dictionary<string, int>();
+            foreach (var e in Entries)
+                counts[e.Category] = counts.TryGetValue(e.Category, out int n) ? n + 1 : 1;
+            var summary = new StringBuilder();
+            foreach (var cat in Categories)
+                summary.Append($"{cat}: {counts[cat]}  ");
+            MapEditorPlugin.Logger.LogInfo(
+                $"[CATALOG] Scan: {Entries.Count} unique objects (+{Entries.Count - entriesBefore} new, " +
+                $"{colliders.Length} colliders examined). {summary}");
 
-                // Persist growth AND source upgrades (an upgraded path must replace the
-                // hidden-variant path stored by an earlier session).
-                if (Entries.Count != entriesBefore || _sourcesUpgraded)
+            // Persist growth AND source upgrades (an upgraded path must replace the
+            // hidden-variant path stored by an earlier session).
+            if (Entries.Count != entriesBefore || _sourcesUpgraded)
+            {
+                _sourcesUpgraded = false;
+                SaveCache();
+            }
+
+            // Cloud sync hooks: only run when the service is configured AND
+            // we're in a scene worth cataloguing (filters out the loading
+            // screen scene where scans also fire as a side effect of
+            // editor-open warm-up).
+            if (Sync != null && Sync.Configured && keysBeforeScan != null
+                && !string.IsNullOrEmpty(sceneName)
+                && sceneName.StartsWith("Scene_Game", StringComparison.Ordinal))
+            {
+                // 1) Push: any keys we didn't have before this scan are new.
+                //    Cheap because the seen-dict already has the full
+                //    post-scan state and we just diff against the snapshot.
+                int newCount = 0;
+                foreach (var key in _seen.Keys)
                 {
-                    _sourcesUpgraded = false;
-                    SaveCache();
+                    if (!keysBeforeScan.Contains(key)) newCount++;
                 }
-
-                // Cloud sync hooks: only run when the service is configured AND
-                // we're in a scene worth cataloguing (filters out the loading
-                // screen scene where scans also fire as a side effect of
-                // editor-open warm-up).
-                if (Sync != null && Sync.Configured && keysBeforeScan != null
-                    && !string.IsNullOrEmpty(sceneName)
-                    && sceneName.StartsWith("Scene_Game", StringComparison.Ordinal))
+                if (newCount > 0)
                 {
-                    // 1) Push: any keys we didn't have before this scan are new.
-                    //    Cheap because the seen-dict already has the full
-                    //    post-scan state and we just diff against the snapshot.
-                    int newCount = 0;
+                    var newEntries = new List<CatalogEntry>(newCount);
                     foreach (var key in _seen.Keys)
                     {
-                        if (!keysBeforeScan.Contains(key)) newCount++;
+                        if (keysBeforeScan.Contains(key)) continue;
+                        if (_seen.TryGetValue(key, out var e) && e != null)
+                            newEntries.Add(e);
                     }
-                    if (newCount > 0)
-                    {
-                        var newEntries = new List<CatalogEntry>(newCount);
-                        foreach (var key in _seen.Keys)
-                        {
-                            if (keysBeforeScan.Contains(key)) continue;
-                            if (_seen.TryGetValue(key, out var e) && e != null)
-                                newEntries.Add(e);
-                        }
-                        Sync.OnEntriesDiscovered(sceneName, newEntries);
-                        MapEditorPlugin.Logger.LogInfo(
-                            $"[CATALOG] {newEntries.Count} new entries queued for cloud push (scene '{sceneName}').");
-                    }
+                    Sync.OnEntriesDiscovered(sceneName, newEntries);
+                    MapEditorPlugin.Logger.LogInfo(
+                        $"[CATALOG] {newEntries.Count} new entries queued for cloud push (scene '{sceneName}').");
+                }
 
-                    // 2) Pull: only the first time we see this scene in this
-                    //    session. The service tracks "pulled this session" so
-                    //    warm-up rescans don't spam the backend. Schedule via
-                    //    the applyOnMainThread callback so the merge lands on
-                    //    the right thread.
-                    if (!HasScannedPreviously)   // first scan of this scene in this session
-                    {
-                        HasScannedPreviously = true;
-                        Sync.RequestPull(sceneName, ApplyPulledEntries);
-                    }
+                // 2) Pull: only the first time we see this scene in this
+                //    session. The service tracks "pulled this session" so
+                //    warm-up rescans don't spam the backend. Schedule via
+                //    the applyOnMainThread callback so the merge lands on
+                //    the right thread. Low performance mode skips the
+                //    community catalog: it doubles the list and its previews.
+                if (!HasScannedPreviously && !EditorConfig.Settings.LowPerformanceMode)
+                {
+                    HasScannedPreviously = true;
+                    Sync.RequestPull(sceneName, ApplyPulledEntries);
                 }
             }
-            catch (Exception ex)
+            phase.Stop();
+
+            // The first thing to read in a "the editor stutters" log: how much work each
+            // phase was, independent of how many frames it was spread over.
+            MapEditorPlugin.Logger.LogInfo(
+                $"[PERF] Catalog scan work: colliders {collidersMs:0}ms ({colliders.Length}), " +
+                $"renderers {renderersMs:0}ms ({renderers.Length}), other passes {otherMs:0}ms " +
+                $"({allObjects.Count} loaded objects), total {phase.Elapsed.TotalMilliseconds:0}ms.");
+
+            var finished = _scanFinished;
+            _scanFinished = null;
+            finished?.Invoke(Entries.Count - entriesBefore);
+        }
+
+        private void ScanColliderRoot(Collider col, Transform playerRoot, Dictionary<string, CatalogEntry> seen,
+            HashSet<int> visitedRoots, Dictionary<int, int> wrapperCache, bool collectAudit)
+        {
+            if (col == null) return;
+            var t = col.transform;
+            if (t == null) return;
+
+            var root = FindCandidateRoot(t, wrapperCache);
+            if (root == null) return;
+            if (!visitedRoots.Add(root.GetInstanceID())) return;
+            if (!IsValidCandidate(root, playerRoot, out string why))
             {
-                MapEditorPlugin.Logger.LogError($"[CATALOG] Scan error: {ex}");
+                if (collectAudit) _auditSkip.Add($"{why,-24} {BuildPath(root)}");
+                return;
+            }
+
+            // Nothing gets skipped for being invisible anymore: an object whose
+            // renderers are disabled still measures via its meshes, and a pure
+            // collider object (invisible wall, volume) measures via its
+            // colliders and lands in the "Invisible" category.
+            bool invisible = false;
+            var bounds = ComputeBounds(root.gameObject);
+            if (bounds.size == Vector3.zero)
+                bounds = ComputeAssetBounds(root.gameObject);
+            if (bounds.size == Vector3.zero)
+            {
+                bounds = MechanicsController.ComputeColliderBounds(root.gameObject);
+                if (bounds.size == Vector3.zero)
+                {
+                    if (collectAudit) _auditSkip.Add($"{"zero-bounds",-24} {BuildPath(root)}");
+                    return; // truly nothing measurable
+                }
+                invisible = true;
+            }
+
+            string display = CleanName(root.name);
+            string meshName = FirstMeshName(root.gameObject);
+            string key = EntryKey(display, meshName, root.gameObject);
+
+            if (seen.TryGetValue(key, out var dup))
+            {
+                UpgradeSourceIfBetter(dup, root.gameObject);
+                if (collectAudit) _auditSkip.Add($"{$"dedup -> \"{dup.DisplayName}\"",-24} {BuildPath(root)}");
+                return;
+            }
+
+            var entry = new CatalogEntry
+            {
+                DisplayName = display,
+                SourcePath = BuildPath(root),
+                Source = root.gameObject,
+                BoundsSize = bounds.size,
+                Category = invisible ? "Invisible" : Categorize(display, bounds.size),
+                HasCollider = true,
+            };
+            seen[key] = entry;
+            Entries.Add(entry);
+        }
+
+        private void ScanRendererRoot(Renderer r, Transform playerRoot, Dictionary<string, CatalogEntry> seen,
+            HashSet<int> visitedRoots, Dictionary<int, int> wrapperCache, List<DecorPickable> colliderless,
+            bool collectAudit)
+        {
+            if (r == null) return;
+            var t = r.transform;
+            if (t == null) return;
+
+            var root = FindCandidateRoot(t, wrapperCache);
+            if (root == null) return;
+            if (!visitedRoots.Add(root.GetInstanceID())) return;
+            if (!IsValidCandidate(root, playerRoot, out string why))
+            {
+                if (collectAudit) _auditSkip.Add($"{why,-24} {BuildPath(root)}");
+                return;
+            }
+
+            var bounds = ComputeBounds(root.gameObject);
+            if (bounds.size == Vector3.zero)
+            {
+                if (collectAudit) _auditSkip.Add($"{"zero-bounds",-24} {BuildPath(root)}");
+                return;
+            }
+
+            bool hasCollider = root.GetComponentInChildren<Collider>(true) != null;
+            if (!hasCollider)
+                colliderless.Add(new DecorPickable { Root = root.gameObject, Bounds = bounds });
+
+            string display = CleanName(root.name);
+            string key = EntryKey(display, FirstMeshName(root.gameObject), root.gameObject);
+            if (seen.TryGetValue(key, out var dup))
+            {
+                UpgradeSourceIfBetter(dup, root.gameObject);
+                if (collectAudit) _auditSkip.Add($"{$"dedup -> \"{dup.DisplayName}\"",-24} {BuildPath(root)}");
+                return;
+            }
+
+            seen[key] = new CatalogEntry
+            {
+                DisplayName = display,
+                SourcePath = BuildPath(root),
+                Source = root.gameObject,
+                BoundsSize = bounds.size,
+                Category = hasCollider ? Categorize(display, bounds.size) : "Decor",
+                HasCollider = hasCollider,
+            };
+            Entries.Add(seen[key]);
+        }
+
+        // Runs one pass and stops it — not the whole scan — on an exception, the way
+        // each pass used to catch its own errors.
+        private static IEnumerable<bool> Guarded(IEnumerable<bool> pass, string name)
+        {
+            using var it = pass.GetEnumerator();
+            while (true)
+            {
+                bool more;
+                try { more = it.MoveNext(); }
+                catch (Exception ex)
+                {
+                    MapEditorPlugin.Logger.LogWarning($"[CATALOG] {name} failed: {ex.Message}");
+                    yield break;
+                }
+                if (!more) yield break;
+                yield return true;
             }
         }
+
+        private static IEnumerable<bool> CollectAllGameObjects(List<(GameObject go, bool inScene)> into)
+        {
+            var all = Resources.FindObjectsOfTypeAll(Il2CppType.Of<GameObject>());
+            foreach (var obj in all)
+            {
+                yield return true;
+                var go = obj?.TryCast<GameObject>();
+                if (go == null) continue;
+                into.Add((go, go.scene.IsValid()));
+            }
+        }
+
+        private IEnumerable<bool> ScanAddressablesPass(Dictionary<string, CatalogEntry> seen)
+        {
+            ScanAddressableAssets(seen);
+            yield break;
+        }
+
+        // The game's interactables, by type: a native lookup instead of reflecting the
+        // name of every MonoBehaviour in the subtree.
+        private static bool HasMechanicComponent(GameObject go)
+            => go.GetComponentInChildren<EHS.Interactables.BoostPad.NetworkedInteractableBoostPad>(true) != null
+            || go.GetComponentInChildren<EHS.Interactables.Cannon.NetworkedInteractableCannon>(true) != null
+            || go.GetComponentInChildren<EHS.InteractableCannonVisuals>(true) != null;
 
         // Third scan source: scene objects that were DISABLED at scan time (phase-specific
         // obstacles, pooled props, despawned pickups). FindObjectsOfType never returns
         // them, so without this pass they simply look "missing" from the catalog.
         // Cloning re-activates the clone root, so they place as visible objects.
-        private void ScanInactiveSceneObjects(Dictionary<string, CatalogEntry> seen, Transform playerRoot)
+        private IEnumerable<bool> ScanInactiveSceneObjects(List<(GameObject go, bool inScene)> all,
+            Dictionary<string, CatalogEntry> seen, Transform playerRoot)
         {
-            try
+            int added = 0;
+            foreach (var (go, inScene) in all)
             {
-                var all = Resources.FindObjectsOfTypeAll(Il2CppType.Of<GameObject>());
-                int added = 0;
-                foreach (var obj in all)
+                if (!inScene) continue;                          // assets: separate pass
+                yield return true;
+                if (go == null || go.activeInHierarchy) continue; // active: already scanned
+                var t = go.transform;
+                // Only the topmost node of each disabled subtree.
+                if (t.parent != null && !t.parent.gameObject.activeInHierarchy) continue;
+                if (t.root.name == "FIH_SpawnRoot" || t.root.name == "FIH_MapObjectsRoot") continue;
+                if ((go.hideFlags & HideFlags.HideAndDontSave) != 0) continue;
+                if (!IsValidCandidate(t, playerRoot, requireActive: false)) continue;
+                if (go.GetComponentInChildren<Renderer>(true) == null) continue;
+
+                // Renderer.bounds is meaningless while disabled; measure the meshes.
+                var bounds = ComputeAssetBounds(go);
+                if (bounds.size == Vector3.zero) continue;
+
+                string display = CleanName(go.name);
+                string key = EntryKey(display, FirstMeshName(go), go);
+                if (seen.ContainsKey(key)) continue;             // active twin already listed
+
+                var entry = new CatalogEntry
                 {
-                    var go = obj?.TryCast<GameObject>();
-                    if (go == null) continue;
-                    if (!go.scene.IsValid()) continue;               // assets: separate pass
-                    if (go.activeInHierarchy) continue;              // active: already scanned
-                    var t = go.transform;
-                    // Only the topmost node of each disabled subtree.
-                    if (t.parent != null && !t.parent.gameObject.activeInHierarchy) continue;
-                    if (t.root.name == "FIH_SpawnRoot" || t.root.name == "FIH_MapObjectsRoot") continue;
-                    if ((go.hideFlags & HideFlags.HideAndDontSave) != 0) continue;
-                    if (!IsValidCandidate(t, playerRoot, requireActive: false)) continue;
-                    if (go.GetComponentInChildren<Renderer>(true) == null) continue;
-
-                    // Renderer.bounds is meaningless while disabled; measure the meshes.
-                    var bounds = ComputeAssetBounds(go);
-                    if (bounds.size == Vector3.zero) continue;
-
-                    string display = CleanName(go.name);
-                    string key = EntryKey(display, FirstMeshName(go), go);
-                    if (seen.ContainsKey(key)) continue;             // active twin already listed
-
-                    var entry = new CatalogEntry
-                    {
-                        DisplayName = display,
-                        SourcePath = BuildPath(t),
-                        Source = go,
-                        BoundsSize = bounds.size,
-                        Category = "Hidden",
-                        HasCollider = go.GetComponentInChildren<Collider>(true) != null,
-                    };
-                    seen[key] = entry;
-                    Entries.Add(entry);
-                    added++;
-                }
-                if (EditorConfig.VerboseLogs)
-                    MapEditorPlugin.Logger.LogInfo($"[CATALOG] Inactive-object scan added {added} hidden entries.");
+                    DisplayName = display,
+                    SourcePath = BuildPath(t),
+                    Source = go,
+                    BoundsSize = bounds.size,
+                    Category = "Hidden",
+                    HasCollider = go.GetComponentInChildren<Collider>(true) != null,
+                };
+                seen[key] = entry;
+                Entries.Add(entry);
+                added++;
             }
-            catch (Exception ex)
-            {
-                MapEditorPlugin.Logger.LogWarning($"[CATALOG] Inactive-object scan failed: {ex.Message}");
-            }
+            if (EditorConfig.VerboseLogs)
+                MapEditorPlugin.Logger.LogInfo($"[CATALOG] Inactive-object scan added {added} hidden entries.");
         }
 
         // The game's gameplay objects (SceneObject_*: ziplines, swing bars, fans, movers...)
@@ -607,157 +781,142 @@ namespace FIHMapEditor
         // Every gameplay object of the level, active or not. The collider and renderer
         // passes reach them only when the click-style climb happens to land on their
         // root, and a disabled level section hides all of its objects from them.
-        private void ScanGameplayObjects(Dictionary<string, CatalogEntry> seen, Transform playerRoot)
+        private IEnumerable<bool> ScanGameplayObjects(List<(GameObject go, bool inScene)> all,
+            Dictionary<string, CatalogEntry> seen, Transform playerRoot)
         {
-            try
+            int added = 0;
+            foreach (var (go, inScene) in all)
             {
-                int added = 0;
-                foreach (var obj in Resources.FindObjectsOfTypeAll(Il2CppType.Of<GameObject>()))
+                if (!inScene) continue;
+                yield return true;
+                if (go == null || !IsGameplayObjectName(go.name)) continue;
+                var t = go.transform;
+                if (t.root.name == "FIH_SpawnRoot" || t.root.name == "FIH_MapObjectsRoot") continue;
+                if ((go.hideFlags & HideFlags.HideAndDontSave) != 0) continue;
+                if (!IsValidCandidate(t, playerRoot, requireActive: false)) continue;
+                if (go.GetComponentInChildren<Renderer>(true) == null) continue;
+
+                var bounds = ComputeAssetBounds(go);
+                if (bounds.size == Vector3.zero) continue;
+                if (bounds.size.x > 120f || bounds.size.y > 120f || bounds.size.z > 120f) continue;
+
+                string display = CleanName(go.name);
+                string key = EntryKey(display, FirstMeshName(go), go);
+                if (seen.ContainsKey(key)) continue;
+
+                var entry = new CatalogEntry
                 {
-                    var go = obj?.TryCast<GameObject>();
-                    if (go == null || !go.scene.IsValid() || !IsGameplayObjectName(go.name)) continue;
-                    var t = go.transform;
-                    if (t.root.name == "FIH_SpawnRoot" || t.root.name == "FIH_MapObjectsRoot") continue;
-                    if ((go.hideFlags & HideFlags.HideAndDontSave) != 0) continue;
-                    if (!IsValidCandidate(t, playerRoot, requireActive: false)) continue;
-                    if (go.GetComponentInChildren<Renderer>(true) == null) continue;
-
-                    var bounds = ComputeAssetBounds(go);
-                    if (bounds.size == Vector3.zero) continue;
-                    if (bounds.size.x > 120f || bounds.size.y > 120f || bounds.size.z > 120f) continue;
-
-                    string display = CleanName(go.name);
-                    string key = EntryKey(display, FirstMeshName(go), go);
-                    if (seen.ContainsKey(key)) continue;
-
-                    var entry = new CatalogEntry
-                    {
-                        DisplayName = display,
-                        SourcePath = BuildPath(t),
-                        Source = go,
-                        BoundsSize = bounds.size,
-                        Category = "Mechanics",
-                        HasCollider = go.GetComponentInChildren<Collider>(true) != null,
-                    };
-                    seen[key] = entry;
-                    Entries.Add(entry);
-                    added++;
-                }
-                if (EditorConfig.VerboseLogs)
-                    MapEditorPlugin.Logger.LogInfo($"[CATALOG] Gameplay-object scan added {added} entries.");
+                    DisplayName = display,
+                    SourcePath = BuildPath(t),
+                    Source = go,
+                    BoundsSize = bounds.size,
+                    Category = "Mechanics",
+                    HasCollider = go.GetComponentInChildren<Collider>(true) != null,
+                };
+                seen[key] = entry;
+                Entries.Add(entry);
+                added++;
             }
-            catch (Exception ex)
-            {
-                MapEditorPlugin.Logger.LogWarning($"[CATALOG] Gameplay-object scan failed: {ex.Message}");
-            }
+            if (EditorConfig.VerboseLogs)
+                MapEditorPlugin.Logger.LogInfo($"[CATALOG] Gameplay-object scan added {added} entries.");
         }
 
         // Mechanics pass: the game's interactables (boost pads, cannons) are multi-part
         // assemblies — visual mesh, interact trigger and area as SIBLINGS. The generic
         // root heuristics catalog those pieces separately, so cloning one piece gives a
         // broken half-cannon. This pass catalogs the whole assembly as one entry.
-        private void ScanMechanicsAssemblies(Dictionary<string, CatalogEntry> seen)
+        private IEnumerable<bool> ScanMechanicsAssemblies(Dictionary<string, CatalogEntry> seen)
         {
-            try
+            // Found by type (pads, cannons, cannon visuals): a native search instead of
+            // reflecting the type name of every MonoBehaviour in the scene.
+            var anchors = new List<Transform>();
+            foreach (var c in UnityEngine.Object.FindObjectsOfType<EHS.Interactables.BoostPad.NetworkedInteractableBoostPad>())
+                if (c != null) anchors.Add(c.transform);
+            foreach (var c in UnityEngine.Object.FindObjectsOfType<EHS.Interactables.Cannon.NetworkedInteractableCannon>())
+                if (c != null) anchors.Add(c.transform);
+            foreach (var c in UnityEngine.Object.FindObjectsOfType<EHS.InteractableCannonVisuals>())
+                if (c != null) anchors.Add(c.transform);
+
+            int added = 0;
+            foreach (var anchor in anchors)
             {
-                int added = 0;
-                foreach (var mb in UnityEngine.Object.FindObjectsOfType<MonoBehaviour>())
+                yield return true;
+                if (anchor == null) continue;
+
+                // Assembly root: climb while the parent is still cannon-sized. Level
+                // chunk containers fail the bounds guard and stop the climb.
+                var root = anchor;
+                while (root.parent != null)
                 {
-                    if (mb == null) continue;
-                    string typeName = null;
-                    try { typeName = mb.GetIl2CppType()?.Name; }
-                    catch { }
-                    if (typeName == null) continue;
-                    if (!typeName.Contains("InteractableBoostPad") && !typeName.Contains("InteractableCannon"))
-                        continue;
-
-                    // Assembly root: climb while the parent is still cannon-sized. Level
-                    // chunk containers fail the bounds guard and stop the climb.
-                    var root = mb.transform;
-                    while (root.parent != null)
-                    {
-                        var parentBounds = ComputeBounds(root.parent.gameObject);
-                        if (parentBounds.size == Vector3.zero) break;
-                        if (parentBounds.size.x > 30f || parentBounds.size.y > 30f || parentBounds.size.z > 30f) break;
-                        root = root.parent;
-                    }
-
-                    var bounds = ComputeBounds(root.gameObject);
-                    if (bounds.size == Vector3.zero) continue;
-
-                    string display = CleanName(root.name);
-                    string key = EntryKey(display, FirstMeshName(root.gameObject), root.gameObject);
-                    if (seen.ContainsKey(key)) continue;
-
-                    var entry = new CatalogEntry
-                    {
-                        DisplayName = display,
-                        SourcePath = BuildPath(root),
-                        Source = root.gameObject,
-                        BoundsSize = bounds.size,
-                        Category = "Mechanics",
-                        HasCollider = root.GetComponentInChildren<Collider>(true) != null,
-                    };
-                    seen[key] = entry;
-                    Entries.Add(entry);
-                    added++;
+                    var parentBounds = ComputeBounds(root.parent.gameObject);
+                    if (parentBounds.size == Vector3.zero) break;
+                    if (parentBounds.size.x > 30f || parentBounds.size.y > 30f || parentBounds.size.z > 30f) break;
+                    root = root.parent;
                 }
-                if (EditorConfig.VerboseLogs)
-                    MapEditorPlugin.Logger.LogInfo($"[CATALOG] Mechanics-assembly scan added {added} entries.");
+
+                var bounds = ComputeBounds(root.gameObject);
+                if (bounds.size == Vector3.zero) continue;
+
+                string display = CleanName(root.name);
+                string key = EntryKey(display, FirstMeshName(root.gameObject), root.gameObject);
+                if (seen.ContainsKey(key)) continue;
+
+                var entry = new CatalogEntry
+                {
+                    DisplayName = display,
+                    SourcePath = BuildPath(root),
+                    Source = root.gameObject,
+                    BoundsSize = bounds.size,
+                    Category = "Mechanics",
+                    HasCollider = root.GetComponentInChildren<Collider>(true) != null,
+                };
+                seen[key] = entry;
+                Entries.Add(entry);
+                added++;
             }
-            catch (Exception ex)
-            {
-                MapEditorPlugin.Logger.LogWarning($"[CATALOG] Mechanics-assembly scan failed: {ex.Message}");
-            }
+            if (EditorConfig.VerboseLogs)
+                MapEditorPlugin.Logger.LogInfo($"[CATALOG] Mechanics-assembly scan added {added} entries.");
         }
 
         // Second scan source: prefab assets loaded from the game files. These are not in
         // any scene — the level references them, Unity keeps them in memory, and
         // Resources.FindObjectsOfTypeAll sees them. Only prefabs Unity has actually
         // loaded appear here; unreferenced bundles on disk do not.
-        private void ScanPrefabAssets(Dictionary<string, CatalogEntry> seen)
+        private IEnumerable<bool> ScanPrefabAssets(List<(GameObject go, bool inScene)> all,
+            Dictionary<string, CatalogEntry> seen)
         {
-            try
+            int added = 0;
+            foreach (var (go, inScene) in all)
             {
-                var all = Resources.FindObjectsOfTypeAll(Il2CppType.Of<GameObject>());
-                int added = 0;
-                foreach (var obj in all)
+                if (inScene) continue;                           // scene objects: already scanned
+                yield return true;
+                if (go == null || go.transform.parent != null) continue;   // prefab roots only
+                if ((go.hideFlags & HideFlags.HideAndDontSave) != 0) continue;
+                if (go.name.Contains(CLONE_MARKER)) continue;
+                if (!IsValidPrefabCandidate(go)) continue;
+
+                var bounds = ComputeAssetBounds(go);
+                if (bounds.size == Vector3.zero) continue;
+
+                string display = CleanName(go.name);
+                string key = EntryKey(display, FirstMeshName(go), go);
+                if (seen.ContainsKey(key)) continue;             // same object exists in the scene
+
+                var entry = new CatalogEntry
                 {
-                    var go = obj?.TryCast<GameObject>();
-                    if (go == null) continue;
-                    if (go.scene.IsValid()) continue;                // scene objects: already scanned
-                    if (go.transform.parent != null) continue;       // prefab roots only
-                    if ((go.hideFlags & HideFlags.HideAndDontSave) != 0) continue;
-                    if (go.name.Contains(CLONE_MARKER)) continue;
-                    if (!IsValidPrefabCandidate(go)) continue;
-
-                    var bounds = ComputeAssetBounds(go);
-                    if (bounds.size == Vector3.zero) continue;
-
-                    string display = CleanName(go.name);
-                    string key = EntryKey(display, FirstMeshName(go), go);
-                    if (seen.ContainsKey(key)) continue;             // same object exists in the scene
-
-                    var entry = new CatalogEntry
-                    {
-                        DisplayName = display,
-                        SourcePath = ASSET_PREFIX + go.name,
-                        Source = go,
-                        BoundsSize = bounds.size,
-                        Category = ASSET_CATEGORY,
-                        HasCollider = go.GetComponentInChildren<Collider>(true) != null,
-                    };
-                    seen[key] = entry;
-                    Entries.Add(entry);
-                    added++;
-                }
-                if (EditorConfig.VerboseLogs)
-                    MapEditorPlugin.Logger.LogInfo($"[CATALOG] Prefab-asset scan added {added} entries from game files.");
+                    DisplayName = display,
+                    SourcePath = ASSET_PREFIX + go.name,
+                    Source = go,
+                    BoundsSize = bounds.size,
+                    Category = ASSET_CATEGORY,
+                    HasCollider = go.GetComponentInChildren<Collider>(true) != null,
+                };
+                seen[key] = entry;
+                Entries.Add(entry);
+                added++;
             }
-            catch (Exception ex)
-            {
-                MapEditorPlugin.Logger.LogWarning($"[CATALOG] Prefab-asset scan failed: {ex.Message}");
-            }
+            if (EditorConfig.VerboseLogs)
+                MapEditorPlugin.Logger.LogInfo($"[CATALOG] Prefab-asset scan added {added} entries from game files.");
         }
 
         private bool IsValidPrefabCandidate(GameObject go)
@@ -769,17 +928,7 @@ namespace FIHMapEditor
             // canvas; it is part of them, not a UI root.
             if (go.GetComponentInChildren<Canvas>(true) != null
                 && NetworkMechanics.KindOf(go) == NetworkMechanicKind.None) return false;
-            try
-            {
-                foreach (var mb in go.GetComponentsInChildren<MonoBehaviour>(true))
-                {
-                    if (mb == null) continue;
-                    var typeName = mb.GetIl2CppType()?.Name;
-                    if (typeName == "PlayerNetworked" || typeName == "NetworkManager") return false;
-                }
-            }
-            catch { }
-            return true;
+            return !CarriesPlayerOrNetworkManager(go);
         }
 
         // Levels built with the game's MeshCombiner (the Fridge, The Grid... and most of
@@ -979,20 +1128,16 @@ namespace FIHMapEditor
             if (go.GetComponentInChildren<Canvas>(true) != null) { reason = "has-canvas(UI)"; return false; }
 
             // Skip other players / networked characters
-            try
-            {
-                foreach (var mb in go.GetComponentsInChildren<MonoBehaviour>(true))
-                {
-                    if (mb == null) continue;
-                    var typeName = mb.GetIl2CppType()?.Name;
-                    if (typeName == "PlayerNetworked" || typeName == "NetworkManager")
-                    { reason = "networked-player"; return false; }
-                }
-            }
-            catch { }
+            if (CarriesPlayerOrNetworkManager(go)) { reason = "networked-player"; return false; }
 
             return true;
         }
+
+        // A native lookup by type: reflecting the name of every MonoBehaviour under every
+        // candidate root was one of the slowest parts of a scan.
+        private static bool CarriesPlayerOrNetworkManager(GameObject go)
+            => go.GetComponentInChildren<EHS.PlayerNetworked>(true) != null
+            || go.GetComponentInChildren<FishNet.Managing.NetworkManager>(true) != null;
 
         public static Bounds ComputeBounds(GameObject go)
         {

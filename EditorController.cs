@@ -341,6 +341,7 @@ namespace FIHMapEditor
             try
             {
                 Catalog?.UpdateAddressableDiscovery();
+                Catalog?.UpdateScan();
                 // Preview work is deliberately paused outside the visible Catalog tab.
                 // Generating a thumbnail involves asset loading and a GPU readback.
                 Catalog?.Previews?.Update(_menu?.WantsCatalogPreviews == true,
@@ -680,6 +681,7 @@ namespace FIHMapEditor
             }
 
             if (Catalog.HasScanned && _warmupBaseTime > 0
+                && !EditorConfig.Settings.LowPerformanceMode && !Catalog.IsScanning
                 && _warmupScansDone < WARMUP_SCAN_DELAYS.Length
                 && Time.time >= _warmupBaseTime + WARMUP_SCAN_DELAYS[_warmupScansDone])
             {
@@ -691,11 +693,11 @@ namespace FIHMapEditor
                 int collidersNow = UnityEngine.Object.FindObjectsOfType<Collider>().Length;
                 if (Mathf.Abs(collidersNow - Catalog.LastScanColliderCount) >= 15)
                 {
-                    int before = Catalog.Entries.Count;
-                    Catalog.Scan();
-                    int added = Catalog.Entries.Count - before;
-                    if (added > 0)
-                        ShowToast($"Catalog: {added} new object(s) discovered ({Catalog.Entries.Count} total)");
+                    Catalog.BeginScan(added =>
+                    {
+                        if (added > 0)
+                            ShowToast($"Catalog: {added} new object(s) discovered ({Catalog.Entries.Count} total)");
+                    });
                 }
             }
         }
@@ -2275,7 +2277,9 @@ namespace FIHMapEditor
                 // Enter new mode
                 if (newMode == EditorMode.Editor)
                 {
-                    if (!Catalog.HasScanned) Catalog.Scan();
+                    // In the background: the first sweep of a full-game level froze the
+                    // game for seconds. The cached catalog shows meanwhile.
+                    if (!Catalog.HasScanned) Catalog.BeginScan();
                     // Arm the warm-up rescans once per scene: lazily-loaded content
                     // appears during the first minute, then the catalog stabilizes.
                     if (_warmupBaseTime < 0) _warmupBaseTime = Time.time;

@@ -50,6 +50,9 @@ namespace FIHMapEditor
         // Scales the menu window and the HUD together — for high/low-DPI displays where
         // the fixed-pixel layout reads too small or too large. Adjustable from KEYS.
         public float GuiScale { get; set; } = 1.0f;
+        // For low-end PCs: no thumbnail rendering (cached/bundled ones still show), no
+        // automatic catalog rescans and no community catalog download. Toggled in KEYS.
+        public bool LowPerformanceMode { get; set; } = false;
 
         // Best run time per map name, in seconds (kept out of the shared map files).
         public Dictionary<string, double> BestTimes { get; set; } = new Dictionary<string, double>();
@@ -115,6 +118,7 @@ namespace FIHMapEditor
                         var supaKey = Settings.SupabaseAnonKey;
                         var submit = Settings.SubmitTimesOnline;
                         var ownerTokens = Settings.OwnerTokens;
+                        var lowPerformance = Settings.LowPerformanceMode;
                         Settings = new EditorSettings
                         {
                             Version = EditorSettings.CURRENT_VERSION,
@@ -124,6 +128,7 @@ namespace FIHMapEditor
                             SupabaseAnonKey = supaKey ?? "",
                             SubmitTimesOnline = submit,
                             OwnerTokens = ownerTokens ?? new Dictionary<string, string>(),
+                            LowPerformanceMode = lowPerformance,
                         };
                         Save();
                         MapEditorPlugin.Logger.LogInfo($"Config migrated to v{EditorSettings.CURRENT_VERSION}.");
@@ -144,6 +149,7 @@ namespace FIHMapEditor
 
         // Resets keybinds and tuning values only. User DATA must survive — especially
         // OwnerTokens: losing those permanently orphans the user's uploaded online maps.
+        // Low performance mode is about the PC, not a binding, so it survives too.
         public static void ResetToDefaults()
         {
             var bestTimes = Settings.BestTimes;
@@ -152,6 +158,7 @@ namespace FIHMapEditor
             var supaKey = Settings.SupabaseAnonKey;
             var submit = Settings.SubmitTimesOnline;
             var ownerTokens = Settings.OwnerTokens;
+            var lowPerformance = Settings.LowPerformanceMode;
             Settings = new EditorSettings
             {
                 Version = EditorSettings.CURRENT_VERSION,
@@ -161,6 +168,7 @@ namespace FIHMapEditor
                 SupabaseAnonKey = supaKey ?? "",
                 SubmitTimesOnline = submit,
                 OwnerTokens = ownerTokens ?? new Dictionary<string, string>(),
+                LowPerformanceMode = lowPerformance,
             };
             Save();
         }

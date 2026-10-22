@@ -214,16 +214,16 @@ namespace FIHMapEditor
             try
             {
                 var cat = _c.Catalog;
-                if (!cat.HasScanned) return;
+                if (!cat.HasScanned || cat.IsScanning) return;
                 if (Time.unscaledTime - cat.LastScanTime < 10f) return;
                 int colliders = UnityEngine.Object.FindObjectsOfType<Collider>().Length;
                 if (Mathf.Abs(colliders - cat.LastScanColliderCount) < 15) return;
 
-                int before = cat.Entries.Count;
-                cat.Scan();
-                int added = cat.Entries.Count - before;
-                if (added > 0)
-                    _c.ShowToast($"Catalog refreshed: {added} new object(s) ({cat.Entries.Count} total)");
+                cat.BeginScan(added =>
+                {
+                    if (added > 0)
+                        _c.ShowToast($"Catalog refreshed: {added} new object(s) ({cat.Entries.Count} total)");
+                });
             }
             catch (Exception ex)
             {
@@ -318,9 +318,13 @@ namespace FIHMapEditor
             _catalogTop = _win.VScrollbar(new Rect(656, y, 14, listRect.height), "catalogScroll",
                 _catalogTop, entries.Count, CATALOG_PAGE_SIZE, CATALOG_COLUMNS);
 
-            if (!_c.Catalog.HasScanned)
+            if (!_c.Catalog.HasScanned && !_c.Catalog.IsScanning)
             {
                 GUI.Label(new Rect(25, y + 10, 400, 22), "Catalog not scanned yet — press Rescan", _styleRow);
+            }
+            else if (entries.Count == 0 && _c.Catalog.IsScanning)
+            {
+                GUI.Label(new Rect(25, y + 10, 400, 22), "Scanning the level for objects...", _styleRow);
             }
             else if (entries.Count == 0)
             {
@@ -1376,6 +1380,17 @@ namespace FIHMapEditor
             GUI.Label(new Rect(133, y + 4, 60, 20), $"{EditorConfig.Settings.GuiScale:0.00}x", _styleSmall);
             if (_win.Button(new Rect(197, y, 32, 22), "+")) AdjustUiScale(0.1f);
             if (_win.Button(new Rect(237, y, 60, 22), "Reset")) SetUiScale(1f);
+            // For PCs that stutter with the editor open.
+            bool lowPerformance = EditorConfig.Settings.LowPerformanceMode;
+            if (_win.ToggleButton(new Rect(320, y, 190, 22),
+                    $"Low performance: {(lowPerformance ? "ON" : "OFF")}", lowPerformance))
+            {
+                EditorConfig.Settings.LowPerformanceMode = !lowPerformance;
+                EditorConfig.Save();
+                _c.ShowToast(EditorConfig.Settings.LowPerformanceMode
+                    ? "Low performance ON: no new thumbnails, no automatic rescans, no community catalog"
+                    : "Low performance OFF");
+            }
             y += 32;
 
             GUI.Label(new Rect(15, y, W - 30, 60),
