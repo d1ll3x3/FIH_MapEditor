@@ -61,16 +61,11 @@ namespace FIHMapEditor
         public Vector3 OriginalScale = Vector3.one;
         public bool HasCollider = true;   // false → selectable only via bounds picking
 
-        // Mechanics: detected from the source object at spawn (or restored from the map
-        // file); the mod simulates the behavior since the game components are stripped.
-        public MechanicType Mechanic = MechanicType.None;
-        public float BoostForce = MechanicsDetector.DEFAULT_BOOST_FORCE;
-        public float CannonTimer = MechanicsDetector.DEFAULT_CANNON_TIMER;
-        public float[] CannonTarget;      // landing point (cannons + aimed pads)
-        public float[] CannonLaunchPos;   // custom hold/launch point; null = above the collider
+        // Landing point an auto-aimed pad or cannon was solved for.
+        public float[] CannonTarget;
 
         // Settings captured for a real FishNet-spawned interactable. Nullable keeps
-        // ordinary scenery and legacy locally-simulated mechanics out of the JSON.
+        // ordinary scenery out of the JSON.
         public float? NetworkBoostForce;
         public float? NetworkBoostAngle;
         public float? NetworkCannonForce;
@@ -100,13 +95,8 @@ namespace FIHMapEditor
                 Scale = VecUtil.ToArray(running ? ArmedScale : t.localScale),
                 Tint = Tint,
                 CustomColor = (float[])CustomColor?.Clone(),
-                Mechanic = Mechanic,
-                BoostForce = Mechanic == MechanicType.BoostPad ? BoostForce : (float?)null,
-                CannonTimer = Mechanic == MechanicType.Cannon ? CannonTimer : (float?)null,
-                CannonTarget = (Mechanic != MechanicType.None
-                    || NetworkBoostForce.HasValue || NetworkCannonForce.HasValue)
+                CannonTarget = NetworkBoostForce.HasValue || NetworkCannonForce.HasValue
                     ? (float[])CannonTarget?.Clone() : null,
-                CannonLaunchPos = Mechanic == MechanicType.Cannon ? (float[])CannonLaunchPos?.Clone() : null,
                 NetworkBoostForce = NetworkBoostForce,
                 NetworkBoostAngle = NetworkBoostAngle,
                 NetworkCannonForce = NetworkCannonForce,
@@ -209,20 +199,6 @@ namespace FIHMapEditor
                     position, rotation, scale, tint, restore, out bool networkPlacement);
                 if (networkPlacement) return networked; // failure must not fall back to an inert clone
 
-                // Mechanics must be detected on the SOURCE: the clone gets its
-                // EHS.Interactables components stripped below. When the source is one of
-                // OUR clones (duplicate/multi-clone), never climb ancestors — the shared
-                // FIH_MapObjectsRoot parent contains every other clone, and a cannon
-                // sibling would leak its mechanic onto a duplicated plank. Duplicates get
-                // their mechanics through `restore` instead.
-                bool sourceIsClone = source.name.Contains(ObjectCatalog.CLONE_MARKER)
-                    || source.transform.root.name == "FIH_MapObjectsRoot"
-                    || source.transform.root.name == "FIH_SpawnRoot";
-                var mechanic = MechanicsDetector.Detect(source, out float boostForce, out float cannonTimer,
-                    climbAncestors: !sourceIsClone);
-                if (mechanic == MechanicType.None)
-                    mechanic = MechanicsDetector.InferFromSourceName(sourcePath, sourceName);
-
                 string uid = !string.IsNullOrEmpty(restore?.Uid) ? restore.Uid : Guid.NewGuid().ToString("N");
 
                 // Instantiate under an INACTIVE parent so Awake doesn't run on any
@@ -251,10 +227,7 @@ namespace FIHMapEditor
                     catch (Exception ex) { MapEditorPlugin.Logger.LogWarning($"[PLACE] Reference check failed for '{sourceName}': {ex.Message}"); }
                 }
                 AssignFeatureIds(clone, uid);
-                // The game's own pad (jellies, scene boost pads) does the boosting; the
-                // editor's legacy simulation would launch the player a second time.
                 var scenePad = clone.GetComponentInChildren<SceneBoostPad>(true);
-                if (scenePad != null) mechanic = MechanicType.None;
                 var worldAnchors = CaptureWorldAnchors(clone, source);
 
                 clone.name = $"{ObjectCatalog.CleanName(sourceName)} {ObjectCatalog.CLONE_MARKER}";
@@ -324,34 +297,7 @@ namespace FIHMapEditor
                     SourceName = sourceName,
                     OriginalScale = scale,
                     HasCollider = clone.GetComponentInChildren<Collider>(true) != null,
-                    Mechanic = mechanic,
-                    BoostForce = boostForce,
-                    CannonTimer = cannonTimer,
                 };
-                if (mechanic == MechanicType.Cannon)
-                    placed.CannonTarget = VecUtil.ToArray(position + rotation * Vector3.forward * 12f);
-                else if (mechanic == MechanicType.BoostPad)
-                    // Pads are always aimed: the violet ring is where you land.
-                    placed.CannonTarget = VecUtil.ToArray(position + rotation * (Vector3.up * 5f + Vector3.forward * 4f));
-
-                // Restored data (load / undo / duplicate) wins over fresh detection —
-                // a duplicated clone can't re-detect (its own components are stripped).
-                if (restore != null && restore.Mechanic != MechanicType.None && scenePad == null)
-                {
-                    placed.Mechanic = restore.Mechanic;
-                    if (restore.BoostForce.HasValue) placed.BoostForce = restore.BoostForce.Value;
-                    if (restore.CannonTimer.HasValue) placed.CannonTimer = restore.CannonTimer.Value;
-                    if (restore.CannonTarget != null) placed.CannonTarget = (float[])restore.CannonTarget.Clone();
-                    if (restore.CannonLaunchPos != null) placed.CannonLaunchPos = (float[])restore.CannonLaunchPos.Clone();
-                    // Maps saved before always-aim: synthesize the missing target.
-                    if (placed.CannonTarget == null)
-                        placed.CannonTarget = VecUtil.ToArray(position + rotation *
-                            (placed.Mechanic == MechanicType.Cannon ? Vector3.forward * 12f : Vector3.up * 5f + Vector3.forward * 4f));
-                }
-
-                if (placed.Mechanic != MechanicType.None && EditorConfig.VerboseLogs)
-                    MapEditorPlugin.Logger.LogInfo(
-                        $"[MECH] '{clone.name}' is a {placed.Mechanic} (force={placed.BoostForce:0.#}, timer={placed.CannonTimer:0.##}s)");
 
                 // Uid/GroupId round-trip through restore so a re-spawn (undo, remote
                 // upsert, save/load) keeps the SAME identity instead of minting a new one.
@@ -404,9 +350,6 @@ namespace FIHMapEditor
                 NetworkKind = kind,
                 NetworkPrefab = prefab,
                 OriginalScale = scale,
-                // The real EHS/FishNet components own behavior. Do not also run the
-                // editor's legacy local simulation or the effect would fire twice.
-                Mechanic = MechanicType.None,
             };
             NetworkMechanics.ReadPrefabDefaults(prefab.gameObject, kind, placed);
             if (OverrideNetworkMechanicSettings) ApplyPlacementOverrides(placed);
@@ -416,7 +359,6 @@ namespace FIHMapEditor
                 if (!string.IsNullOrEmpty(restore.Uid)) placed.Uid = restore.Uid;
                 placed.GroupId = restore.GroupId;
                 if (restore.CannonTarget != null) placed.CannonTarget = (float[])restore.CannonTarget.Clone();
-                if (restore.CannonLaunchPos != null) placed.CannonLaunchPos = (float[])restore.CannonLaunchPos.Clone();
             }
 
             bool created = IsNetworkAuthority()
@@ -515,18 +457,16 @@ namespace FIHMapEditor
                 spawner.spawnOnEnable = false;
                 NetworkMechanics.ConfigureSpawner(spawner, placed);
 
-                // Same order as NetworkSpawnerPoint.SpawnAssetServer: instantiate, set the
-                // object's data, THEN spawn, so the data rides in the spawn message.
-                // Initialising after Spawn left clients with an empty data SyncVar: the
-                // cannon's launch routine then switches the player's collisions off and
-                // bails out before launching or switching them back on (host unaffected,
-                // it has the value locally). The catalog names the exact prefab variant,
-                // which the spawner's AssetReference cannot.
+                // Same order as NetworkSpawnerPoint.SpawnAssetServer. The catalog names
+                // the exact prefab variant, which the spawner's AssetReference cannot.
                 nob = UnityEngine.Object.Instantiate(prefab, position, rotation);
                 nob.transform.localScale = scale;
                 spawner.nob = nob;
                 spawner.InitializeNobServer(refs);
                 server.Spawn(nob.gameObject, null, SceneManager.GetActiveScene());
+                // The data set above isn't in the spawn message: send it explicitly, or
+                // clients get an empty SyncVar (see NetworkMechanics.HasReplicatedData).
+                NetworkMechanics.PushReplicatedData(nob.gameObject, placed.NetworkKind);
                 spawnerRoot.SetActive(true);
 
                 nob.gameObject.name = $"{ObjectCatalog.CleanName(placed.SourceName)} {ObjectCatalog.CLONE_MARKER}";
@@ -590,6 +530,14 @@ namespace FIHMapEditor
                 p.HasCollider = p.Root.GetComponentInChildren<Collider>(true) != null;
                 ApplyPlacementColor(p, p.Tint, null);
                 MapEditorPlugin.Logger.LogInfo($"[NETPLACE] Adopted replica {objectId} for '{p.SourceName}'.");
+                // A host older than v0.15.1 never sends the data; co-edit has it anyway.
+                if (!NetworkMechanics.HasReplicatedData(nob.gameObject, p.NetworkKind))
+                {
+                    NetworkMechanics.ApplyDataLocally(nob.gameObject, p);
+                    MapEditorPlugin.Logger.LogInfo(
+                        $"[NETPLACE] Replica {objectId} for '{p.SourceName}' arrived without its settings; " +
+                        "applied them from the co-edit data.");
+                }
             }
         }
 

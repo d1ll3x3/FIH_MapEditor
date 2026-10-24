@@ -68,12 +68,10 @@ namespace FIHMapEditor
 
                 case EditorMode.Editor:
                     DrawEditorBanner();
-                    DrawInteractPrompt();
                     break;
 
                 case EditorMode.Play:
                     DrawPlayHud();
-                    DrawInteractPrompt();
                     break;
             }
 
@@ -84,16 +82,6 @@ namespace FIHMapEditor
 
         // Translucent dark panel behind HUD text: readable over the level, not a block.
         private static readonly Color HudPanel = new Color(0.06f, 0.065f, 0.085f, 0.82f);
-
-        // "[E] Launch cannon" while standing next to one of our cannons.
-        private void DrawInteractPrompt()
-        {
-            string prompt = _c.Mechanics?.InteractPrompt;
-            if (string.IsNullOrEmpty(prompt)) return;
-            var rect = new Rect(Screen.width / 2f - 120, Screen.height * 0.62f, 240, 26);
-            GuiTheme.Fill(rect, HudPanel);
-            GUI.Label(rect, prompt, _styleToast);
-        }
 
         // Top banner sized to its text so the background never gets cut short.
         private void DrawTopBanner(string text)

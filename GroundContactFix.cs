@@ -4,20 +4,25 @@ using UnityEngine;
 
 namespace FIHMapEditor
 {
-    // The "infinite jump after changing maps" bug: a map swap (WipeAll) destroys the
-    // previous map's ground while the player is standing on it. Unity never fires
-    // OnCollisionExit for a destroyed collider, so EHS.GroundContact keeps that
-    // contact in its contactCacheByCollider forever → IsTouchingGround stays true →
-    // the game keeps re-arming the jump mid-air.
+    // The "infinite jump" bug: destroying a collider the player is standing on (a map
+    // swap, deleting the object, undo, a co-edit delete, a network object respawned or
+    // despawned by the host) never fires OnCollisionExit, so EHS.GroundContact keeps
+    // that contact in its contactCacheByCollider forever → IsTouchingGround stays true
+    // → the game keeps re-arming the jump mid-air.
     //
-    // The cleanup is a DEFERRED, SURGICAL purge (a couple of frames after the swap,
-    // once Destroy() has actually taken effect): remove only cache entries whose
-    // collider is dead, then let the game's own public APIs recompute. Never
-    // Clear() the whole cache — the game's collision callbacks assume live contacts
-    // stay cached, and wiping those crashes/corrupts it.
+    // The cleanup is a SURGICAL purge: remove only cache entries whose collider is
+    // dead, then let the game's own public APIs recompute. It runs a couple of frames
+    // after a map swap and otherwise checks the cache a few times a second, since many
+    // of those deletions happen outside the mod (FishNet despawns). Never Clear() the
+    // whole cache — the game's collision callbacks assume live contacts stay cached,
+    // and wiping those crashes/corrupts it.
     public static class GroundContactFix
     {
         private static int _purgeAtFrame = -1;
+        private static float _nextCheckAt;
+        private const float CHECK_INTERVAL = 0.25f;
+        private static GameObject _cachedRoot;
+        private static EHS.GroundContact _cachedContact;
 
         // Call at the end of a map swap. Destroy() is deferred to end of frame, so the
         // stale colliders only become null a frame later — purge on frame+2.
@@ -29,17 +34,25 @@ namespace FIHMapEditor
         // Called every frame from EditorController.Update.
         public static void Tick(GameObject localPlayer)
         {
-            if (_purgeAtFrame < 0 || Time.frameCount < _purgeAtFrame) return;
-            _purgeAtFrame = -1;
+            bool scheduled = _purgeAtFrame >= 0 && Time.frameCount >= _purgeAtFrame;
+            if (!scheduled && Time.unscaledTime < _nextCheckAt) return;
+            _nextCheckAt = Time.unscaledTime + CHECK_INTERVAL;
+            if (scheduled) _purgeAtFrame = -1;
             if (localPlayer == null) return;
             var root = localPlayer.transform.root != null
                 ? localPlayer.transform.root.gameObject : localPlayer;
             try
             {
-                var gc = root.GetComponentInChildren<EHS.GroundContact>(true);
+                if (_cachedRoot != root || _cachedContact == null)
+                {
+                    _cachedRoot = root;
+                    _cachedContact = root.GetComponentInChildren<EHS.GroundContact>(true);
+                }
+                var gc = _cachedContact;
                 if (gc == null)
                 {
-                    MapEditorPlugin.Logger.LogWarning("[JUMP] GroundContact not found; stale contacts NOT purged.");
+                    if (scheduled)
+                        MapEditorPlugin.Logger.LogWarning("[JUMP] GroundContact not found; stale contacts NOT purged.");
                     return;
                 }
 
@@ -72,9 +85,14 @@ namespace FIHMapEditor
             }
             catch (Exception ex)
             {
-                MapEditorPlugin.Logger.LogWarning($"[JUMP] Stale-contact purge failed: {ex.Message}");
+                // The periodic check would repeat a persistent failure four times a second.
+                if (scheduled || !_failureLogged)
+                    MapEditorPlugin.Logger.LogWarning($"[JUMP] Stale-contact purge failed: {ex.Message}");
+                _failureLogged = true;
             }
         }
+
+        private static bool _failureLogged;
 
         // F9 diagnostic: one compact dump of every flag involved in the jump/ground
         // state, so a live repro tells us exactly which one is stuck.

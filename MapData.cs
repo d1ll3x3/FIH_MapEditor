@@ -9,10 +9,6 @@ namespace FIHMapEditor
 
     public enum TintColor { None, Red, Blue, Green, Yellow }
 
-    // Game mechanic a placed clone re-implements (the original EHS.Interactables
-    // components are stripped from clones; the mod simulates the behavior instead).
-    public enum MechanicType { None, BoostPad, Cannon }
-
     public class SpawnPointData
     {
         public float[] Pos { get; set; }
@@ -138,12 +134,10 @@ namespace FIHMapEditor
         // null = legacy/off; new placements of collider-less objects default to true.
         public bool? Solid { get; set; }
 
-        // Mechanics (v4). Null/None on plain scenery and on older files.
-        public MechanicType Mechanic { get; set; } = MechanicType.None;
-        public float? BoostForce { get; set; }
-        public float? CannonTimer { get; set; }
-        public float[] CannonTarget { get; set; }    // landing point (cannons + pads)
-        public float[] CannonLaunchPos { get; set; } // where the cannon holds/launches from; null = auto
+        // Landing point an auto-aimed network pad or cannon was solved for. (Older maps
+        // also carry the fields of the removed locally simulated pads and cannons;
+        // loading ignores them.)
+        public float[] CannonTarget { get; set; }
 
         // v11: exact FishNet spawner data used by real network interactables. These are
         // per-object values, not the editor's global "next placement" defaults.

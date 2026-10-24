@@ -28,8 +28,6 @@ namespace FIHMapEditor
         public KeyCode SaveKey { get; set; } = KeyCode.S;
         // No version bump for this addition: a missing JSON field keeps the initializer
         // default, and a migration would wipe the user's other binds.
-        // E: interact with cannons/boost pads in play mode (no conflict with fly mode).
-        public KeyCode InteractKey { get; set; } = KeyCode.E;
 
         // Fly-mode movement. Space/Q default for up/down; Ctrl is reserved for editor
         // shortcuts (Ctrl+Z/D/S), so avoid it for movement.

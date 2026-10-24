@@ -262,6 +262,7 @@ namespace FIHMapEditor
             Categories.Clear();
             ColliderlessRoots.Clear();
             _seen.Clear();
+            _prefabRoots = null;
             _scanRoutine = null;
             _scanFinished = null;
             HasScanned = false;
@@ -574,7 +575,7 @@ namespace FIHMapEditor
                 bounds = ComputeAssetBounds(root.gameObject);
             if (bounds.size == Vector3.zero)
             {
-                bounds = MechanicsController.ComputeColliderBounds(root.gameObject);
+                bounds = ObjectCatalog.ComputeColliderBounds(root.gameObject);
                 if (bounds.size == Vector3.zero)
                 {
                     if (collectAudit) _auditSkip.Add($"{"zero-bounds",-24} {BuildPath(root)}");
@@ -886,11 +887,13 @@ namespace FIHMapEditor
             Dictionary<string, CatalogEntry> seen)
         {
             int added = 0;
+            var roots = new Dictionary<string, GameObject>(StringComparer.Ordinal);
             foreach (var (go, inScene) in all)
             {
                 if (inScene) continue;                           // scene objects: already scanned
                 yield return true;
                 if (go == null || go.transform.parent != null) continue;   // prefab roots only
+                roots.TryAdd(go.name, go);
                 if ((go.hideFlags & HideFlags.HideAndDontSave) != 0) continue;
                 if (go.name.Contains(CLONE_MARKER)) continue;
                 if (!IsValidPrefabCandidate(go)) continue;
@@ -915,6 +918,7 @@ namespace FIHMapEditor
                 Entries.Add(entry);
                 added++;
             }
+            _prefabRoots = roots;
             if (EditorConfig.VerboseLogs)
                 MapEditorPlugin.Logger.LogInfo($"[CATALOG] Prefab-asset scan added {added} entries from game files.");
         }
@@ -1031,22 +1035,36 @@ namespace FIHMapEditor
 
         // Re-find a prefab asset by name (used when a stored map references an asset
         // entry, or when Unity unloaded and re-loaded assets between sessions).
-        private static GameObject FindPrefabAssetByName(string name)
+        // Prefab roots by name, refreshed by every catalog scan (its prefab pass walks
+        // them anyway). A lookup used to enumerate every loaded object — ~250k in the
+        // release game — and pending map objects retried that every few seconds, which
+        // stuttered the game for as long as one of them couldn't be found.
+        private Dictionary<string, GameObject> _prefabRoots;
+
+        private GameObject FindPrefabAssetByName(string name)
         {
+            _prefabRoots ??= BuildPrefabRootIndex();
+            return _prefabRoots.TryGetValue(name, out var go) && go != null ? go : null;
+        }
+
+        // Only before the first scan of a scene; scans keep the index fresh after that.
+        private static Dictionary<string, GameObject> BuildPrefabRootIndex()
+        {
+            var roots = new Dictionary<string, GameObject>(StringComparer.Ordinal);
             try
             {
-                var all = Resources.FindObjectsOfTypeAll(Il2CppType.Of<GameObject>());
-                foreach (var obj in all)
+                foreach (var obj in Resources.FindObjectsOfTypeAll(Il2CppType.Of<GameObject>()))
                 {
                     var go = obj?.TryCast<GameObject>();
-                    if (go == null) continue;
-                    if (go.scene.IsValid()) continue;
-                    if (go.transform.parent != null) continue;
-                    if (go.name == name) return go;
+                    if (go == null || go.scene.IsValid() || go.transform.parent != null) continue;
+                    roots.TryAdd(go.name, go);
                 }
             }
-            catch { }
-            return null;
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[CATALOG] Prefab index build failed: {ex.Message}");
+            }
+            return roots;
         }
 
         // The game keeps HIDDEN duplicates of level objects (disabled templates,
@@ -1138,6 +1156,24 @@ namespace FIHMapEditor
         private static bool CarriesPlayerOrNetworkManager(GameObject go)
             => go.GetComponentInChildren<EHS.PlayerNetworked>(true) != null
             || go.GetComponentInChildren<FishNet.Managing.NetworkManager>(true) != null;
+
+        // Union of collider bounds (triggers included); renderer bounds as fallback.
+        public static Bounds ComputeColliderBounds(GameObject go)
+        {
+            bool has = false;
+            Bounds bounds = new Bounds(go.transform.position, Vector3.zero);
+            try
+            {
+                foreach (var c in go.GetComponentsInChildren<Collider>(false))
+                {
+                    if (c == null || !c.enabled) continue;
+                    if (!has) { bounds = c.bounds; has = true; }
+                    else bounds.Encapsulate(c.bounds);
+                }
+            }
+            catch { }
+            return has ? bounds : ComputeBounds(go);
+        }
 
         public static Bounds ComputeBounds(GameObject go)
         {

@@ -112,7 +112,6 @@ namespace FIHMapEditor
         private string _nameFieldSeededFrom = null;
 
         // Mechanics row state: numeric box re-seeded when the selection changes.
-        private string _mechTimerField;
         private int _mechFieldsForId = -1;
         // Slider values for the selected mechanic (meaning depends on its kind).
         private float _selA, _selB, _selC;
@@ -771,10 +770,7 @@ namespace FIHMapEditor
             y += 30;
 
             if (_win.Button(new Rect(15, y, 160, 24), "TP Player Onto It")) _c.TpPlayerOntoSelected();
-            string bringLabel = sel.Marker == "cannontarget" ? "Bring Landing Here"
-                : sel.Marker == "cannonlaunch" ? "Bring Launch Here"
-                : "Bring Object Here";
-            if (_win.Button(new Rect(180, y, 160, 24), bringLabel)) _c.BringSelectedHere();
+            if (_win.Button(new Rect(180, y, 160, 24), "Bring Object Here")) _c.BringSelectedHere();
 
             // Grouping: Ctrl+Click several objects, then Group — click any of them later
             // to reselect the whole set. Ungroup shows whenever the selection includes a
@@ -1269,8 +1265,8 @@ namespace FIHMapEditor
             return true;
         }
 
-        // Mechanic tuning row (network interactables and the legacy simulated pad/cannon),
-        // shown only when the selection has one.
+        // Tuning row of a network interactable or scene pad, shown only when the selection
+        // is one.
         private void DrawMechanicsRow(Selection sel, ref float y)
         {
             if (_c.SelectionSys.IsMulti) return;
@@ -1278,12 +1274,11 @@ namespace FIHMapEditor
             var placed = sel.Placed;
             var kind = placed.NetworkKind;
             bool scenePad = placed.ScenePad != null;
-            if (placed.Mechanic == MechanicType.None && kind == NetworkMechanicKind.None && !scenePad) return;
+            if (kind == NetworkMechanicKind.None && !scenePad) return;
 
             if (_mechFieldsForId != placed.Id)
             {
                 _mechFieldsForId = placed.Id;
-                _mechTimerField = placed.CannonTimer.ToString("0.##");
                 _selA = placed.NetworkBoostForce ?? placed.NetworkCannonForce ?? placed.NetworkBreakDelay
                     ?? placed.NetworkShatteredDuration ?? 0f;
                 _selB = placed.NetworkBoostAngle ?? placed.NetworkCannonAngle ?? placed.NetworkBreakDuration
@@ -1291,117 +1286,83 @@ namespace FIHMapEditor
                 _selC = placed.NetworkCannonAirControlBlock ?? 0.5f;
             }
 
-            if (kind != NetworkMechanicKind.None || scenePad)
+            string title = scenePad ? "Pad (local):" : $"{NetworkMechanics.Label(kind)}:";
+            GUI.Label(new Rect(15, y + 3, 145, 20), title, _styleSmall);
+            // A client's placement exists only once the host spawned it.
+            if (placed.IsReplicaAnchor && placed.Replica == null)
             {
-                string title = scenePad ? "Pad (local):" : $"{NetworkMechanics.Label(kind)}:";
-                GUI.Label(new Rect(15, y + 3, 145, 20), title, _styleSmall);
-                // A client's placement exists only once the host spawned it.
-                if (placed.IsReplicaAnchor && placed.Replica == null)
-                {
-                    GUI.Label(new Rect(165, y + 3, 300, 20), "waiting for the host to spawn it…", _styleSmall);
-                    y += 28;
-                    return;
-                }
+                GUI.Label(new Rect(165, y + 3, 300, 20), "waiting for the host to spawn it…", _styleSmall);
+                y += 28;
+                return;
+            }
 
-                Action<MapObjectData> edit = null;
-                bool changed = false;
-                if (scenePad || kind == NetworkMechanicKind.BoostPad || kind == NetworkMechanicKind.Cannon)
+            Action<MapObjectData> edit = null;
+            bool changed = false;
+            if (scenePad || kind == NetworkMechanicKind.BoostPad || kind == NetworkMechanicKind.Cannon)
+            {
+                bool cannon = kind == NetworkMechanicKind.Cannon;
+                _selA = SelectedSlider("Force", "selforce", 165, y, 150, _selA, 0f, 200f, 0.5f, "0.#");
+                _selB = SelectedSlider("Angle°", "selangle", 375, y, 110, _selB, -89f, 89f, 1f, "0");
+                if (cannon) _selC = SelectedSlider("Air", "selair", 545, y, 80, _selC, 0f, 10f, 0.05f, "0.##");
+                float force = _selA, angle = _selB, air = _selC;
+                if (cannon)
                 {
-                    bool cannon = kind == NetworkMechanicKind.Cannon;
-                    _selA = SelectedSlider("Force", "selforce", 165, y, 150, _selA, 0f, 200f, 0.5f, "0.#");
-                    _selB = SelectedSlider("Angle°", "selangle", 375, y, 110, _selB, -89f, 89f, 1f, "0");
-                    if (cannon) _selC = SelectedSlider("Air", "selair", 545, y, 80, _selC, 0f, 10f, 0.05f, "0.##");
-                    float force = _selA, angle = _selB, air = _selC;
-                    if (cannon)
+                    changed = force != placed.NetworkCannonForce || angle != placed.NetworkCannonAngle
+                        || air != placed.NetworkCannonAirControlBlock;
+                    edit = d =>
                     {
-                        changed = force != placed.NetworkCannonForce || angle != placed.NetworkCannonAngle
-                            || air != placed.NetworkCannonAirControlBlock;
-                        edit = d =>
-                        {
-                            d.NetworkCannonForce = force;
-                            d.NetworkCannonAngle = angle;
-                            d.NetworkCannonAirControlBlock = air;
-                        };
-                    }
-                    else
-                    {
-                        changed = force != placed.NetworkBoostForce || angle != placed.NetworkBoostAngle;
-                        edit = d => { d.NetworkBoostForce = force; d.NetworkBoostAngle = angle; };
-                    }
-                }
-                else if (kind == NetworkMechanicKind.BreakingPlatform)
-                {
-                    _selA = SelectedSlider("Delay s", "selbreakdelay", 165, y, 130, _selA, 0f, 10f, 0.05f, "0.##");
-                    _selB = SelectedSlider("Broken s", "selbreakdur", 375, y, 130, _selB, 0.1f, 30f, 0.1f, "0.#");
-                    float delay = _selA, broken = _selB;
-                    changed = delay != placed.NetworkBreakDelay || broken != placed.NetworkBreakDuration;
-                    edit = d => { d.NetworkBreakDelay = delay; d.NetworkBreakDuration = broken; };
-                }
-                else if (kind == NetworkMechanicKind.GlassShatter || kind == NetworkMechanicKind.HighForceGlass)
-                {
-                    _selA = SelectedSlider("Reset s", "selshatter", 165, y, 130, _selA, 0.1f, 30f, 0.1f, "0.#");
-                    float reset = _selA;
-                    if (kind == NetworkMechanicKind.HighForceGlass)
-                    {
-                        _selB = SelectedSlider("Impulse", "selimpulse", 375, y, 130, _selB, 0f, 100f, 0.5f, "0.#");
-                        float impulse = _selB;
-                        changed = reset != placed.NetworkShatteredDuration || impulse != placed.NetworkShatterImpulse;
-                        edit = d => { d.NetworkShatteredDuration = reset; d.NetworkShatterImpulse = impulse; };
-                    }
-                    else
-                    {
-                        changed = reset != placed.NetworkShatteredDuration;
-                        edit = d => d.NetworkShatteredDuration = reset;
-                    }
+                        d.NetworkCannonForce = force;
+                        d.NetworkCannonAngle = angle;
+                        d.NetworkCannonAirControlBlock = air;
+                    };
                 }
                 else
                 {
-                    GUI.Label(new Rect(165, y + 3, 220, 20), "no adjustable settings", _styleSmall);
+                    changed = force != placed.NetworkBoostForce || angle != placed.NetworkBoostAngle;
+                    edit = d => { d.NetworkBoostForce = force; d.NetworkBoostAngle = angle; };
                 }
+            }
+            else if (kind == NetworkMechanicKind.BreakingPlatform)
+            {
+                _selA = SelectedSlider("Delay s", "selbreakdelay", 165, y, 130, _selA, 0f, 10f, 0.05f, "0.##");
+                _selB = SelectedSlider("Broken s", "selbreakdur", 375, y, 130, _selB, 0.1f, 30f, 0.1f, "0.#");
+                float delay = _selA, broken = _selB;
+                changed = delay != placed.NetworkBreakDelay || broken != placed.NetworkBreakDuration;
+                edit = d => { d.NetworkBreakDelay = delay; d.NetworkBreakDuration = broken; };
+            }
+            else if (kind == NetworkMechanicKind.GlassShatter || kind == NetworkMechanicKind.HighForceGlass)
+            {
+                _selA = SelectedSlider("Reset s", "selshatter", 165, y, 130, _selA, 0.1f, 30f, 0.1f, "0.#");
+                float reset = _selA;
+                if (kind == NetworkMechanicKind.HighForceGlass)
+                {
+                    _selB = SelectedSlider("Impulse", "selimpulse", 375, y, 130, _selB, 0f, 100f, 0.5f, "0.#");
+                    float impulse = _selB;
+                    changed = reset != placed.NetworkShatteredDuration || impulse != placed.NetworkShatterImpulse;
+                    edit = d => { d.NetworkShatteredDuration = reset; d.NetworkShatterImpulse = impulse; };
+                }
+                else
+                {
+                    changed = reset != placed.NetworkShatteredDuration;
+                    edit = d => d.NetworkShatteredDuration = reset;
+                }
+            }
+            else
+            {
+                GUI.Label(new Rect(165, y + 3, 220, 20), "no adjustable settings", _styleSmall);
+            }
 
-                // Applied when the slider is released: a network object respawns per change.
-                bool dragging = _win.IsSliderHeld("selforce") || _win.IsSliderHeld("selangle")
-                    || _win.IsSliderHeld("selair") || _win.IsSliderHeld("selbreakdelay")
-                    || _win.IsSliderHeld("selbreakdur") || _win.IsSliderHeld("selshatter")
-                    || _win.IsSliderHeld("selimpulse");
-                if (edit != null && changed && !dragging)
-                {
-                    _c.ApplySelectedNetworkMechanicSettings(placed, edit);
-                    // Reload from the (possibly respawned) object: a failed apply snaps
-                    // the sliders back instead of retrying every frame.
-                    _mechFieldsForId = -1;
-                }
-                y += 28;
-            }
-            else if (placed.Mechanic == MechanicType.BoostPad)
+            // Applied when the slider is released: a network object respawns per change.
+            bool dragging = _win.IsSliderHeld("selforce") || _win.IsSliderHeld("selangle")
+                || _win.IsSliderHeld("selair") || _win.IsSliderHeld("selbreakdelay")
+                || _win.IsSliderHeld("selbreakdur") || _win.IsSliderHeld("selshatter")
+                || _win.IsSliderHeld("selimpulse");
+            if (edit != null && changed && !dragging)
             {
-                // Pads are always aimed: the violet ring is exactly where you land.
-                GUI.Label(new Rect(15, y + 3, 200, 20), "Boost pad — landing target:", _styleSmall);
-                if (_win.Button(new Rect(220, y, 115, 22), "Select target"))
-                    _c.SelectionSys.SelectMarker("cannontarget", placed.Id);
-                if (placed.CannonTarget != null && placed.Root != null)
-                {
-                    float dist = Vector3.Distance(placed.Root.transform.position, VecUtil.ToVector3(placed.CannonTarget));
-                    GUI.Label(new Rect(345, y + 3, 320, 20),
-                        $"target: {FmtVec(placed.CannonTarget)}  dist: {dist:0.#}m", _styleSmall);
-                }
-            }
-            else if (placed.Mechanic == MechanicType.Cannon)
-            {
-                GUI.Label(new Rect(15, y + 3, 125, 20), "Cannon — hold (s):", _styleSmall);
-                _mechTimerField = _win.TextField(new Rect(145, y, 60, 22), "mechtimer", _mechTimerField);
-                if (_win.Button(new Rect(211, y, 50, 22), "Set"))
-                    CommitCannonTimer(placed, ParseFloat(_mechTimerField, placed.CannonTimer));
-                if (_win.Button(new Rect(270, y, 115, 22), "Select target"))
-                    _c.SelectionSys.SelectMarker("cannontarget", placed.Id);
-                // Cyan ring: where the player is held and launched from. Del resets it.
-                if (_win.Button(new Rect(390, y, 115, 22), "Select launch"))
-                    _c.SelectionSys.SelectMarker("cannonlaunch", placed.Id);
-                if (placed.CannonTarget != null && placed.Root != null)
-                {
-                    float dist = Vector3.Distance(placed.Root.transform.position, VecUtil.ToVector3(placed.CannonTarget));
-                    GUI.Label(new Rect(512, y + 3, 155, 20), $"dist: {dist:0.#}m", _styleSmall);
-                }
+                _c.ApplySelectedNetworkMechanicSettings(placed, edit);
+                // Reload from the (possibly respawned) object: a failed apply snaps
+                // the sliders back instead of retrying every frame.
+                _mechFieldsForId = -1;
             }
             y += 28;
         }
@@ -1413,21 +1374,6 @@ namespace FIHMapEditor
             return _win.HSlider(new Rect(x + 58, y, width, 22), id, value, min, max, step, format);
         }
 
-        private void CommitCannonTimer(PlacedObject placed, float value)
-        {
-            value = Mathf.Clamp(value, 0.2f, 5f);
-            float old = placed.CannonTimer;
-            if (Mathf.Approximately(old, value)) return;
-            _c.Undo.Push("cannon timer change", () =>
-            {
-                placed.CannonTimer = old;
-                _c.SetDirty();
-            });
-            placed.CannonTimer = value;
-            _mechTimerField = value.ToString("0.##");
-            _c.SetDirty();
-        }
-
         // ───────────────────────────────────────────────────────────── KEYS ──
 
         private static readonly (string id, string label)[] BindRows =
@@ -1437,7 +1383,6 @@ namespace FIHMapEditor
             ("hub",     "Maps Hub"),
             ("play",    "Editor ↔ Play mode"),
             ("restart", "Restart run (in Play)"),
-            ("interact", "Launch cannon (near one)"),
             ("undo",    "Undo (Ctrl + key)"),
             ("save",    "Save map (Ctrl + key)"),
         };
@@ -1464,7 +1409,6 @@ namespace FIHMapEditor
             "hub" => EditorConfig.Settings.MapsHubKey,
             "play" => EditorConfig.Settings.TogglePlayKey,
             "restart" => EditorConfig.Settings.RestartRunKey,
-            "interact" => EditorConfig.Settings.InteractKey,
             "undo" => EditorConfig.Settings.UndoKey,
             "save" => EditorConfig.Settings.SaveKey,
             "flyfwd" => EditorConfig.Settings.FlyForwardKey,
@@ -1487,7 +1431,6 @@ namespace FIHMapEditor
                 case "hub": s.MapsHubKey = key; break;
                 case "play": s.TogglePlayKey = key; break;
                 case "restart": s.RestartRunKey = key; break;
-                case "interact": s.InteractKey = key; break;
                 case "undo": s.UndoKey = key; break;
                 case "save": s.SaveKey = key; break;
                 case "flyfwd": s.FlyForwardKey = key; break;

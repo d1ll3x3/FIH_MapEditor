@@ -21,8 +21,6 @@ namespace FIHMapEditor
             : Marker == "checkpoint" ? $"Checkpoint #{MarkerIndex + 1}"
             : Marker == "reset" ? $"Reset trigger #{MarkerIndex + 1}"
             : Marker == "voice" ? $"Voice trigger #{MarkerIndex + 1}"
-            : Marker == "cannontarget" ? $"Launch target (obj #{MarkerIndex:000})"
-            : Marker == "cannonlaunch" ? $"Launch point (obj #{MarkerIndex:000})"
             : Marker == "ball" ? "Soccer ball (kickoff)"
             : Marker == "soccergoal" ? $"Soccer goal #{MarkerIndex + 1}"
             : Marker == "scoreboard" ? "Scoreboard"
@@ -716,7 +714,7 @@ namespace FIHMapEditor
                 probe.Expand(1.5f);
                 foreach (var branch in colliderOnly)
                 {
-                    var cb = MechanicsController.ComputeColliderBounds(branch.gameObject);
+                    var cb = ObjectCatalog.ComputeColliderBounds(branch.gameObject);
                     if (cb.size == Vector3.zero) continue;
                     if (!probe.Intersects(cb)) return false;
                 }
@@ -725,7 +723,7 @@ namespace FIHMapEditor
             // Chunk-size guard: never merge anything level-container sized.
             var bounds = ObjectCatalog.ComputeBounds(p.gameObject);
             if (bounds.size == Vector3.zero)
-                bounds = MechanicsController.ComputeColliderBounds(p.gameObject);
+                bounds = ObjectCatalog.ComputeColliderBounds(p.gameObject);
             if (bounds.size == Vector3.zero) return false;
             return bounds.size.x <= 60f && bounds.size.y <= 60f && bounds.size.z <= 60f;
         }

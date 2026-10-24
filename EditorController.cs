@@ -63,7 +63,6 @@ namespace FIHMapEditor
         public BlankCanvasController BlankCanvas { get; private set; }
         public LevelEditManager LevelEdits { get; private set; }
         public UndoSystem Undo { get; private set; }
-        public MechanicsController Mechanics { get; private set; }
         public MultiplayerSync Multiplayer { get; private set; }
         public LeaderboardService Leaderboard { get; private set; }
         public OnlineMapService OnlineMaps { get; private set; }
@@ -113,8 +112,6 @@ namespace FIHMapEditor
         private GameObject _scoreboardProxy;
         private GameObject _voiceProxy;
         private readonly ScoreboardRenderer _scoreboardRenderer = new ScoreboardRenderer();
-        private GameObject _cannonTargetProxy;
-        private GameObject _cannonLaunchProxy;
         private GameObject _multiProxy;   // group gizmo handle at the selection centroid
 
         // Multi-drag state: each member's transform at drag start, relative to the centroid.
@@ -132,8 +129,6 @@ namespace FIHMapEditor
         // Editor-mode visuals for the marker lists (rings + red boxes), pooled.
         private readonly List<LineBox> _checkpointBoxes = new List<LineBox>();
         private readonly List<LineBox> _resetBoxes = new List<LineBox>();
-        private readonly List<LineBox> _cannonTargetBoxes = new List<LineBox>();
-        private readonly List<LineBox> _cannonLines = new List<LineBox>();
         private readonly List<LineBox> _networkArcLines = new List<LineBox>();
         private readonly LineBox _autoLaunchStartMarker = new LineBox("FIH_AutoLaunchStart");
         private readonly LineBox _autoLaunchEndMarker = new LineBox("FIH_AutoLaunchEnd");
@@ -143,7 +138,6 @@ namespace FIHMapEditor
         private readonly LineBox _ballRing = new LineBox("FIH_Line_Ball");
         private readonly List<LineBox> _soccerGoalBoxes = new List<LineBox>();
         private readonly List<LineBox> _voiceBoxes = new List<LineBox>();
-        private readonly List<LineBox> _cannonLaunchBoxes = new List<LineBox>();
         private readonly List<LineBox> _multiBoxes = new List<LineBox>();
 
         // Objects whose source couldn't be resolved (asset not loaded yet, level object
@@ -219,7 +213,6 @@ namespace FIHMapEditor
             BlankCanvas = new BlankCanvasController(Finder);
             LevelEdits = new LevelEditManager();
             Undo = new UndoSystem();
-            Mechanics = new MechanicsController(Finder, PlacedManager, Input, Fly);
             Multiplayer = new MultiplayerSync(this);
             Leaderboard = new LeaderboardService();
             OnlineMaps = new OnlineMapService();
@@ -385,7 +378,6 @@ namespace FIHMapEditor
                         break;
                     case EditorMode.Play:
                         PlayMode.Update();
-                        Mechanics.Update(Mode, acceptInput, AnyTextFieldFocused());
                         // The placed 3D scoreboard shows the live match score in play.
                         if (Scoreboard?.Pos != null)
                             _scoreboardRenderer.Draw(Scoreboard, PlayMode.ScoreA, PlayMode.ScoreB);
@@ -518,7 +510,6 @@ namespace FIHMapEditor
             if (CursorFree) SetCursorFree(false);
             PlacedManager.WipeAll();
             Mode = EditorMode.Off;
-            Mechanics.ResetState();
             // Leaving with the editor open used to keep fly "active": a player body that
             // survives the scene change stayed kinematic without collisions, and the next
             // F6 skipped Fly.Enter. Before Finder.ClearCache: Exit uses the cached body.
@@ -643,11 +634,8 @@ namespace FIHMapEditor
 
             UpdateRightMouseLook(acceptInput);
 
-            // While a cannon holds (or test-launches) the player, fly must not move it.
-            if (acceptInput && (!CursorFree || !AnyTextFieldFocused()) && !Mechanics.IsControllingPlayer)
+            if (acceptInput && (!CursorFree || !AnyTextFieldFocused()))
                 Fly.Move();
-
-            Mechanics.Update(Mode, acceptInput, AnyTextFieldFocused());
 
             if (acceptInput && CursorFree)
             {
@@ -788,13 +776,6 @@ namespace FIHMapEditor
                     case "voice":
                         // No gizmo for non-owners: moving it is editing it.
                         return sel.MarkerIndex < VoiceTriggers.Count && OwnsCurrentMap ? VoiceProxy().transform : null;
-                    case "cannontarget":
-                        // MarkerIndex holds the PlacedObject.Id (stable), not a list index.
-                        var pc = PlacedManager.FindById(sel.MarkerIndex);
-                        return pc?.CannonTarget != null ? CannonTargetProxy().transform : null;
-                    case "cannonlaunch":
-                        var lc = PlacedManager.FindById(sel.MarkerIndex);
-                        return lc != null && lc.Mechanic == MechanicType.Cannon ? CannonLaunchProxy().transform : null;
                     default: return null;
                 }
             }
@@ -879,26 +860,6 @@ namespace FIHMapEditor
                 UnityEngine.Object.DontDestroyOnLoad(_voiceProxy);
             }
             return _voiceProxy;
-        }
-
-        private GameObject CannonTargetProxy()
-        {
-            if (_cannonTargetProxy == null)
-            {
-                _cannonTargetProxy = new GameObject("FIH_CannonTargetProxy");
-                UnityEngine.Object.DontDestroyOnLoad(_cannonTargetProxy);
-            }
-            return _cannonTargetProxy;
-        }
-
-        private GameObject CannonLaunchProxy()
-        {
-            if (_cannonLaunchProxy == null)
-            {
-                _cannonLaunchProxy = new GameObject("FIH_CannonLaunchProxy");
-                UnityEngine.Object.DontDestroyOnLoad(_cannonLaunchProxy);
-            }
-            return _cannonLaunchProxy;
         }
 
         private GameObject MultiProxy()
@@ -1098,54 +1059,6 @@ namespace FIHMapEditor
                     p.localScale = Vector3.one * Mathf.Max(0.2f, Scoreboard.Scale);
                 }
             }
-
-            if (sel.Marker == "cannontarget")
-            {
-                var pc = PlacedManager.FindById(sel.MarkerIndex);
-                if (pc?.CannonTarget == null)
-                {
-                    SelectionSys.Deselect(); // cannon deleted while its target was selected
-                }
-                else
-                {
-                    var p = CannonTargetProxy().transform;
-                    if (Gizmo.IsDragging)
-                    {
-                        pc.CannonTarget = VecUtil.ToArray(p.position);
-                    }
-                    else
-                    {
-                        p.position = VecUtil.ToVector3(pc.CannonTarget);
-                        p.rotation = Quaternion.identity;  // a point: position only
-                        p.localScale = Vector3.one;
-                    }
-                }
-            }
-
-            if (sel.Marker == "cannonlaunch")
-            {
-                var lc = PlacedManager.FindById(sel.MarkerIndex);
-                if (lc == null || lc.Mechanic != MechanicType.Cannon || lc.Root == null)
-                {
-                    SelectionSys.Deselect();
-                }
-                else
-                {
-                    // Materialize the auto position so there is a stored value to edit.
-                    lc.CannonLaunchPos ??= VecUtil.ToArray(MechanicsController.GetLaunchPos(lc));
-                    var p = CannonLaunchProxy().transform;
-                    if (Gizmo.IsDragging)
-                    {
-                        lc.CannonLaunchPos = VecUtil.ToArray(p.position);
-                    }
-                    else
-                    {
-                        p.position = VecUtil.ToVector3(lc.CannonLaunchPos);
-                        p.rotation = Quaternion.identity;
-                        p.localScale = Vector3.one;
-                    }
-                }
-            }
         }
 
         private void UpdateEditorMarkers()
@@ -1250,49 +1163,6 @@ namespace FIHMapEditor
                                             VecUtil.ToRotation(g.Rot), col);
             }
 
-            // Launch targets (violet ring + aim line) of cannons and aimed pads — editor-only.
-            var cannons = new List<PlacedObject>();
-            foreach (var p in PlacedManager.Placed)
-                if (p.Mechanic != MechanicType.None && p.CannonTarget != null && p.Root != null)
-                    cannons.Add(p);
-
-            while (_cannonTargetBoxes.Count < cannons.Count)
-            {
-                _cannonTargetBoxes.Add(new LineBox($"FIH_Line_EdCannonTgt{_cannonTargetBoxes.Count}"));
-                _cannonLines.Add(new LineBox($"FIH_Line_EdCannonAim{_cannonLines.Count}"));
-            }
-            while (_cannonLaunchBoxes.Count < cannons.Count)
-                _cannonLaunchBoxes.Add(new LineBox($"FIH_Line_EdCannonLaunch{_cannonLaunchBoxes.Count}"));
-            for (int i = 0; i < _cannonTargetBoxes.Count; i++)
-            {
-                if (i >= cannons.Count)
-                {
-                    _cannonTargetBoxes[i].Hide();
-                    _cannonLines[i].Hide();
-                    if (i < _cannonLaunchBoxes.Count) _cannonLaunchBoxes[i].Hide();
-                    continue;
-                }
-                var cannon = cannons[i];
-                Vector3 target = VecUtil.ToVector3(cannon.CannonTarget);
-                var color = new Color(0.75f, 0.45f, 1f, 0.95f);
-                _cannonTargetBoxes[i].ShowRing(target + Vector3.up * 0.2f, 0.8f, color);
-
-                if (cannon.Mechanic == MechanicType.Cannon)
-                {
-                    // Cyan ring = where the cannon holds and launches you from.
-                    Vector3 launch = MechanicsController.GetLaunchPos(cannon);
-                    _cannonLaunchBoxes[i].ShowRing(launch, 0.55f, new Color(0.25f, 0.9f, 1f, 0.95f));
-                    _cannonLines[i].ShowLine(launch, target, new Color(0.75f, 0.45f, 1f, 0.5f));
-                }
-                else
-                {
-                    _cannonLaunchBoxes[i].Hide();
-                    var padBounds = MechanicsController.ComputeColliderBounds(cannon.Root);
-                    _cannonLines[i].ShowLine(padBounds.center + Vector3.up * padBounds.extents.y, target,
-                                             new Color(0.75f, 0.45f, 1f, 0.5f));
-                }
-            }
-
             UpdateNetworkMechanicArcPreviews();
 
             if (AutoLaunchStart.HasValue)
@@ -1331,7 +1201,7 @@ namespace FIHMapEditor
                 }
 
                 var placed = networkMechanics[i];
-                var bounds = MechanicsController.ComputeColliderBounds(placed.Root);
+                var bounds = ObjectCatalog.ComputeColliderBounds(placed.Root);
                 Vector3 start = bounds.center + Vector3.up * Mathf.Max(0.1f, bounds.extents.y);
                 float force = placed.NetworkBoostForce ?? placed.NetworkCannonForce ?? 20f;
                 float angle = placed.NetworkBoostAngle ?? placed.NetworkCannonAngle ?? 45f;
@@ -1351,7 +1221,7 @@ namespace FIHMapEditor
                     if (shootDirection.sqrMagnitude > 0.001f)
                     {
                         velocity = shootDirection.normalized * force;
-                        var triggerBounds = MechanicsController.ComputeColliderBounds(padObject);
+                        var triggerBounds = ObjectCatalog.ComputeColliderBounds(padObject);
                         if (triggerBounds.size.sqrMagnitude > 0.001f)
                             start = triggerBounds.center;
                     }
@@ -1465,13 +1335,10 @@ namespace FIHMapEditor
             foreach (var box in _checkpointBoxes) box.Hide();
             foreach (var box in _resetBoxes) box.Hide();
             foreach (var box in _voiceBoxes) box.Hide();
-            foreach (var box in _cannonTargetBoxes) box.Hide();
-            foreach (var box in _cannonLines) box.Hide();
             foreach (var line in _networkArcLines) line.Hide();
             _autoLaunchStartMarker.Hide();
             _autoLaunchEndMarker.Hide();
             _autoLaunchGuide.Hide();
-            foreach (var box in _cannonLaunchBoxes) box.Hide();
             foreach (var box in _multiBoxes) box.Hide();
             _ballRing.Hide();
             foreach (var box in _soccerGoalBoxes) box.Hide();
@@ -1764,8 +1631,6 @@ namespace FIHMapEditor
                 var t = source.transform;
                 var copy = PlacedManager.Spawn(source, path, name, t.position + offset, t.rotation, t.localScale, tint, restore);
                 if (copy == null) continue;
-                if (copy.Mechanic != MechanicType.None && copy.CannonTarget != null)
-                    copy.CannonTarget = VecUtil.ToArray(VecUtil.ToVector3(copy.CannonTarget) + offset);
                 copies.Add(copy);
             }
             if (copies.Count == 0) return;
@@ -1912,30 +1777,6 @@ namespace FIHMapEditor
             SetDirty();
         }
 
-        // Cannon targets live on PlacedObjects, not the marker lists, so they need
-        // their own restore closure (CaptureMarkersState would miss them).
-        private Action CaptureCannonTargetState(PlacedObject cannon)
-        {
-            if (cannon?.CannonTarget == null) return null;
-            var saved = (float[])cannon.CannonTarget.Clone();
-            return () =>
-            {
-                if (cannon.Root != null) cannon.CannonTarget = (float[])saved.Clone();
-                SetDirty();
-            };
-        }
-
-        private Action CaptureCannonLaunchState(PlacedObject cannon)
-        {
-            if (cannon == null) return null;
-            var saved = (float[])cannon.CannonLaunchPos?.Clone();   // null = auto position
-            return () =>
-            {
-                if (cannon.Root != null) cannon.CannonLaunchPos = (float[])saved?.Clone();
-                SetDirty();
-            };
-        }
-
         public void UndoLast()
         {
             if (Undo.Undo(out string label))
@@ -2025,11 +1866,7 @@ namespace FIHMapEditor
                 if (SelectionSys.Current.IsRaw) LevelEdits.CaptureOriginal(SelectionSys.Current.Raw);
 
                 // Arm the Ctrl+Z entry for this drag.
-                if (SelectionSys.Current.Marker == "cannontarget")
-                    _pendingMarkerUndo = CaptureCannonTargetState(PlacedManager.FindById(SelectionSys.Current.MarkerIndex));
-                else if (SelectionSys.Current.Marker == "cannonlaunch")
-                    _pendingMarkerUndo = CaptureCannonLaunchState(PlacedManager.FindById(SelectionSys.Current.MarkerIndex));
-                else if (SelectionSys.Current.IsMarker)
+                if (SelectionSys.Current.IsMarker)
                     _pendingMarkerUndo = CaptureMarkersState();
                 else
                     CaptureTransformUndo(gizmoTarget.gameObject, SelectionSys.Current.IsRaw);
@@ -2133,22 +1970,6 @@ namespace FIHMapEditor
                         new Vector3(4.6f * s, 2.4f * s, 0.6f), VecUtil.ToRotation(Scoreboard.Rot),
                         out float d) && d < markerDist)
                     { marker = "scoreboard"; markerIndex = 0; markerDist = d; }
-            }
-            foreach (var p in PlacedManager.Placed)
-            {
-                if (p.Mechanic == MechanicType.None || p.Root == null) continue;
-                if (p.CannonTarget != null)
-                {
-                    var b = new Bounds(VecUtil.ToVector3(p.CannonTarget), Vector3.one * 1.6f);
-                    if (SelectionSystem.RayIntersectsAABB(ray.Value, b, out float d) && d < markerDist)
-                        { marker = "cannontarget"; markerIndex = p.Id; markerDist = d; }
-                }
-                if (p.Mechanic == MechanicType.Cannon)
-                {
-                    var b = new Bounds(MechanicsController.GetLaunchPos(p), Vector3.one * 1.2f);
-                    if (SelectionSystem.RayIntersectsAABB(ray.Value, b, out float d) && d < markerDist)
-                        { marker = "cannonlaunch"; markerIndex = p.Id; markerDist = d; }
-                }
             }
             if (marker != null)
             {
@@ -2264,7 +2085,6 @@ namespace FIHMapEditor
                     AutosaveNow("leaving editor");
                     if (CursorFree) SetCursorFree(false);
                     _mapsHub.Close();
-                    Mechanics.ResetState(); // before Fly.Exit: it may need to re-enter fly first
                     Fly.Exit();
                     Highlight.Hide();
                     Gizmo.CancelDrag();
@@ -2274,7 +2094,6 @@ namespace FIHMapEditor
                 }
                 else if (old == EditorMode.Play)
                 {
-                    Mechanics.ResetState();
                     PlayMode.Exit();
                 }
 
@@ -2802,10 +2621,7 @@ namespace FIHMapEditor
                         PlacedManager.ApplyCustomColor(existing, new Color(data.CustomColor[0], data.CustomColor[1], data.CustomColor[2]));
                     else
                         PlacedManager.ApplyTint(existing, data.Tint);
-                    if (data.BoostForce.HasValue) existing.BoostForce = data.BoostForce.Value;
-                    if (data.CannonTimer.HasValue) existing.CannonTimer = data.CannonTimer.Value;
                     if (data.CannonTarget != null) existing.CannonTarget = (float[])data.CannonTarget.Clone();
-                    existing.CannonLaunchPos = data.CannonLaunchPos != null ? (float[])data.CannonLaunchPos.Clone() : null;
                     existing.CopyNetworkSettingsFrom(data);
                     PlacedObjectManager.ApplyScenePadSettings(existing);
                 }
@@ -3495,7 +3311,7 @@ namespace FIHMapEditor
             if (placed.ScenePad != null)
             {
                 direction = ScenePadShootDirection(placed.ScenePad);
-                var padBounds = MechanicsController.ComputeColliderBounds(placed.ScenePad.gameObject);
+                var padBounds = ObjectCatalog.ComputeColliderBounds(placed.ScenePad.gameObject);
                 if (padBounds.size.sqrMagnitude > 0.001f) start = padBounds.center;
                 direction.Normalize();
                 return direction.sqrMagnitude > 0.001f;
@@ -3507,7 +3323,7 @@ namespace FIHMapEditor
                     EHS.Interactables.BoostPad.NetworkedInteractableBoostPad>(true);
                 if (pad == null) return false;
                 direction = pad.FindShootDirection();
-                var bounds = MechanicsController.ComputeColliderBounds(pad.gameObject);
+                var bounds = ObjectCatalog.ComputeColliderBounds(pad.gameObject);
                 if (bounds.size.sqrMagnitude > 0.001f) start = bounds.center;
             }
             else if (placed.NetworkCannonForce.HasValue)
@@ -3611,10 +3427,6 @@ namespace FIHMapEditor
                 t.position + offset, t.rotation, scale, tint, restore);
             if (placed != null)
             {
-                // A duplicated cannon/aimed pad keeps its aim relative to itself.
-                if (placed.Mechanic != MechanicType.None && placed.CannonTarget != null)
-                    placed.CannonTarget = VecUtil.ToArray(VecUtil.ToVector3(placed.CannonTarget) + offset);
-
                 var undoTarget = placed;
                 Undo.Push($"duplicate of {sourceName}", () =>
                 {
@@ -3866,12 +3678,7 @@ namespace FIHMapEditor
                 Vector3 pos = t.position + shift;
                 last = PlacedManager.Spawn(sourceGo, sourcePath, sourceName,
                     pos, t.rotation, t.localScale, tint, restore);
-                if (last != null)
-                {
-                    if (last.Mechanic != MechanicType.None && last.CannonTarget != null)
-                        last.CannonTarget = VecUtil.ToArray(VecUtil.ToVector3(last.CannonTarget) + shift);
-                    spawnedList.Add(last);
-                }
+                if (last != null) spawnedList.Add(last);
             }
             if (last != null)
             {
@@ -3905,28 +3712,6 @@ namespace FIHMapEditor
 
             if (sel.IsMarker)
             {
-                if (sel.Marker == "cannontarget")
-                {
-                    // Mechanics are always aimed — move the ring, or delete the object.
-                    ShowToast("Launch targets can't be deleted — move it, or delete the object");
-                    SelectionSys.Deselect();
-                    return;
-                }
-                if (sel.Marker == "cannonlaunch")
-                {
-                    // Del on the launch point = back to the automatic position.
-                    var owner = PlacedManager.FindById(sel.MarkerIndex);
-                    if (owner != null && owner.CannonLaunchPos != null)
-                    {
-                        var restore = CaptureCannonLaunchState(owner);
-                        if (restore != null) Undo.Push("launch point reset", restore);
-                        owner.CannonLaunchPos = null;
-                        SetDirty();
-                        ShowToast("Launch point reset to automatic");
-                    }
-                    SelectionSys.Deselect();
-                    return;
-                }
                 // Checked before the undo snapshot so a refused delete leaves no empty step.
                 if (sel.Marker == "voice" && VoiceEditBlock()) return;
                 Undo.Push($"delete of {sel.DisplayName}", CaptureMarkersState());
@@ -4203,38 +3988,10 @@ namespace FIHMapEditor
             if (cam == null) return;
             Vector3 dest = cam.position + cam.forward * 6f;
 
-            // Marker circles (cannon landing / launch, aimed pad landing) aren't real
-            // transforms — write the world point straight into the placed object's data.
-            var sel = SelectionSys.Current;
-            if (sel.IsMarker)
+            if (SelectionSys.Current.IsMarker)
             {
-                switch (sel.Marker)
-                {
-                    case "cannontarget":
-                    {
-                        var pc = PlacedManager.FindById(sel.MarkerIndex);
-                        if (pc?.CannonTarget == null) return;
-                        Undo.Push($"bring landing of #{pc.Id:000}", CaptureCannonTargetState(pc));
-                        pc.CannonTarget = VecUtil.ToArray(dest);
-                        SetDirty();
-                        ShowToast("Landing point brought here");
-                        return;
-                    }
-                    case "cannonlaunch":
-                    {
-                        var lc = PlacedManager.FindById(sel.MarkerIndex);
-                        if (lc == null || lc.Mechanic != MechanicType.Cannon || lc.Root == null) return;
-                        lc.CannonLaunchPos ??= VecUtil.ToArray(MechanicsController.GetLaunchPos(lc));
-                        Undo.Push($"bring launch of #{lc.Id:000}", CaptureCannonLaunchState(lc));
-                        lc.CannonLaunchPos = VecUtil.ToArray(dest);
-                        SetDirty();
-                        ShowToast("Launch point brought here");
-                        return;
-                    }
-                    default:
-                        ShowToast("Bring works on objects and cannon/pad circles");
-                        return;
-                }
+                ShowToast("Bring works on objects");
+                return;
             }
 
             var t = BeginTransformEdit();
