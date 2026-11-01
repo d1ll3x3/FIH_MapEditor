@@ -284,6 +284,7 @@ namespace FIHMapEditor
         private IEnumerator<bool> _scanRoutine;
         private Action<int> _scanFinished;
         private const double SCAN_FRAME_BUDGET_MS = 4.0;
+        private const double LOW_PERF_SCAN_FRAME_BUDGET_MS = 1.5;
         public bool IsScanning => _scanRoutine != null;
 
         // collectAudit builds the skip-reason trail (BuildPath for every skipped root —
@@ -313,7 +314,9 @@ namespace FIHMapEditor
         // Called every frame by EditorController.
         public void UpdateScan()
         {
-            if (_scanRoutine != null) StepScan(SCAN_FRAME_BUDGET_MS);
+            // A weak CPU can't spare 4 ms a frame: the scan takes longer, the game stays smooth.
+            if (_scanRoutine != null)
+                StepScan(EditorConfig.Settings.LowPerformanceMode ? LOW_PERF_SCAN_FRAME_BUDGET_MS : SCAN_FRAME_BUDGET_MS);
         }
 
         private void StepScan(double budgetMs)

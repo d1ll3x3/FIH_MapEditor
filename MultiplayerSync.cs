@@ -354,6 +354,26 @@ namespace FIHMapEditor
         // by an exact type name, so build renames don't break discovery again.
         private void FindLobbyObject()
         {
+            // Known type first: a native search by type, instead of wrapping and reflecting
+            // every MonoBehaviour in the scene (a visible hitch every 5 s while no lobby
+            // manager is found). The by-method sweep stays as the rename fallback.
+            try
+            {
+                var known = UnityEngine.Object.FindObjectOfType<EHS.Steam.SteamManager>();
+                var knownMethod = known?.GetIl2CppType().GetMethod("GetLobbyMembers");
+                if (knownMethod != null)
+                {
+                    _lobby = known;
+                    _getLobbyMembers = knownMethod;
+                    MapEditorPlugin.Logger.LogInfo($"[COOP] Lobby manager found: {known.GetIl2CppType().FullName}");
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[COOP] SteamManager lookup failed, scanning by method: {ex.Message}");
+            }
+
             foreach (var mb in UnityEngine.Object.FindObjectsOfType<MonoBehaviour>())
             {
                 if (mb == null) continue;
@@ -525,11 +545,15 @@ namespace FIHMapEditor
 
         private void BroadcastPendingDiff()
         {
+            // Solo: skip the diff entirely — it serializes every object of the map. The
+            // changes aren't lost: _lastSentJson still holds the last sent state, so the
+            // first diff once a peer shows up (their REQUEST runs ComputeFullSeed) covers
+            // everything changed meanwhile.
+            var fresh = FreshPeers();
+            if (fresh.Count == 0) return;
+
             var ops = ComputeDiff();
             if (ops.Count == 0) return;
-
-            var fresh = FreshPeers();
-            if (fresh.Count == 0) return; // still tracked locally; a future REQUEST will pick it up
 
             SendOps(fresh.Select(p => p.Id), ops);
             LastSyncInfo = $"sent {ops.Count} change(s) to {fresh.Count} peer(s)";

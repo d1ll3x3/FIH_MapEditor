@@ -957,7 +957,9 @@ namespace FIHMapEditor
             bool released = false;
             foreach (var p in _placed)
             {
-                if (!p.RearmOnMove || p.Root == null) continue;
+                // State check first: it is managed, while Root == null is a native call
+                // per placed object per frame.
+                if (!p.RearmOnMove || p.Frozen != running || p.Root == null) continue;
                 if (running && p.Frozen) Thaw(p);
                 else if (!running && !p.Frozen)
                 {

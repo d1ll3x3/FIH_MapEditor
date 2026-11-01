@@ -1040,25 +1040,39 @@ namespace FIHMapEditor
 
         // ───────────────────────────────────────────────────────────── LIST ──
 
+        private readonly List<PlacedObject> _listPlaced = new List<PlacedObject>();
+        private readonly List<LevelEditRecord> _listEdits = new List<LevelEditRecord>();
+        private int _listBuiltFrame = -1;
+        private string _listBuiltFilter;
+
         private void DrawListTab()
         {
             float y = ContentY;
 
-            // Filtered views of both lists: our clones and edited level objects.
+            // Filtered views of both lists: our clones and edited level objects. Built
+            // once per frame: OnGUI runs several times per frame, and every Root check
+            // and name read is a native call per object.
             string f = _listFilter.Trim().ToLowerInvariant();
-            var placed = new List<PlacedObject>();
-            foreach (var p in _c.PlacedManager.Placed)
+            var placed = _listPlaced;
+            var edits = _listEdits;
+            if (Time.frameCount != _listBuiltFrame || f != _listBuiltFilter)
             {
-                if (p.Root == null) continue;
-                if (f != "" && !p.Root.name.ToLowerInvariant().Contains(f)) continue;
-                placed.Add(p);
-            }
-            var edits = new List<LevelEditRecord>();
-            foreach (var r in _c.LevelEdits.Records)
-            {
-                if (r.Target == null) continue;
-                if (f != "" && !r.Name.ToLowerInvariant().Contains(f)) continue;
-                edits.Add(r);
+                _listBuiltFrame = Time.frameCount;
+                _listBuiltFilter = f;
+                placed.Clear();
+                foreach (var p in _c.PlacedManager.Placed)
+                {
+                    if (p.Root == null) continue;
+                    if (f != "" && !p.Root.name.ToLowerInvariant().Contains(f)) continue;
+                    placed.Add(p);
+                }
+                edits.Clear();
+                foreach (var r in _c.LevelEdits.Records)
+                {
+                    if (r.Target == null) continue;
+                    if (f != "" && !r.Name.ToLowerInvariant().Contains(f)) continue;
+                    edits.Add(r);
+                }
             }
 
             GUI.Label(new Rect(15, y + 3, 300, 22),

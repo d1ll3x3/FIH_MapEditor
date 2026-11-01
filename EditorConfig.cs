@@ -77,6 +77,18 @@ namespace FIHMapEditor
 
         public static EditorSettings Settings { get; set; } = new EditorSettings();
 
+        // Reused: System.Text.Json rebuilds its per-type metadata for every new options
+        // instance, and favorites/best times save from the GUI.
+        private static readonly JsonSerializerOptions ReadOptions = new JsonSerializerOptions
+        {
+            Converters = { new JsonStringEnumConverter() },
+        };
+        private static readonly JsonSerializerOptions WriteOptions = new JsonSerializerOptions
+        {
+            WriteIndented = true,
+            Converters = { new JsonStringEnumConverter() },
+        };
+
         // Clamped read used by every GUI scale site — the raw setting is trusted to be
         // in range (SetUiScale clamps on write), this just guards a hand-edited config.
         public static float UiScale => Mathf.Clamp(Settings.GuiScale, 0.5f, 2f);
@@ -92,8 +104,7 @@ namespace FIHMapEditor
                 if (File.Exists(ConfigFilePath))
                 {
                     string json = File.ReadAllText(ConfigFilePath);
-                    var options = new JsonSerializerOptions { Converters = { new JsonStringEnumConverter() } };
-                    Settings = JsonSerializer.Deserialize<EditorSettings>(json, options) ?? new EditorSettings();
+                    Settings = JsonSerializer.Deserialize<EditorSettings>(json, ReadOptions) ?? new EditorSettings();
 
                     // One-shot undo of the Q/Shift swap: it rewrote saved configs on load,
                     // so restoring the defaults alone wouldn't reach anyone who had already
@@ -175,8 +186,7 @@ namespace FIHMapEditor
         {
             try
             {
-                var options = new JsonSerializerOptions { WriteIndented = true, Converters = { new JsonStringEnumConverter() } };
-                string json = JsonSerializer.Serialize(Settings, options);
+                string json = JsonSerializer.Serialize(Settings, WriteOptions);
                 File.WriteAllText(ConfigFilePath, json);
             }
             catch (Exception ex)

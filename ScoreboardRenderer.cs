@@ -55,6 +55,8 @@ namespace FIHMapEditor
             {
                 _root = new GameObject("FIH_Scoreboard");
                 UnityEngine.Object.DontDestroyOnLoad(_root);
+                _visible = true;
+                _drawn = false;
                 return true;
             }
             catch
@@ -96,16 +98,39 @@ namespace FIHMapEditor
             return _pool[index];
         }
 
+        // What the pooled lines currently show. Draw runs every frame but the board only
+        // changes on a goal or a gizmo drag; rewriting ~30 LineRenderers (each write an
+        // interop call) for an identical picture was pure overhead.
+        private bool _visible;
+        private bool _drawn;
+        private Vector3 _drawnCenter;
+        private Quaternion _drawnRot;
+        private float _drawnScale;
+        private int _drawnA, _drawnB;
+
         // Draw the board for the given scores. Call every frame while visible.
         public void Draw(ScoreboardData sb, int scoreA, int scoreB)
         {
             if (sb?.Pos == null || !EnsureCreated()) return;
             try
             {
-                _root.SetActive(true);
+                if (!_visible)
+                {
+                    _root.SetActive(true);
+                    _visible = true;
+                }
                 Vector3 center = VecUtil.ToVector3(sb.Pos);
                 Quaternion rot = VecUtil.ToRotation(sb.Rot);
                 float scale = Mathf.Clamp(sb.Scale <= 0 ? 1f : sb.Scale, 0.2f, 40f);
+                if (_drawn && center == _drawnCenter && rot == _drawnRot && scale == _drawnScale
+                    && scoreA == _drawnA && scoreB == _drawnB)
+                    return;
+                _drawn = true;
+                _drawnCenter = center;
+                _drawnRot = rot;
+                _drawnScale = scale;
+                _drawnA = scoreA;
+                _drawnB = scoreB;
                 float width = scale * 0.09f;
 
                 int used = 0;
@@ -145,6 +170,7 @@ namespace FIHMapEditor
             }
             catch (Exception ex)
             {
+                _drawn = false;   // retry the full draw next frame
                 MapEditorPlugin.Logger.LogWarning($"[SCORE] Draw error: {ex.Message}");
             }
         }
@@ -189,7 +215,9 @@ namespace FIHMapEditor
 
         public void Hide()
         {
-            if (_root != null) _root.SetActive(false);
+            if (_root == null || !_visible) return;
+            _root.SetActive(false);
+            _visible = false;
         }
     }
 }

@@ -19,13 +19,18 @@ namespace FIHMapEditor
         public Rigidbody GetCachedPlayerRigidbody() => _cachedPlayerRigidbody;
 
         private EHS.FlyCheat _cachedFlyCheat;
+        private float _flyCheatSearchCooldown = 0f;
 
         // The game's native fly cheat component. We disable it so its Shift+F toggle can
-        // never start a second fly while the editor owns the player body.
+        // never start a second fly while the editor owns the player body. Builds without
+        // it would otherwise search the whole scene every editor frame.
         public EHS.FlyCheat GetFlyCheat()
         {
             if (_cachedFlyCheat != null)
                 return _cachedFlyCheat;
+            if (Time.time < _flyCheatSearchCooldown)
+                return null;
+            _flyCheatSearchCooldown = Time.time + SEARCH_COOLDOWN_DURATION;
             try
             {
                 _cachedFlyCheat = UnityEngine.Object.FindObjectOfType<EHS.FlyCheat>();
@@ -86,18 +91,15 @@ namespace FIHMapEditor
             catch { }
 
             // Fallback: no tagged players (different game version) → scan for PlayerNetworked.
+            // A native search by type: this runs every 2 s while no player exists (level
+            // loading), and reflecting every MonoBehaviour of the scene hitched each time.
             if (players == null || players.Length == 0)
             {
                 var list = new List<GameObject>();
                 try
                 {
-                    var all = UnityEngine.Object.FindObjectsOfType<MonoBehaviour>();
-                    foreach (var mb in all)
-                    {
-                        if (mb != null && mb.GetIl2CppType() != null
-                            && mb.GetIl2CppType().Name == "PlayerNetworked")
-                            list.Add(mb.gameObject);
-                    }
+                    foreach (var pn in UnityEngine.Object.FindObjectsOfType<EHS.PlayerNetworked>())
+                        if (pn != null) list.Add(pn.gameObject);
                 }
                 catch { }
                 players = list.ToArray();
@@ -204,6 +206,7 @@ namespace FIHMapEditor
             _cachedPlayerRigidbody = null;
             _cachedCamera = null;
             _cachedFlyCheat = null;
+            _flyCheatSearchCooldown = 0f;
         }
     }
 }

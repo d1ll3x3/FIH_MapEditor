@@ -554,6 +554,8 @@ namespace FIHMapEditor
         // Detect a player body overlapping the ball and shove it. On the authority this
         // applies directly (for every player in the scene); on followers it only checks
         // the LOCAL player and sends the kick to the authority.
+        private static readonly float[] KickSampleHeights = { -0.7f, 0f, 0.8f, 1.6f };
+
         private void TryKick(bool sendRemote)
         {
             if (Time.unscaledTime < _kickCooldownUntil) return;
@@ -595,7 +597,7 @@ namespace FIHMapEditor
                 // Approximate the body as sample points up the capsule (feet or center
                 // pivot both covered), same trick as VecUtil.PlayerTouchesObb.
                 bool touching = false;
-                foreach (float dy in new[] { -0.7f, 0f, 0.8f, 1.6f })
+                foreach (float dy in KickSampleHeights)
                 {
                     if ((ballPos - (pos + Vector3.up * dy)).sqrMagnitude
                         <= (ballRadius + 0.55f) * (ballRadius + 0.55f))

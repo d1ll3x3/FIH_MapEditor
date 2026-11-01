@@ -139,6 +139,7 @@ namespace FIHMapEditor
         private readonly List<LineBox> _soccerGoalBoxes = new List<LineBox>();
         private readonly List<LineBox> _voiceBoxes = new List<LineBox>();
         private readonly List<LineBox> _multiBoxes = new List<LineBox>();
+        private readonly List<VisualBoundsCache> _multiBounds = new List<VisualBoundsCache>();
 
         // Objects whose source couldn't be resolved (asset not loaded yet, level object
         // despawned, remote object we can't find locally). NEVER dropped: they stay in
@@ -463,6 +464,13 @@ namespace FIHMapEditor
                     Cursor.visible = true;
                 }
 
+                // Outside the editor with no window open only the HUD draws, and it only
+                // paints (its buttons hit-test on Repaint): skip the Layout and input
+                // passes, which are most of the OnGUI calls of a frame.
+                bool hudOnly = Mode == EditorMode.Play
+                    || (Mode == EditorMode.Off && !_timesViewer.Visible && !_mapsHub.Visible);
+                if (hudOnly && Event.current.type != EventType.Repaint) return;
+
                 _hud.Draw();
                 if (Mode == EditorMode.Editor)
                 {
@@ -736,7 +744,10 @@ namespace FIHMapEditor
         {
             var members = SelectionSys.Multi;
             while (_multiBoxes.Count < members.Count)
+            {
                 _multiBoxes.Add(new LineBox($"FIH_Line_Multi{_multiBoxes.Count}"));
+                _multiBounds.Add(new VisualBoundsCache());
+            }
             for (int i = 0; i < _multiBoxes.Count; i++)
             {
                 if (i >= members.Count || members[i].Target == null
@@ -745,7 +756,7 @@ namespace FIHMapEditor
                     _multiBoxes[i].Hide();
                     continue;
                 }
-                var bounds = ObjectCatalog.ComputeVisualBounds(members[i].Target);
+                var bounds = _multiBounds[i].Get(members[i].Target);
                 if (bounds.size == Vector3.zero) { _multiBoxes[i].Hide(); continue; }
                 _multiBoxes[i].ShowBox(bounds, new Color(0.2f, 0.8f, 0.8f, 0.5f));
             }
@@ -1182,25 +1193,72 @@ namespace FIHMapEditor
                 _autoLaunchGuide.Hide();
         }
 
+        // What an arc preview was last sampled for. The sampling casts up to 100 rays and
+        // walks the mechanic's colliders, so it only reruns when the mechanic moved or its
+        // launch settings changed, plus once a second for world geometry edited around it.
+        private class ArcPreviewKey
+        {
+            public string Uid;
+            public Vector3 Pos;
+            public Quaternion Rot;
+            public Vector3 Scale;
+            public float Force;
+            public float Angle;
+            public float[] Target;
+            public float RefreshAt;
+        }
+        private readonly List<ArcPreviewKey> _networkArcKeys = new List<ArcPreviewKey>();
+        private const float ARC_PREVIEW_REFRESH_SECONDS = 1f;
+
+        private readonly List<PlacedObject> _networkMechanicsScratch = new List<PlacedObject>();
+
         private void UpdateNetworkMechanicArcPreviews()
         {
-            var networkMechanics = new List<PlacedObject>();
+            var networkMechanics = _networkMechanicsScratch;
+            networkMechanics.Clear();
             foreach (var placed in PlacedManager.Placed)
-                if (placed?.Root != null && (placed.NetworkBoostForce.HasValue || placed.NetworkCannonForce.HasValue))
+                if (placed != null && (placed.NetworkBoostForce.HasValue || placed.NetworkCannonForce.HasValue)
+                    && placed.Root != null)
                     networkMechanics.Add(placed);
 
             while (_networkArcLines.Count < networkMechanics.Count)
+            {
                 _networkArcLines.Add(new LineBox($"FIH_Line_NetworkArc{_networkArcLines.Count}"));
+                _networkArcKeys.Add(new ArcPreviewKey());
+            }
 
             for (int i = 0; i < _networkArcLines.Count; i++)
             {
                 if (i >= networkMechanics.Count)
                 {
                     _networkArcLines[i].Hide();
+                    _networkArcKeys[i].Uid = null;
                     continue;
                 }
 
                 var placed = networkMechanics[i];
+                var rootT = placed.Root.transform;
+                var key = _networkArcKeys[i];
+                Vector3 rootPos = rootT.position;
+                Quaternion rootRot = rootT.rotation;
+                Vector3 rootScale = rootT.localScale;
+                float keyForce = placed.NetworkBoostForce ?? placed.NetworkCannonForce ?? 20f;
+                float keyAngle = placed.NetworkBoostAngle ?? placed.NetworkCannonAngle ?? 45f;
+                if (_networkArcLines[i].Visible && key.Uid == placed.Uid
+                    && key.Pos == rootPos && key.Rot == rootRot && key.Scale == rootScale
+                    && key.Force == keyForce && key.Angle == keyAngle
+                    && SameTarget(key.Target, placed.CannonTarget)
+                    && Time.unscaledTime < key.RefreshAt)
+                    continue;
+                key.Uid = placed.Uid;
+                key.Pos = rootPos;
+                key.Rot = rootRot;
+                key.Scale = rootScale;
+                key.Force = keyForce;
+                key.Angle = keyAngle;
+                key.Target = (float[])placed.CannonTarget?.Clone();
+                key.RefreshAt = Time.unscaledTime + ARC_PREVIEW_REFRESH_SECONDS;
+
                 var bounds = ObjectCatalog.ComputeColliderBounds(placed.Root);
                 Vector3 start = bounds.center + Vector3.up * Mathf.Max(0.1f, bounds.extents.y);
                 float force = placed.NetworkBoostForce ?? placed.NetworkCannonForce ?? 20f;
@@ -1316,6 +1374,15 @@ namespace FIHMapEditor
                     : new Color(0.3f, 0.75f, 1f, 0.9f);
                 _networkArcLines[i].ShowPath(points, color);
             }
+        }
+
+        private static bool SameTarget(float[] a, float[] b)
+        {
+            if (a == null || b == null) return a == b;
+            if (a.Length != b.Length) return false;
+            for (int i = 0; i < a.Length; i++)
+                if (a[i] != b[i]) return false;
+            return true;
         }
 
         private static Vector3 LaunchVelocityFromRoot(Transform root, float force, float angle)
