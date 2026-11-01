@@ -32,16 +32,16 @@ namespace FIHMapEditor
                 _disabledColliders.Clear();
                 _disabledColliderLayers.Clear();
 
-                var playerRoot = _finder.FindPlayer()?.transform?.root;
+                var playerRoots = PlayerRootIds();
                 foreach (var r in UnityEngine.Object.FindObjectsOfType<Renderer>())
                 {
-                    if (r == null || !r.enabled || IsProtected(r.transform, playerRoot)) continue;
+                    if (r == null || !r.enabled || IsProtected(r.transform, playerRoots)) continue;
                     r.enabled = false;
                     _disabledRenderers.Add(r);
                 }
                 foreach (var c in UnityEngine.Object.FindObjectsOfType<Collider>())
                 {
-                    if (c == null || !c.enabled || IsProtected(c.transform, playerRoot)) continue;
+                    if (c == null || !c.enabled || IsProtected(c.transform, playerRoots)) continue;
                     // A layer transition produces collision exits, unlike destroying
                     // or disabling a collider that the player is currently touching.
                     int original = HiddenLayer.MoveTo(c);
@@ -67,11 +67,40 @@ namespace FIHMapEditor
             }
         }
 
-        private static bool IsProtected(Transform t, Transform playerRoot)
+        // Roots of EVERY player body in the scene, not only ours: the other players'
+        // bodies are scene roots too, and blanking them left them invisible and without
+        // collisions for everyone with blank mode on.
+        private HashSet<int> PlayerRootIds()
+        {
+            var ids = new HashSet<int>();
+            var local = _finder.FindPlayer()?.transform?.root;
+            if (local != null) ids.Add(local.GetInstanceID());
+            try
+            {
+                foreach (var p in GameObject.FindGameObjectsWithTag("Player"))
+                    if (p != null) ids.Add(p.transform.root.GetInstanceID());
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[BLANK] Player tag lookup failed: {ex.Message}");
+            }
+            try
+            {
+                foreach (var pn in UnityEngine.Object.FindObjectsOfType<EHS.PlayerNetworked>())
+                    if (pn != null) ids.Add(pn.transform.root.GetInstanceID());
+            }
+            catch (Exception ex)
+            {
+                MapEditorPlugin.Logger.LogWarning($"[BLANK] PlayerNetworked lookup failed: {ex.Message}");
+            }
+            return ids;
+        }
+
+        private static bool IsProtected(Transform t, HashSet<int> playerRoots)
         {
             if (t == null) return false;
             var root = t.root;
-            if (playerRoot != null && root == playerRoot) return true;
+            if (playerRoots.Contains(root.GetInstanceID())) return true;
             if (t.GetComponentInParent<Canvas>() != null) return true;
             if (t.GetComponentInParent<Camera>() != null) return true;
 

@@ -2,6 +2,9 @@
 
 ## What's New
 
+### Blank Base Mode
+- **Other Players Hidden**: Fixed hiding the base map also hiding the other players' bodies and switching off their collisions; every player in the session is now left out of the blank, not only the local one.
+
 ### Editor Rendering Performance
 - **Pad & Cannon Arc Previews**: Fixed the editor resampling every placed pad and cannon trajectory each frame (up to 100 raycasts per object); the arc is now recomputed only when the mechanic moves or its force, angle or landing target change, plus once a second.
 - **Marker Lines**: Reduced the per-frame cost of goal, spawn, checkpoint, reset, voice, soccer and X-ray markers by sending points in a single call and skipping writes that did not change.
