@@ -67,8 +67,16 @@ namespace FIHMapEditor
         private readonly List<LevelEditRecord> _records = new List<LevelEditRecord>();
         private readonly Dictionary<int, LevelEditRecord> _byId = new Dictionary<int, LevelEditRecord>();
 
+        // Saved edits whose object isn't in the scene right now (not loaded yet, despawned,
+        // or destroyed after being edited). NEVER dropped: they ride along in every
+        // snapshot and are retried, exactly like the placed objects' pending list.
+        // Dropping them let one failed lookup bake the loss into the next autosave — the
+        // "removed floor comes back" report — and made co-edit broadcast a revert for it.
+        private readonly List<LevelEditData> _pending = new List<LevelEditData>();
+
         public IReadOnlyList<LevelEditRecord> Records => _records;
         public int Count => _records.Count;
+        public int PendingCount => _pending.Count;
 
         // Get-or-create the record for an original object, capturing its pristine state
         // the first time. Call BEFORE mutating the transform.
@@ -499,7 +507,11 @@ namespace FIHMapEditor
         {
             foreach (var record in _records.ToArray())
                 Revert(record);
+            _pending.Clear();
         }
+
+        // A peer reverted an edit whose object we never found: forget it too.
+        public void DropPending(string path) => _pending.RemoveAll(p => p.Path == path);
 
         private void PruneIfPristine(LevelEditRecord record)
         {
@@ -517,26 +529,29 @@ namespace FIHMapEditor
             if (record.Target != null) _byId.Remove(record.Target.GetInstanceID());
         }
 
-        // Scene reload destroyed the objects and undid every edit with them.
+        // Scene reload destroyed the objects and undid every edit with them. Pending edits
+        // live on in the working snapshot, which is re-applied on the next scene.
         public void OnSceneChanged()
         {
             _records.Clear();
             _byId.Clear();
             _splits.Clear();
+            _pending.Clear();
         }
 
+        // Every edit, live or pending. A record whose object was destroyed still carries
+        // its data (ToData never reads the object), so it is saved too.
         public List<LevelEditData> Snapshot()
         {
             var list = new List<LevelEditData>();
             foreach (var r in _records)
-            {
-                if (r.Target == null) continue;
                 list.Add(r.ToData());
-            }
+            foreach (var p in _pending)
+                if (!list.Exists(d => d.Path == p.Path)) list.Add(p);
             return list;
         }
 
-        // Re-apply saved edits after a load / scene reload.
+        // Re-apply saved edits after a load / scene reload. skipped = kept pending.
         public void Apply(List<LevelEditData> edits, ObjectCatalog catalog, out int applied, out int skipped)
         {
             applied = 0;
@@ -545,31 +560,82 @@ namespace FIHMapEditor
 
             foreach (var edit in edits)
             {
-                GameObject target = null;
-                try { target = catalog.ResolveSource(edit.Path, edit.Name); }
-                catch { }
-                if (target == null)
+                if (TryApply(edit, catalog))
                 {
-                    skipped++;
-                    MapEditorPlugin.Logger.LogWarning($"[LEVELEDIT] Target not found for '{edit.Name}' ({edit.Path})");
+                    applied++;
                     continue;
                 }
-
-                var record = CaptureOriginal(target);
-                if (edit.Pos != null)
-                {
-                    var t = target.transform;
-                    t.position = VecUtil.ToVector3(edit.Pos);
-                    t.eulerAngles = VecUtil.ToVector3(edit.Rot);
-                    t.localScale = VecUtil.ToVector3(edit.Scale, Vector3.one);
-                    record.TransformEdited = true;
-                    record.EditedPos = t.position;
-                    record.EditedRot = t.rotation;
-                    record.EditedScale = t.localScale;
-                }
-                if (edit.Hidden) Hide(target);
-                applied++;
+                skipped++;
+                AddPending(edit);
+                MapEditorPlugin.Logger.LogWarning(
+                    $"[LEVELEDIT] Target not found for '{edit.Name}' ({edit.Path}) — kept pending, will retry.");
             }
+        }
+
+        // Periodic retry: pending edits whose object appeared since, and edited objects
+        // the game destroyed (back to pending, so their respawn gets the edit again).
+        // Returns how many pending edits were applied.
+        public int RetryPending(ObjectCatalog catalog)
+        {
+            foreach (var record in _records.ToArray())
+            {
+                if (record.Target != null) continue;
+                var data = record.ToData();
+                Remove(record);
+                AddPending(data);
+                MapEditorPlugin.Logger.LogInfo($"[LEVELEDIT] '{record.Name}' was destroyed by the game — edit kept pending.");
+            }
+
+            int restored = 0;
+            for (int i = _pending.Count - 1; i >= 0; i--)
+            {
+                var edit = _pending[i];
+                if (!TryApply(edit, catalog)) continue;
+                _pending.RemoveAt(i);
+                restored++;
+            }
+            if (restored > 0)
+                MapEditorPlugin.Logger.LogInfo(
+                    $"[LEVELEDIT] Re-applied {restored} pending level edit(s); {_pending.Count} still pending.");
+            return restored;
+        }
+
+        // Records whose object died are only noticed here, by the periodic retry.
+        public bool NeedsRetry()
+        {
+            if (_pending.Count > 0) return true;
+            foreach (var r in _records)
+                if (r.Target == null) return true;
+            return false;
+        }
+
+        private void AddPending(LevelEditData edit)
+        {
+            _pending.RemoveAll(p => p.Path == edit.Path);
+            _pending.Add(edit);
+        }
+
+        private bool TryApply(LevelEditData edit, ObjectCatalog catalog)
+        {
+            GameObject target = null;
+            try { target = catalog.ResolveSource(edit.Path, edit.Name); }
+            catch (Exception ex) { MapEditorPlugin.Logger.LogWarning($"[LEVELEDIT] Lookup of '{edit.Path}' failed: {ex.Message}"); }
+            if (target == null) return false;
+
+            var record = CaptureOriginal(target);
+            if (edit.Pos != null)
+            {
+                var t = target.transform;
+                t.position = VecUtil.ToVector3(edit.Pos);
+                t.eulerAngles = VecUtil.ToVector3(edit.Rot);
+                t.localScale = VecUtil.ToVector3(edit.Scale, Vector3.one);
+                record.TransformEdited = true;
+                record.EditedPos = t.position;
+                record.EditedRot = t.rotation;
+                record.EditedScale = t.localScale;
+            }
+            if (edit.Hidden) Hide(target);
+            return true;
         }
     }
 }

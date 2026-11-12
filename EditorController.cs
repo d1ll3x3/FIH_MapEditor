@@ -353,6 +353,7 @@ namespace FIHMapEditor
                 RespawnZoneGuard.Watch();
                 GroundContactFix.Tick(Finder.FindPlayer());
                 HandlePendingReapply();
+                UpdatePendingLevelEdits();
                 Multiplayer.Update();
                 PlacedManager.UpdateNetworkReplicas();
                 // Placed mechanics hold still while editing and run everywhere else.
@@ -576,6 +577,21 @@ namespace FIHMapEditor
                 ApplyMapFile(_workingSnapshot, resetDirty: false);
                 ShowToast($"Map \"{MapName}\" re-applied after scene reload");
             }
+        }
+
+        // Level edits whose object wasn't there at load (or that the game destroyed and
+        // respawned) are retried in every mode: players run the map outside the editor.
+        private float _levelEditRetryAt;
+        private const float LEVEL_EDIT_RETRY_SECONDS = 3f;
+
+        private void UpdatePendingLevelEdits()
+        {
+            if (_pendingReapply || Time.unscaledTime < _levelEditRetryAt) return;
+            _levelEditRetryAt = Time.unscaledTime + LEVEL_EDIT_RETRY_SECONDS;
+            if (!LevelEdits.NeedsRetry()) return;
+            int restored = LevelEdits.RetryPending(Catalog);
+            if (restored > 0)
+                ShowToast($"Re-applied {restored} level edit(s) — the objects finished loading");
         }
 
         private void HandleGlobalHotkeys()
@@ -2788,8 +2804,9 @@ namespace FIHMapEditor
 
         public void ApplyRemoteLevelEditRevert(string path)
         {
+            LevelEdits.DropPending(path);
             var go = Catalog.ResolveSource(path, null);
-            if (go == null) return;
+            if (go == null) { SetDirty(); return; }
             var record = LevelEdits.Find(go);
             if (record == null) return;
             if (SelectionSys.Current.IsRaw && SelectionSys.Current.Raw == go) SelectionSys.Deselect();
@@ -3022,7 +3039,7 @@ namespace FIHMapEditor
             if (editsApplied + editsSkipped > 0)
                 LoadReport += editsSkipped == 0
                     ? $", {editsApplied} level edits"
-                    : $", {editsApplied} level edits ({editsSkipped} skipped)";
+                    : $", {editsApplied} level edits ({editsSkipped} pending — object not loaded yet, kept, retrying)";
             if (resetDirty)
             {
                 Dirty = false;

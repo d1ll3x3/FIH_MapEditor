@@ -1579,12 +1579,30 @@ namespace FIHMapEditor
             }
         }
 
+        // Active scene first (where paths have always been resolved), then every other
+        // loaded scene: BuildPath numbers roots within the object's OWN scene, and the full
+        // game keeps more than one scene loaded, so an object outside the active one could
+        // never be found again.
         private static GameObject ResolvePath(string path, bool exactIndices)
+        {
+            var active = SceneManager.GetActiveScene();
+            var found = ResolvePathIn(active, path, exactIndices);
+            if (found != null) return found;
+            for (int i = 0; i < SceneManager.sceneCount; i++)
+            {
+                var scene = SceneManager.GetSceneAt(i);
+                if (scene == active || !scene.isLoaded) continue;
+                found = ResolvePathIn(scene, path, exactIndices);
+                if (found != null) return found;
+            }
+            return null;
+        }
+
+        private static GameObject ResolvePathIn(Scene scene, string path, bool exactIndices)
         {
             try
             {
                 var segments = path.Split('/');
-                var scene = SceneManager.GetActiveScene();
                 var roots = scene.GetRootGameObjects();
 
                 Transform current = null;
